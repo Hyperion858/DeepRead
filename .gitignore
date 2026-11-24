@@ -1,0 +1,12 @@
+# Runtime data — media, courses, API config stay local, never in git
+data/
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editor
+.vscode/
+.idea/
