@@ -29,14 +29,15 @@ from pipeline import backup as backup_mod
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-MEDIA_DIR = DATA_DIR / "media"
+MEDIA_DIR = DATA_DIR / "media"          # legacy: direct uploads (still readable)
+MATERIALS_DIR = DATA_DIR / "materials"  # material-centric storage: materials/<mid>/...
 COURSES_DIR = DATA_DIR / "courses"
 APP_DIR = BASE_DIR / "app"
 CONFIG_PATH = DATA_DIR / "config.json"
 
 ALLOWED_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 
-for d in (DATA_DIR, MEDIA_DIR, COURSES_DIR):
+for d in (DATA_DIR, MEDIA_DIR, MATERIALS_DIR, COURSES_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="DeepRead")
@@ -493,6 +494,224 @@ async def restore_media(request: Request):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- API: materials
+
+def new_id() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
+
+
+def material_dir(mid: str) -> Path:
+    return MATERIALS_DIR / mid
+
+
+def find_media_file(mat: dict[str, Any]) -> Path | None:
+    """Resolve a material's media file, checking legacy media dir too."""
+    p = mat.get("media_path", "")
+    if p and Path(p).exists():
+        return Path(p)
+    mid = mat.get("id", "")
+    name = mat.get("filename", "")
+    # legacy layout: data/media/<mid>.<ext>
+    if name:
+        legacy = MEDIA_DIR / name
+        if legacy.exists():
+            return legacy
+    for cand in MEDIA_DIR.glob(f"{mid}.*"):
+        return cand
+    return None
+
+
+def material_payload(mat: dict[str, Any]) -> dict[str, Any]:
+    media = find_media_file(mat)
+    return {
+        "id": mat.get("id"),
+        "title": mat.get("title", ""),
+        "filename": mat.get("filename", ""),
+        "source_url": mat.get("source_url", ""),
+        "kind": mat.get("kind", "video"),
+        "duration": mat.get("duration", 0),
+        "size_mb": round(media.stat().st_size / 1024 / 1024, 1) if media else 0,
+        "media_exists": bool(media),
+        "course_id": mat.get("course_id", ""),
+        "created_at": mat.get("created_at", ""),
+        "note": mat.get("note", ""),
+    }
+
+
+@app.get("/api/materials")
+def list_materials():
+    items = []
+    for mdir in sorted(MATERIALS_DIR.iterdir(), reverse=True):
+        if not mdir.is_dir():
+            continue
+        mat = read_json(mdir / "material.json") or {}
+        if not mat:
+            continue
+        items.append(material_payload(mat))
+    return items
+
+
+@app.post("/api/materials/upload")
+async def material_upload(file: UploadFile = File(...)):
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_EXT:
+        raise HTTPException(400, f"不支持的文件类型: {ext}")
+    mid = new_id()
+    mdir = material_dir(mid)
+    mdir.mkdir(parents=True)
+    dest = mdir / f"media{ext}"
+    with dest.open("wb") as fh:
+        shutil.copyfileobj(file.file, fh)
+    kind = "audio" if ext in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"} else "video"
+    title = Path(file.filename or mid).stem
+    write_json(mdir / "material.json", {
+        "id": mid,
+        "title": title,
+        "filename": file.filename,
+        "media_path": str(dest),
+        "kind": kind,
+        "source_url": "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    return {"id": mid, "title": title, "kind": kind}
+
+
+@app.post("/api/materials/import")
+async def material_import(request: Request):
+    """Import a material from a share URL (douyin etc.): download only."""
+    body = await request.json()
+    url = (body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "缺少链接")
+    mid = new_id()
+    mdir = material_dir(mid)
+    mdir.mkdir(parents=True)
+    write_json(mdir / "material.json", {
+        "id": mid,
+        "title": "正在获取视频信息…",
+        "filename": "",
+        "media_path": "",
+        "kind": "video",
+        "source_url": url,
+        "status": "downloading",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    threading.Thread(target=_download_material, args=(mid, url), daemon=True).start()
+    return {"id": mid, "title": url}
+
+
+MATERIAL_JOBS: dict[str, JobState] = {}
+
+
+def _download_material(mid: str, url: str) -> None:
+    mdir = material_dir(mid)
+    job = MATERIAL_JOBS.setdefault(mid, JobState())
+    try:
+        mat = read_json(mdir / "material.json", {}) or {}
+        mat["status"] = "downloading"
+        write_json(mdir / "material.json", mat)
+        result = fetcher.download(url, mdir, "media",
+                                  progress_cb=lambda p, msg: None,
+                                  should_cancel=lambda: bool(job and job.cancelled))
+        media_path = result["path"]
+        mat.update({
+            "title": result["title"] or url,
+            "filename": media_path.name,
+            "media_path": str(media_path),
+            "kind": result["kind"],
+            "duration": result.get("duration") or 0,
+            "status": "ready",
+        })
+        write_json(mdir / "material.json", mat)
+    except Exception as exc:  # noqa: BLE001
+        mat = read_json(mdir / "material.json", {}) or {}
+        mat["status"] = "error"
+        mat["error"] = str(exc)
+        write_json(mdir / "material.json", mat)
+    finally:
+        MATERIAL_JOBS.pop(mid, None)
+
+
+@app.post("/api/materials/{mid}/rename")
+async def material_rename(mid: str, request: Request):
+    mdir = material_dir(mid)
+    if not mdir.exists():
+        raise HTTPException(404, "素材不存在")
+    body = await request.json()
+    mat = read_json(mdir / "material.json", {}) or {}
+    mat["title"] = (body.get("title") or "").strip() or mat.get("title", "")
+    write_json(mdir / "material.json", mat)
+    return {"ok": True}
+
+
+@app.delete("/api/materials/{mid}")
+def material_delete(mid: str):
+    mdir = material_dir(mid)
+    mat = read_json(mdir / "material.json", {}) or {}
+    course_id = mat.get("course_id", "")
+    if course_id and (COURSES_DIR / course_id).exists():
+        raise HTTPException(409, f"该素材已生成课程「{course_id}」，请先删除课程")
+    shutil.rmtree(mdir, ignore_errors=True)
+    # also clean legacy media if it lives there
+    for f in MEDIA_DIR.glob(f"{mid}.*"):
+        f.unlink(missing_ok=True)
+    return {"ok": True}
+
+
+@app.post("/api/materials/{mid}/generate")
+def material_generate(mid: str):
+    """Create a course from a material and start the pipeline."""
+    mdir = material_dir(mid)
+    if not mdir.exists():
+        raise HTTPException(404, "素材不存在")
+    mat = read_json(mdir / "material.json", {}) or {}
+    if mat.get("status") == "downloading":
+        raise HTTPException(409, "素材还在下载中")
+    media = find_media_file(mat)
+    if not media:
+        raise HTTPException(400, "素材媒体文件缺失")
+    if mat.get("course_id") and (COURSES_DIR / mat["course_id"]).exists():
+        raise HTTPException(409, "该素材已生成课程")
+    cfg = load_config()
+    if not cfg.get("providers"):
+        raise HTTPException(400, "请先在模型配置页配置 API")
+    if not get_provider_cfg(cfg, "asr").get("base_url"):
+        raise HTTPException(400, "转写 provider 未配置")
+    if not get_provider_cfg(cfg, "chat").get("base_url"):
+        raise HTTPException(400, "Chat provider 未配置")
+
+    cid = new_course_id()
+    cdir = course_dir(cid)
+    cdir.mkdir(parents=True)
+    write_json(cdir / "meta.json", {
+        "id": cid,
+        "material_id": mid,
+        "title": mat.get("title") or cid,
+        "filename": media.name,
+        "kind": mat.get("kind", "video"),
+        "media_path": str(media),   # course points INTO the material storage
+        "source_url": mat.get("source_url", ""),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    write_json(cdir / "status.json", {"stage": "uploaded", "detail": "已创建，等待生成", "progress": 0})
+    mat["course_id"] = cid
+    write_json(mdir / "material.json", mat)
+    JOBS[cid] = JobState()
+    threading.Thread(target=run_pipeline, args=(cid,), daemon=True).start()
+    return {"id": cid, "title": mat.get("title")}
+
+
+@app.get("/media/{mid}/material")
+def media_material_file(mid: str, request: Request):
+    """Stream a material's media file (Range supported)."""
+    mdir = material_dir(mid)
+    mat = read_json(mdir / "material.json", {}) or {}
+    media = find_media_file(mat)
+    if not media:
+        raise HTTPException(404, "媒体文件不存在")
+    return _stream_media(media, request)
+
+
 # ---------------------------------------------------------------- API: courses
 
 @app.get("/api/courses")
@@ -522,75 +741,48 @@ def list_courses():
 
 @app.post("/api/courses/upload")
 async def upload(file: UploadFile = File(...)):
+    """Legacy direct-to-course upload (kept for compatibility).
+
+    Stores the file as a material, then creates a course from it.
+    """
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXT:
         raise HTTPException(400, f"不支持的文件类型: {ext}")
+    mid = new_id()
+    mdir = material_dir(mid)
+    mdir.mkdir(parents=True)
+    dest = mdir / f"media{ext}"
+    with dest.open("wb") as fh:
+        shutil.copyfileobj(file.file, fh)
+    kind = "audio" if ext in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"} else "video"
+    title = Path(file.filename or mid).stem
+    mat = {
+        "id": mid,
+        "title": title,
+        "filename": file.filename,
+        "media_path": str(dest),
+        "kind": kind,
+        "source_url": "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_json(mdir / "material.json", mat)
+    # create the course immediately (same as material_generate, without the API guards)
     cid = new_course_id()
     cdir = course_dir(cid)
     cdir.mkdir(parents=True)
-    media_path = MEDIA_DIR / f"{cid}{ext}"
-    with media_path.open("wb") as fh:
-        shutil.copyfileobj(file.file, fh)
-    kind = "audio" if ext in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"} else "video"
-    title = Path(file.filename or cid).stem
     write_json(cdir / "meta.json", {
         "id": cid,
+        "material_id": mid,
         "title": title,
-        "filename": file.filename,
+        "filename": dest.name,
         "kind": kind,
-        "media_path": str(media_path),
+        "media_path": str(dest),
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     write_json(cdir / "status.json", {"stage": "uploaded", "detail": "已上传，等待生成", "progress": 0})
+    mat["course_id"] = cid
+    write_json(mdir / "material.json", mat)
     return {"id": cid, "title": title, "kind": kind}
-
-
-@app.post("/api/courses/import")
-async def import_url(request: Request):
-    """Create a course from a share URL (douyin etc.): download + generate."""
-    body = await request.json()
-    url = (body.get("url") or "").strip()
-    if not url:
-        raise HTTPException(400, "缺少链接")
-    cid = new_course_id()
-    cdir = course_dir(cid)
-    cdir.mkdir(parents=True)
-    write_json(cdir / "meta.json", {
-        "id": cid,
-        "title": "正在获取视频信息…",
-        "filename": "",
-        "kind": "video",
-        "media_path": "",
-        "source_url": url,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    })
-    write_json(cdir / "status.json", {"stage": "downloading", "detail": "链接导入中…", "progress": 0})
-    threading.Thread(target=_download_and_generate, args=(cid, url), daemon=True).start()
-    return {"id": cid, "title": url}
-
-
-def _download_and_generate(cid: str, url: str) -> None:
-    cdir = course_dir(cid)
-    job = JOBS.setdefault(cid, JobState())
-    try:
-        set_stage(cid, "downloading", "下载视频…", 0.02)
-        result = fetcher.download(url, MEDIA_DIR, cid,
-                                  progress_cb=lambda p, msg: set_stage(cid, "downloading", msg, 0.02 + 0.02 * p))
-        media_path = result["path"]
-        meta = read_json(cdir / "meta.json", {}) or {}
-        meta.update({
-            "title": result["title"] or url,
-            "filename": media_path.name,
-            "kind": result["kind"],
-            "media_path": str(media_path),
-            "duration": result.get("duration") or 0,
-        })
-        write_json(cdir / "meta.json", meta)
-        JOBS.pop(cid, None)
-        run_pipeline(cid)
-    except Exception as exc:  # noqa: BLE001
-        JOBS.pop(cid, None)
-        set_stage(cid, "error", f"下载失败: {exc}")
 
 
 @app.post("/api/courses/{cid}/generate")
@@ -698,15 +890,7 @@ async def post_progress(cid: str, request: Request):
 
 # ---------------------------------------------------------------- media streaming
 
-@app.get("/media/{cid}/file")
-def media_file(cid: str, request: Request):
-    cdir = course_dir(cid)
-    if not cdir.exists():
-        raise HTTPException(404, "课程不存在")
-    meta = read_json(cdir / "meta.json", {}) or {}
-    media_path = Path(meta.get("media_path", ""))
-    if not media_path.exists():
-        raise HTTPException(404, "媒体文件不存在")
+def _stream_media(media_path: Path, request: Request):
     size = media_path.stat().st_size
     content_type = "video/mp4" if media_path.suffix == ".mp4" else "application/octet-stream"
     range_header = request.headers.get("range")
@@ -745,6 +929,24 @@ def media_file(cid: str, request: Request):
             },
         )
     return FileResponse(media_path, media_type=content_type, headers={"Accept-Ranges": "bytes"})
+
+
+@app.get("/media/{cid}/file")
+def media_file(cid: str, request: Request):
+    cdir = course_dir(cid)
+    if not cdir.exists():
+        raise HTTPException(404, "课程不存在")
+    meta = read_json(cdir / "meta.json", {}) or {}
+    media_path = Path(meta.get("media_path", ""))
+    if not media_path.exists():
+        # fall back to the material storage when the course references a material
+        mid = meta.get("material_id", "")
+        if mid:
+            mat = read_json(material_dir(mid) / "material.json", {}) or {}
+            media_path = Path(mat.get("media_path", ""))
+        if not media_path.exists():
+            raise HTTPException(404, "媒体文件不存在")
+    return _stream_media(media_path, request)
 
 
 # ---------------------------------------------------------------- static frontend

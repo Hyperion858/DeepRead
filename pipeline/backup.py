@@ -11,6 +11,7 @@ from typing import Any
 
 COURSE_FILES = ("meta.json", "source.json", "lesson.json", "progress.json",
                 "calibration.json", "embedded.srt")
+MATERIAL_FILES = ("material.json", "embedded.srt")
 
 MEDIA_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 
@@ -26,6 +27,7 @@ def create_backup(data_dir: Path, backups_dir: Path, note: str = "",
         config = data_dir / "config.json"
         if config.exists():
             zf.write(config, "config.json")
+        # courses
         for cdir in sorted((data_dir / "courses").iterdir()):
             if not cdir.is_dir():
                 continue
@@ -33,31 +35,55 @@ def create_backup(data_dir: Path, backups_dir: Path, note: str = "",
                 f = cdir / name
                 if f.exists():
                     zf.write(f, f"courses/{cdir.name}/{name}")
-            # manifest: media file name + size so restore can match re-uploads
-            meta_path = cdir / "meta.json"
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    mp = Path(meta.get("media_path", ""))
+        # materials (raw media library)
+        materials_root = data_dir / "materials"
+        if materials_root.exists():
+            for mdir in sorted(materials_root.iterdir()):
+                if not mdir.is_dir():
+                    continue
+                for name in MATERIAL_FILES:
+                    f = mdir / name
+                    if f.exists():
+                        zf.write(f, f"materials/{mdir.name}/{name}")
+                mat_path = mdir / "material.json"
+                if mat_path.exists():
+                    try:
+                        mat = json.loads(mat_path.read_text(encoding="utf-8"))
+                        mp = Path(mat.get("media_path", ""))
+                        media_manifest.append({
+                            "kind": "material",
+                            "id": mdir.name,
+                            "title": mat.get("title", ""),
+                            "media_file": mp.name if mp else "",
+                            "media_size": mp.stat().st_size if mp.exists() else 0,
+                            "in_archive": bool(include_media and mp.exists()),
+                        })
+                        if include_media and mp.exists():
+                            zf.write(mp, f"media/{mp.name}")
+                    except Exception:
+                        pass
+        # legacy media dir (pre-material uploads)
+        media_dir = data_dir / "media"
+        if media_dir.exists():
+            for mp in sorted(media_dir.iterdir()):
+                if mp.suffix.lower() in MEDIA_EXTS:
                     media_manifest.append({
-                        "course_id": cdir.name,
-                        "title": meta.get("title", ""),
-                        "media_file": mp.name if mp else "",
-                        "media_size": mp.stat().st_size if mp.exists() else 0,
-                        "kind": meta.get("kind", ""),
-                        "in_archive": bool(include_media and mp.exists()),
+                        "kind": "legacy_media",
+                        "id": mp.stem,
+                        "title": "",
+                        "media_file": mp.name,
+                        "media_size": mp.stat().st_size,
+                        "in_archive": bool(include_media),
                     })
-                    if include_media and mp.exists():
+                    if include_media:
                         zf.write(mp, f"media/{mp.name}")
-                except Exception:
-                    pass
         zf.writestr("media_manifest.json", json.dumps(media_manifest, ensure_ascii=False, indent=2))
         info = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "note": note,
             "include_media": bool(include_media),
             "app": "DeepRead",
-            "version": 1,
+            "version": 2,
         }
         zf.writestr("backup_info.json", json.dumps(info, ensure_ascii=False, indent=2))
     return out
@@ -115,16 +141,45 @@ def restore_backup(data_dir: Path, archive: Path) -> dict[str, Any]:
                 if arc in names:
                     (cdir / name).write_bytes(zf.read(arc))
             result["courses"] += 1
+        # materials
+        material_dirs = set()
+        for n in names:
+            if n.startswith("materials/") and n.endswith(".json"):
+                material_dirs.add(n.split("/")[1])
+        for mid in material_dirs:
+            mdir = data_dir / "materials" / mid
+            mdir.mkdir(parents=True, exist_ok=True)
+            for name in MATERIAL_FILES:
+                arc = f"materials/{mid}/{name}"
+                if arc in names:
+                    (mdir / name).write_bytes(zf.read(arc))
+        result["materials"] = len(material_dirs)
         # media files (present when the archive was created with media included)
         media_files = [n for n in names if n.startswith("media/") and len(n) > len("media/")]
+        restored_names = set()
         for mf in media_files:
-            dest = data_dir / "media" / Path(mf).name
+            fname = Path(mf).name
+            dest = data_dir / "media" / fname
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_suffix(dest.suffix + ".tmp")
             tmp.write_bytes(zf.read(mf))
             tmp.replace(dest)
+            restored_names.add(fname)
             result["media_restored"] = result.get("media_restored", 0) + 1
-        # check media presence for every course
+        # re-link restored media into material dirs by filename
+        for mid in material_dirs:
+            mat_path = data_dir / "materials" / mid / "material.json"
+            if not mat_path.exists():
+                continue
+            try:
+                mat = json.loads(mat_path.read_text(encoding="utf-8"))
+                expected = Path(mat.get("media_path", "")).name
+                if expected in restored_names:
+                    mat["media_path"] = str(data_dir / "media" / expected)
+                    mat_path.write_text(json.dumps(mat, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        # check media presence for every course + material
         for cid in course_dirs:
             meta_path = data_dir / "courses" / cid / "meta.json"
             if meta_path.exists():
@@ -146,17 +201,22 @@ def restore_backup(data_dir: Path, archive: Path) -> dict[str, Any]:
 
 
 def attach_media(cid: str, data_dir: Path, media_file: Path) -> dict[str, Any]:
-    """Re-link a re-uploaded media file to a restored course (match by name)."""
-    cdir = data_dir / "courses" / cid
-    meta_path = cdir / "meta.json"
-    if not meta_path.exists():
-        raise FileNotFoundError("课程不存在")
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    expected = Path(meta.get("media_path", "")).name
-    if media_file.name != expected:
-        return {"ok": False, "detail": f"文件名不匹配：需要 {expected}"}
-    dest = data_dir / "media" / media_file.name
-    shutil.copyfile(media_file, dest)
-    meta["media_path"] = str(dest)
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"ok": True}
+    """Re-link a re-uploaded media file to a restored course or material.
+
+    Tries course data/courses/<cid>/meta.json first, then material
+    data/materials/<cid>/material.json — matched by expected filename."""
+    for kind, rel in (("course", "courses"), ("material", "materials")):
+        info_path = data_dir / rel / cid / ("meta.json" if kind == "course" else "material.json")
+        if not info_path.exists():
+            continue
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        expected = Path(info.get("media_path", "")).name
+        if media_file.name != expected:
+            return {"ok": False, "detail": f"文件名不匹配：需要 {expected}"}
+        dest = data_dir / "media" / media_file.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(media_file, dest)
+        info["media_path"] = str(dest)
+        info_path.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True}
+    raise FileNotFoundError("课程或素材不存在")

@@ -232,6 +232,9 @@ input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent)
 .bk-table th { text-align: left; color: var(--ink-3); font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--line); }
 .bk-table td { padding: 6px 8px; border-bottom: 1px solid var(--line); }
 .bk-table a { color: var(--accent); text-decoration: none; margin-right: 10px; }
+.mat-title { font-weight: 500; margin-right: 6px; }
+.mat-rename { border: none; background: none; color: var(--ink-3); padding: 1px 4px; font-size: 12px; }
+.mat-rename:hover { color: var(--accent); }
 
 /* calibration panel */
 .cal-overlay {

@@ -138,42 +138,135 @@ async function renderLibrary() {
       <div class="dropzone" id="dropzone">
         <div class="dz-icon">⬆️</div>
         <div>拖拽视频 / 音频文件到这里，或点击选择</div>
-        <div class="dz-hint">支持 mp4 / mkv / mov / mp3 / wav / m4a 等 · 上传后自动进入生成流水线</div>
+        <div class="dz-hint">支持 mp4 / mkv / mov / mp3 / wav / m4a 等</div>
         <input type="file" id="file-input" hidden accept="video/*,audio/*">
       </div>
       <div class="section-title">或粘贴视频链接（抖音 / B站 / YouTube 等yt-dlp支持的站点）</div>
       <div style="display:flex;gap:8px">
         <input id="url-input" type="text" placeholder="https://v.douyin.com/...">
-        <button class="primary" id="url-go">获取视频</button>
+        <button class="primary" id="url-go">下载素材</button>
       </div>
       <div class="cal-hint" style="margin-top:8px">
-        抖音等平台的画面硬字幕会通过 OCR 自动识别，与语音转写交叉校对；无字幕的画面只用转写。
+        素材是原始视频/音频。生成课程时会自动 OCR 识别画面硬字幕并与语音转写交叉校对。
       </div>
+
+      <div class="section-title" style="margin-top:26px">素材列表</div>
+      <div id="material-list"><div class="spinner"></div></div>
     </div>`);
 
   const dz = document.getElementById("dropzone");
   const fi = document.getElementById("file-input");
   dz.onclick = () => fi.click();
-  fi.onchange = () => fi.files[0] && uploadFile(fi.files[0]);
+  fi.onchange = () => fi.files[0] && uploadMaterial(fi.files[0]);
   dz.ondragover = (e) => { e.preventDefault(); dz.classList.add("dragover"); };
   dz.ondragleave = () => dz.classList.remove("dragover");
   dz.ondrop = (e) => {
     e.preventDefault(); dz.classList.remove("dragover");
-    if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files[0]) uploadMaterial(e.dataTransfer.files[0]);
   };
   document.getElementById("url-go").onclick = importUrl;
   document.getElementById("url-input").onkeydown = (e) => { if (e.key === "Enter") importUrl(); };
+
+  await refreshMaterials();
+  state.pollTimer = setInterval(refreshMaterials, 3000);
 }
 
-async function uploadFile(file) {
+async function refreshMaterials() {
+  const wrap = document.getElementById("material-list");
+  if (!wrap) return;
+  try {
+    const list = await api("/api/materials");
+    if (!list.length) {
+      wrap.innerHTML = `<div class="panel-empty">还没有素材，上传文件或粘贴链接添加</div>`;
+      return;
+    }
+    wrap.innerHTML = `<table class="bk-table">
+      <tr><th>标题</th><th>类型</th><th>大小</th><th>来源</th><th>状态</th><th style="width:220px"></th></tr>` +
+      list.map((m) => {
+        const statusLabel = { ready: "就绪", downloading: "下载中", error: "下载失败" }[m.status || "ready"] || "就绪";
+        const downloading = m.status === "downloading";
+        return `
+      <tr data-mid="${esc(m.id)}">
+        <td>
+          <span class="mat-title">${esc(m.title)}</span>
+          <button class="mat-rename" data-rename="${esc(m.id)}" title="重命名">✎</button>
+          ${m.course_id ? `<a class="badge ready" style="text-decoration:none" href="#/course/${esc(m.course_id)}">已有课程 →</a>` : ""}
+        </td>
+        <td>${m.kind === "audio" ? "音频" : "视频"}</td>
+        <td>${m.size_mb} MB</td>
+        <td>${m.source_url ? `<a href="${esc(m.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">链接</a>` : "上传"}</td>
+        <td>${downloading ? '<span class="spinner"></span> ' : ""}<span class="${m.status === "error" ? "flag-uncertain" : ""}">${statusLabel}${m.error ? " · " + esc(m.error.slice(0, 40)) : ""}</span></td>
+        <td>
+          ${!m.course_id && !downloading ? `<button class="primary" data-genc="${esc(m.id)}" ${m.media_exists ? "" : "disabled"}>生成课程</button>` : ""}
+          ${m.media_exists && m.course_id ? `<button data-regen="${esc(m.course_id)}" title="重新生成课程">↻</button>` : ""}
+          <button class="danger" data-del="${esc(m.id)}">删除</button>
+        </td>
+      </tr>`;
+      }).join("") + `</table>`;
+
+    wrap.querySelectorAll("[data-genc]").forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          const res = await api(`/api/materials/${btn.dataset.genc}/generate`, { method: "POST" });
+          toast("课程生成已开始");
+          location.hash = `#/course/${res.id}`;
+        } catch (err) { toast(err.message); }
+      };
+    });
+    wrap.querySelectorAll("[data-regen]").forEach((btn) => {
+      btn.onclick = async () => {
+        if (!confirm("重新生成会覆盖这门课程的转写和精讲，继续？")) return;
+        try {
+          await api(`/api/courses/${btn.dataset.regen}/generate`, { method: "POST" });
+          toast("重新生成已开始");
+        } catch (err) { toast(err.message); }
+      };
+    });
+    wrap.querySelectorAll("[data-del]").forEach((btn) => {
+      btn.onclick = async () => {
+        if (!confirm("删除这个素材？媒体文件会一并删除。")) return;
+        try {
+          await api(`/api/materials/${btn.dataset.del}`, { method: "DELETE" });
+          refreshMaterials();
+        } catch (err) { toast(err.message); }
+      };
+    });
+    wrap.querySelectorAll("[data-rename]").forEach((btn) => {
+      btn.onclick = () => {
+        const tr = btn.closest("tr");
+        const mid = btn.dataset.rename;
+        const span = tr.querySelector(".mat-title");
+        const cur = span.textContent;
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = cur;
+        input.style.cssText = "max-width:280px";
+        span.replaceWith(input);
+        input.focus();
+        const commit = async () => {
+          const title = input.value.trim();
+          if (title && title !== cur) {
+            await api(`/api/materials/${mid}/rename`, { method: "POST", body: JSON.stringify({ title }) });
+          }
+          refreshMaterials();
+        };
+        input.onblur = commit;
+        input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); };
+      };
+    });
+  } catch (err) {
+    wrap.innerHTML = `<div class="panel-empty">加载失败: ${esc(err.message)}</div>`;
+  }
+}
+
+async function uploadMaterial(file) {
   const fd = new FormData();
   fd.append("file", file);
   toast(`上传中: ${file.name}…`);
   try {
-    const res = await api("/api/courses/upload", { method: "POST", body: fd });
-    toast("上传完成，开始生成…");
-    await api(`/api/courses/${res.id}/generate`, { method: "POST" }).catch(() => {});
-    location.hash = "#/courses";
+    await api("/api/materials/upload", { method: "POST", body: fd });
+    toast("素材已上传");
+    refreshMaterials();
   } catch (err) {
     toast(`上传失败: ${err.message}`);
   }
@@ -183,11 +276,11 @@ async function importUrl() {
   const input = document.getElementById("url-input");
   const url = input.value.trim();
   if (!url) { toast("请先粘贴链接"); return; }
-  toast("链接导入中…");
+  toast("开始下载素材…");
   try {
-    const res = await api("/api/courses/import", { method: "POST", body: JSON.stringify({ url }) });
-    toast("已开始下载并生成，可在课程库查看进度");
-    location.hash = "#/courses";
+    await api("/api/materials/import", { method: "POST", body: JSON.stringify({ url }) });
+    toast("下载已开始，完成后可在列表中生成课程");
+    refreshMaterials();
   } catch (err) {
     toast(`导入失败: ${err.message}`);
   }
