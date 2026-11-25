@@ -431,6 +431,31 @@ function saveProgress() {
   api(`/api/courses/${cid}/progress`, { method: "POST", body: JSON.stringify(payload) }).catch(() => {});
 }
 
+/* ------- calibration: global offset + per-sentence time overrides ------- */
+
+function calibratedSentences() {
+  const lesson = state.course?.lesson;
+  const cal = state.course?.calibration || { global_offset: 0, overrides: {} };
+  const off = parseFloat(cal.global_offset) || 0;
+  const ovr = cal.overrides || {};
+  return (lesson?.sentences || []).map((s) => {
+    const o = ovr[String(s.id)];
+    return {
+      ...s,
+      start: o ? o.start : s.start + off,
+      end: o ? o.end : s.end + off,
+    };
+  });
+}
+
+async function saveCalibration() {
+  const cal = state.course.calibration;
+  await api(`/api/courses/${state.course.meta.id}/calibration`, {
+    method: "POST",
+    body: JSON.stringify({ global_offset: cal.global_offset, overrides: cal.overrides }),
+  });
+}
+
 function drawCoursePage() {
   const { meta, status, lesson } = state.course;
   if (status.stage !== "ready") {
@@ -454,7 +479,8 @@ function drawCoursePage() {
 
   const isAudio = meta.kind === "audio";
   const mediaUrl = `/media/${meta.id}/file`;
-  const sentences = lesson.sentences || [];
+  const sentences = calibratedSentences();
+  const rawSentences = lesson.sentences || [];
 
   $app.innerHTML = `
   <div class="course-page">
@@ -475,6 +501,7 @@ function drawCoursePage() {
           <button id="ctl-ab" title="A-B 循环">A-B</button>
           <button id="ctl-follow" title="字幕跟随开关">不跟随</button>
           <button id="ctl-goto" title="跳到当前播放的句子">⤓ 当前句</button>
+          <button id="ctl-cal" title="时间线校准（全局偏移/单句调整）">⏱ 校准</button>
           <div class="speed-group">
             ${["0.75", "1", "1.25", "1.5"].map((v) =>
               `<button data-speed="${v}" class="${v === "1" ? "on" : ""}">${v}x</button>`).join("")}
@@ -564,6 +591,20 @@ function drawCoursePage() {
     } else {
       toast("请先播放视频");
     }
+  };
+
+  // ---- calibration panel ----
+  document.getElementById("ctl-cal").onclick = () => {
+    openCalibrationPanel({
+      player,
+      sentences,
+      rawSentences,
+      activeId,
+      onApplied: () => {
+        // re-render tabs with recalibrated times
+        panels[state.tab]();
+      },
+    });
   };
 
   const abBtn = document.getElementById("ctl-ab");
@@ -790,6 +831,195 @@ function drawCoursePage() {
       };
     });
   }
+}
+
+/* ---------------- calibration panel ---------------- */
+function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApplied }) {
+  document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
+  const cal = state.course.calibration;
+  const overlay = document.createElement("div");
+  overlay.className = "cal-overlay";
+  overlay.innerHTML = `
+    <div class="cal-panel">
+      <div class="cal-head">
+        <b>⏱ 时间线校准</b>
+        <button class="cal-close" title="关闭">✕</button>
+      </div>
+
+      <div class="section-title" style="margin-top:8px">全局偏移（所有句子整体平移）</div>
+      <div class="cal-row">
+        <button class="cal-shift" data-d="-0.5">−0.5s</button>
+        <button class="cal-shift" data-d="-0.1">−0.1s</button>
+        <input class="cal-global" type="number" step="0.1" value="${esc(String(cal.global_offset || 0))}" style="width:90px;text-align:center">
+        <button class="cal-shift" data-d="0.1">+0.1s</button>
+        <button class="cal-shift" data-d="0.5">+0.5s</button>
+        <button class="cal-reset" title="清除全局偏移">归零</button>
+      </div>
+      <div class="cal-hint">字幕整体比声音慢 → 加负值；快 → 加正值。改动即时生效并自动保存。</div>
+      <div style="margin:8px 0">
+        <button class="cal-pick-start"> ◀ 取当前播放点为参考</button>
+        <span class="cal-ref" style="font-size:12px;color:var(--ink-2)">未设置</span>
+      </div>
+      <div class="cal-apply-global" style="display:none">
+        <button class="primary cal-align-here">将选中句子对齐到该播放点</button>
+        <span style="font-size:12px;color:var(--ink-2)">（选中下面任一句后可用）</span>
+      </div>
+
+      <div class="section-title">单句调整（点击句子选中，可设起点/终点或微调）</div>
+      <div class="cal-list"></div>
+    </div>`;
+
+  const globalInput = overlay.querySelector(".cal-global");
+  const listEl = overlay.querySelector(".cal-list");
+  const refEl = overlay.querySelector(".cal-ref");
+  const applyWrap = overlay.querySelector(".cal-apply-global");
+  let refPoint = null;   // captured playback time
+  let selId = null;      // selected sentence id
+
+  function renderList() {
+    const kw = "";
+    const items = sentences.map((s) => {
+      const o = cal.overrides[String(s.id)];
+      const isSel = selId === s.id;
+      return `
+      <div class="cal-item ${isSel ? "sel" : ""}" data-sid="${s.id}">
+        <div class="ci-main" data-act="sel">
+          <span class="s-time">${fmtTime(s.start)} → ${fmtTime(s.end)}</span>
+          <span class="ci-text">${esc(s.text.slice(0, 40))}</span>
+          ${o ? '<span class="badge">已调</span>' : ""}
+        </div>
+        ${isSel ? `
+        <div class="ci-edit">
+          <label>起点 <input class="ci-start" type="number" step="0.1" value="${s.start.toFixed(2)}"></label>
+          <label>终点 <input class="ci-end" type="number" step="0.1" value="${s.end.toFixed(2)}"></label>
+          <button class="ci-set-start" data-act="set-start">起点=播放点</button>
+          <button class="ci-set-end" data-act="set-end">终点=播放点</button>
+          <button class="ci-nudge" data-act="nudge-l">◀ 0.5s</button>
+          <button class="ci-nudge" data-act="nudge-r">0.5s ▶</button>
+          <button class="ci-clear" data-act="clear" ${o ? "" : "disabled"}>还原</button>
+          <button class="primary ci-play" data-act="play">▶ 试听</button>
+        </div>` : ""}
+      </div>`;
+    }).join("");
+    listEl.innerHTML = items || `<div class="panel-empty">无句子</div>`;
+  }
+
+  function persist() {
+    globalInput.value = Number(cal.global_offset || 0).toFixed(1);
+    saveCalibration().then(() => {}).catch((e) => toast("保存失败: " + e.message));
+  }
+
+  function shiftGlobal(d) {
+    cal.global_offset = Math.round(((parseFloat(cal.global_offset) || 0) + d) * 10) / 10;
+    persist();
+  }
+
+  overlay.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-act],[data-d],.cal-close,.cal-reset,.cal-pick-start,.cal-align-here");
+    if (!btn) {
+      if (e.target === overlay) close();
+      return;
+    }
+    if (btn.classList.contains("cal-close")) return close();
+    if (btn.classList.contains("cal-reset")) { cal.global_offset = 0; persist(); return; }
+    if (btn.classList.contains("cal-pick-start")) {
+      refPoint = player.currentTime;
+      refEl.textContent = `参考点 ${refPoint.toFixed(2)}s`;
+      return;
+    }
+    if (btn.classList.contains("cal-align-here")) {
+      if (refPoint === null || selId === null) { toast("先取参考点并选中句子"); return; }
+      // shift the selected sentence so its start lands on the reference point
+      const raw = rawSentences.find((s) => s.id === selId);
+      const dur = (raw.end - raw.start);
+      cal.overrides[String(selId)] = {
+        start: Math.max(0, refPoint),
+        end: Math.max(0, refPoint + dur),
+      };
+      persist();
+      refreshSentences();
+      renderList();
+      return;
+    }
+    if (btn.dataset.d !== undefined) { shiftGlobal(parseFloat(btn.dataset.d)); return; }
+
+    const act = btn.dataset.act;
+    const item = btn.closest(".cal-item");
+    const sid = item ? parseInt(item.dataset.sid, 10) : null;
+    if (act === "sel") {
+      selId = sid;
+      applyWrap.style.display = "block";
+      renderList();
+      return;
+    }
+    if (act === "play") {
+      const s = sentences.find((x) => x.id === sid);
+      player.currentTime = s.start;
+      player.play();
+      return;
+    }
+    if (act === "clear") {
+      delete cal.overrides[String(sid)];
+      persist();
+      refreshSentences();
+      renderList();
+      return;
+    }
+    const raw = rawSentences.find((s) => s.id === sid);
+    const dur = raw.end - raw.start;
+    if (act === "set-start") {
+      const st = player.currentTime;
+      cal.overrides[String(sid)] = { start: Math.max(0, st), end: Math.max(0, st + dur) };
+    } else if (act === "set-end") {
+      const st = cal.overrides[String(sid)]?.start ?? raw.start;
+      cal.overrides[String(sid)] = { start: st, end: Math.max(st + 0.3, player.currentTime) };
+    } else if (act === "nudge-l" || act === "nudge-r") {
+      const cur = cal.overrides[String(sid)] || { start: raw.start, end: raw.end };
+      const d = act === "nudge-l" ? -0.5 : 0.5;
+      cal.overrides[String(sid)] = {
+        start: Math.max(0, cur.start + d),
+        end: Math.max(0.3, cur.end + d),
+      };
+    }
+    persist();
+    refreshSentences();
+    renderList();
+  });
+
+  globalInput.addEventListener("change", () => {
+    cal.global_offset = parseFloat(globalInput.value) || 0;
+    persist();
+    refreshSentences();
+  });
+  listEl.addEventListener("change", (e) => {
+    const inp = e.target;
+    if (!inp.classList.contains("ci-start") && !inp.classList.contains("ci-end")) return;
+    const sid = parseInt(inp.closest(".cal-item").dataset.sid, 10);
+    const raw = rawSentences.find((s) => s.id === sid);
+    const cur = cal.overrides[String(sid)] || { start: raw.start, end: raw.end };
+    let start = cur.start, end = cur.end;
+    if (inp.classList.contains("ci-start")) start = Math.max(0, parseFloat(inp.value) || 0);
+    else end = Math.max(start + 0.3, parseFloat(inp.value) || 0);
+    cal.overrides[String(sid)] = { start, end };
+    persist();
+    refreshSentences();
+    renderList();
+  });
+
+  function refreshSentences() {
+    // recompute the live `sentences` array used by playback sync
+    const list = calibratedSentences();
+    sentences.splice(0, sentences.length, ...list);
+    if (onApplied) onApplied();
+  }
+
+  function close() {
+    overlay.remove();
+    refreshSentences();
+  }
+
+  renderList();
+  document.body.appendChild(overlay);
 }
 
 /* ---------------- helpers ---------------- */

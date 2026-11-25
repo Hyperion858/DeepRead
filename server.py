@@ -438,11 +438,16 @@ def get_course(cid: str):
         raise HTTPException(404, "课程不存在")
     meta = read_json(cdir / "meta.json", {}) or {}
     status = read_json(cdir / "status.json", {}) or {}
+    cal = read_json(cdir / "calibration.json", {}) or {}
     return {
         "meta": meta,
         "status": status,
         "source": read_json(cdir / "source.json") or {},
         "lesson": read_json(cdir / "lesson.json") or {},
+        "calibration": {
+            "global_offset": cal.get("global_offset", 0.0),
+            "overrides": cal.get("overrides", {}),
+        },
     }
 
 
@@ -454,6 +459,33 @@ def delete_course(cid: str):
     shutil.rmtree(cdir, ignore_errors=True)
     for f in MEDIA_DIR.glob(f"{cid}.*"):
         f.unlink(missing_ok=True)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- API: calibration
+
+@app.get("/api/courses/{cid}/calibration")
+def get_calibration(cid: str):
+    if not course_dir(cid).exists():
+        raise HTTPException(404, "课程不存在")
+    cal = read_json(course_dir(cid) / "calibration.json", {}) or {}
+    return {
+        "global_offset": cal.get("global_offset", 0.0),
+        "overrides": cal.get("overrides", {}),  # sentenceId(str) -> {start, end}
+    }
+
+
+@app.post("/api/courses/{cid}/calibration")
+async def post_calibration(cid: str, request: Request):
+    if not course_dir(cid).exists():
+        raise HTTPException(404, "课程不存在")
+    body = await request.json()
+    cal = {
+        "global_offset": float(body.get("global_offset", 0.0)),
+        "overrides": body.get("overrides", {}),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_json(course_dir(cid) / "calibration.json", cal)
     return {"ok": True}
 
 
