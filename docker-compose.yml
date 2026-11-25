@@ -5,6 +5,8 @@ services:
     container_name: deepread
     ports:
       - "8000:8000"
+    environment:
+      - TZ=Asia/Shanghai
     volumes:
       - ./data:/app/data
     restart: unless-stopped

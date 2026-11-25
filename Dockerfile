@@ -1,9 +1,11 @@
 FROM python:3.12-slim
 
-# ffmpeg for audio extraction / subtitle demuxing / frame sampling;
-# yt-dlp for downloading from share URLs (douyin etc.)
+# Beijing time: course timestamps + daily backup schedule follow CST (UTC+8)
+ENV TZ=Asia/Shanghai
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg yt-dlp \
+    ffmpeg yt-dlp tzdata \
+  && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+  && echo "Asia/Shanghai" > /etc/timezone \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
