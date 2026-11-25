@@ -14,6 +14,7 @@ import json
 import re
 import subprocess
 import tempfile
+import time as _time_module
 from pathlib import Path
 from typing import Any, Callable
 
@@ -48,15 +49,26 @@ def extract_frames(media_path: Path, workdir: Path,
     """Extract bottom-crop frames as jpgs at a fixed interval."""
     frames_dir = workdir / "ocr_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    # crop bottom 22% of the frame, full width — where douyin burns subtitles
-    r = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(media_path), "-vf",
-         f"fps=1/{interval},crop=iw:ih*0.22:0:ih*0.78,scale=960:-2",
-         "-q:v", "4", str(frames_dir / "f%06d.jpg")],
-        capture_output=True, timeout=1800,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"抽帧失败: {r.stderr.decode(errors='replace')[-300:]}")
+    # crop bottom 22% of the frame, full width — where douyin burns subtitles.
+    # stream stderr progress: count written frames while ffmpeg runs so the UI
+    # sees live feedback during the (slow) extraction on low-power devices.
+    cmd = [
+        "ffmpeg", "-y", "-i", str(media_path), "-vf",
+        f"fps=1/{interval},crop=iw:ih*0.22:0:ih*0.78,scale=960:-2",
+        "-q:v", "4", str(frames_dir / "f%06d.jpg"),
+    ]
+    if progress_cb:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        while proc.poll() is None:
+            _time_module.sleep(2)
+            n = len(list(frames_dir.glob("f*.jpg")))
+            progress_cb(0.02, f"抽帧中… 已提取 {n} 帧")
+        if proc.returncode != 0:
+            raise RuntimeError("抽帧失败（ffmpeg 非正常退出）")
+    else:
+        r = subprocess.run(cmd, capture_output=True, timeout=1800)
+        if r.returncode != 0:
+            raise RuntimeError(f"抽帧失败: {r.stderr.decode(errors='replace')[-300:]}")
     frames = sorted(frames_dir.glob("f*.jpg"))
     if progress_cb:
         progress_cb(0.3, f"抽取 {len(frames)} 帧")
