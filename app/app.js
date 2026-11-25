@@ -1158,9 +1158,11 @@ function renderSettings() {
         const i = +btn.closest("[data-pi]").dataset.pi;
         if (!confirm(`删除 API「${providers[i].name}」？`)) return;
         providers.splice(i, 1);
-        drawProviders(); drawRoles();
+        drawProviders();
       };
     });
+    // keep role dropdowns in sync when providers are added/renamed/removed
+    drawRoles();
   }
 
   function collectProviders() {
@@ -1224,7 +1226,7 @@ function renderSettings() {
   document.getElementById("prov-add").onclick = async () => {
     collectProviders();
     providers.push({ id: "", name: "", base_url: "", api_key: "" });
-    drawProviders(); drawRoles();
+    drawProviders(); // drawProviders now refreshes role dropdowns too
   };
 
   document.getElementById("cfg-refresh-asr").onclick = async () => {
@@ -1310,33 +1312,54 @@ function renderSettings() {
 function renderBackup() {
   document.title = "备份与恢复 · DeepRead";
   $app.innerHTML = shell("backup", `
-    <div class="page" style="max-width:720px">
+    <div class="page" style="max-width:760px">
       <h1>备份与恢复</h1>
-      <div class="form-row" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
-        <label style="display:flex;gap:6px;align-items:center;margin:0">
-          <input type="checkbox" id="bk-enabled" style="width:auto"> 每日自动备份
-        </label>
-        <label style="margin:0;display:flex;gap:6px;align-items:center">时间
-          <input type="time" id="bk-time" style="width:110px"></label>
-        <label style="margin:0;display:flex;gap:6px;align-items:center">保留数量
-          <input type="number" id="bk-keep" min="1" max="90" style="width:70px"></label>
-        <label style="display:flex;gap:6px;align-items:center;margin:0">
-          <input type="checkbox" id="bk-media" style="width:auto"> 包含媒体文件（体积大）
-        </label>
-        <button id="bk-save-settings">保存设置</button>
-        <button id="bk-now" class="primary">立即备份</button>
+
+      <div class="cfg-card">
+        <div class="cfg-card-head"><span class="cfg-card-title">⏰ 自动备份</span>
+          <button id="bk-now" class="primary" style="padding:6px 16px">立即备份</button>
+        </div>
+        <div class="bk-settings-grid">
+          <label class="switch-row">
+            <input type="checkbox" id="bk-enabled">
+            <span class="switch-ui"></span>
+            <div class="switch-text"><b>每日自动备份</b><small>每天在设定时间自动创建备份</small></div>
+          </label>
+          <div class="bk-field">
+            <label>备份时间</label>
+            <input type="time" id="bk-time">
+          </div>
+          <div class="bk-field">
+            <label>保留数量（份）</label>
+            <input type="number" id="bk-keep" min="1" max="90">
+          </div>
+          <label class="switch-row" style="grid-column:1/-1">
+            <input type="checkbox" id="bk-media">
+            <span class="switch-ui"></span>
+            <div class="switch-text"><b>包含媒体文件</b><small>备份原始视频/音频（每份备份可达数百 MB）；关闭则只备份数据，恢复后需补传媒体</small></div>
+          </label>
+        </div>
+        <div class="form-actions" style="margin-top:12px">
+          <button id="bk-save-settings" class="primary">保存设置</button>
+        </div>
       </div>
-      <div class="form-row" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <label style="margin:0;font-size:13px;color:var(--ink-2)">恢复：选择备份 zip 上传</label>
-        <input type="file" id="bk-restore-file" accept=".zip" style="width:auto">
-        <button id="bk-restore" class="danger">恢复（覆盖当前数据）</button>
+
+      <div class="cfg-card">
+        <div class="cfg-card-head"><span class="cfg-card-title">♻ 恢复</span></div>
+        <div class="bk-restore-row">
+          <input type="file" id="bk-restore-file" accept=".zip" style="flex:1;min-width:0">
+          <button id="bk-restore" class="danger" style="flex-shrink:0;white-space:nowrap">恢复（覆盖数据）</button>
+        </div>
+        <div class="cal-hint" style="margin-top:8px">
+          备份包含 API 配置与全部课程/素材数据。换部署环境：新机器 docker compose up 后在此上传备份，再按提示补传媒体即可。
+        </div>
       </div>
-      <div class="cal-hint" style="margin-bottom:8px">
-        备份包含 API 配置、全部课程（转写/精讲/进度/校准）；媒体文件可选。
-        换部署环境：新机器 docker compose up 后，在此上传备份恢复，再按提示补传媒体。
+
+      <div class="cfg-card">
+        <div class="cfg-card-head"><span class="cfg-card-title">🗄 备份列表</span></div>
+        <div id="bk-list"></div>
+        <div id="bk-missing" style="margin-top:10px"></div>
       </div>
-      <div id="bk-list"></div>
-      <div id="bk-missing" style="margin-top:10px"></div>
     </div>`);
 
   let cfgCache = null;
@@ -1490,9 +1513,18 @@ function markVocab(text, lang, vocabIndex) {
   let html = esc(text);
   for (const v of vocabIndex) {
     const term = esc(v.term);
-    const re = new RegExp(`(?<![\\w${term}])(${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})(?![\\w])`, "gi");
-    html = html.replace(re, (m) =>
-      `<span class="vmark" data-term="${term}">${m}<span class="vpop">${esc(v.definition || "")}</span></span>`);
+    // word-char class is fixed; the term itself only goes into the escaped group.
+    // (embedding the term in the char class breaks on hyphens/spaces -> Range out of order)
+    try {
+      const re = new RegExp(`(?<![\\w'’-])(${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})(?![\\w'’-])`, "gi");
+      html = html.replace(re, (m) =>
+        `<span class="vmark" data-term="${term}">${m}<span class="vpop">${esc(v.definition || "")}</span></span>`);
+    } catch {
+      // pathological term: fall back to plain escaped occurrence highlight
+      const safe = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      html = html.replace(new RegExp(safe, "gi"), (m) =>
+        `<span class="vmark" data-term="${term}">${m}<span class="vpop">${esc(v.definition || "")}</span></span>`);
+    }
   }
   return html;
 }
