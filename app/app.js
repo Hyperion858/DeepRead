@@ -180,17 +180,34 @@ async function uploadFile(file) {
 function renderSettings() {
   document.title = "设置 · DeepRead";
   $app.innerHTML = `
-    <div class="settings">
-      <h1>API 设置</h1>
-      <p style="color:var(--ink-2);font-size:13.5px">配置 OpenAI 兼容中转 API。API Key 保存在服务器本地 data/config.json，不会上传。</p>
-      <div class="form-row"><label>Base URL（如 https://api.example.com/v1）</label>
-        <input id="cfg-base" type="text" placeholder="https://.../v1"></div>
-      <div class="form-row"><label>API Key</label>
-        <input id="cfg-key" type="password" placeholder="sk-..."></div>
-      <div class="form-row"><label>转写模型（/v1/audio/transcriptions）</label>
-        <input id="cfg-asr" type="text" placeholder="whisper-1"></div>
-      <div class="form-row"><label>Chat 模型（翻译 + 精讲生成）</label>
-        <input id="cfg-chat" type="text" placeholder="gpt-4o-mini"></div>
+    <div class="settings" style="max-width:680px">
+      <h1>API 管理</h1>
+      <p style="color:var(--ink-2);font-size:13.5px">
+        添加多个中转 API（OpenAI 兼容），随时切换。转写和 Chat 可使用不同的 API。
+        Key 保存在服务器本地 data/config.json。
+      </p>
+
+      <div class="section-title">API 提供商</div>
+      <div id="prov-list"></div>
+      <button id="prov-add">+ 添加 API</button>
+
+      <div class="section-title">角色分配</div>
+      <div class="form-row"><label>转写 API（需要 /v1/audio/transcriptions，whisper 类模型）</label>
+        <select id="role-asr"></select></div>
+      <div class="form-row"><label>转写模型</label>
+        <div style="display:flex;gap:8px">
+          <select id="cfg-asr" style="flex:1"></select>
+          <button id="cfg-refresh-asr" type="button" title="从转写 API 获取模型列表">↻ 获取模型</button>
+        </div>
+        <input id="cfg-asr-custom" type="text" placeholder="或手动输入模型名" style="margin-top:6px"></div>
+      <div class="form-row"><label>Chat API（翻译 + 精讲生成）</label>
+        <select id="role-chat"></select></div>
+      <div class="form-row"><label>Chat 模型</label>
+        <div style="display:flex;gap:8px">
+          <select id="cfg-chat" style="flex:1"></select>
+          <button id="cfg-refresh-chat" type="button" title="从 Chat API 获取模型列表">↻ 获取模型</button>
+        </div></div>
+
       <div class="form-actions">
         <button class="primary" id="cfg-save">保存</button>
         <button id="cfg-test">测试连接</button>
@@ -200,38 +217,177 @@ function renderSettings() {
     </div>`;
 
   document.getElementById("cfg-back").onclick = () => (location.hash = "#/");
-  api("/api/config").then((cfg) => {
-    document.getElementById("cfg-base").value = cfg.base_url || "";
-    document.getElementById("cfg-key").value = cfg.api_key || "";
-    document.getElementById("cfg-asr").value = cfg.transcribe_model || "";
-    document.getElementById("cfg-chat").value = cfg.chat_model || "";
-  });
 
-  document.getElementById("cfg-save").onclick = async () => {
+  let providers = [];   // working copy [{id,name,base_url,api_key}]
+  let cfgCache = null;
+  let modelCache = {};  // provider_id -> {models, asr_models}
+
+  async function init() {
+    cfgCache = await api("/api/config");
+    providers = (cfgCache.providers || []).map((p) => ({ ...p }));
+    drawProviders();
+    drawRoles();
+    document.getElementById("role-asr").value = cfgCache.asr_provider || "";
+    document.getElementById("role-chat").value = cfgCache.chat_provider || "";
+    // restore saved models into dropdowns
+    if (cfgCache.asr_model) {
+      fillAsrSelect([cfgCache.asr_model], cfgCache.asr_model);
+      document.getElementById("cfg-asr-custom").value = "";
+    }
+    if (cfgCache.chat_model) fillChatSelect([cfgCache.chat_model], cfgCache.chat_model);
+  }
+
+  function drawProviders() {
+    const wrap = document.getElementById("prov-list");
+    if (!providers.length) {
+      wrap.innerHTML = `<div class="panel-empty" style="padding:16px">还没有 API，点击下方添加</div>`;
+    } else {
+      wrap.innerHTML = providers.map((p, i) => `
+        <div class="hs-card" data-pi="${i}">
+          <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+            <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 beichenapi）" style="flex:1">
+            <button class="danger p-del" title="删除">✕</button>
+          </div>
+          <div class="form-row" style="margin-bottom:8px"><input class="p-url" value="${esc(p.base_url)}" placeholder="Base URL（https://.../v1）"></div>
+          <div class="form-row" style="margin-bottom:0"><input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="API Key（sk-...）"></div>
+        </div>`).join("");
+    }
+    wrap.querySelectorAll(".p-del").forEach((btn) => {
+      btn.onclick = () => {
+        const i = +btn.closest("[data-pi]").dataset.pi;
+        if (!confirm(`删除 API「${providers[i].name}」？`)) return;
+        providers.splice(i, 1);
+        drawProviders(); drawRoles();
+      };
+    });
+  }
+
+  function collectProviders() {
+    document.querySelectorAll("#prov-list [data-pi]").forEach((card) => {
+      const i = +card.dataset.pi;
+      if (providers[i]) {
+        providers[i].name = card.querySelector(".p-name").value.trim() || `API ${i + 1}`;
+        providers[i].base_url = card.querySelector(".p-url").value.trim();
+        providers[i].api_key = card.querySelector(".p-key").value.trim();
+      }
+    });
+  }
+
+  function drawRoles() {
+    collectProviders();
+    const opts = (sel) => providers.map((p, i) =>
+      `<option value="${esc(p.id)}">${esc(p.name || `API ${i + 1}`)}</option>`).join("");
+    const asrSel = document.getElementById("role-asr");
+    const chatSel = document.getElementById("role-chat");
+    const prevAsr = asrSel.value, prevChat = chatSel.value;
+    asrSel.innerHTML = opts() || `<option value="">（请先添加 API）</option>`;
+    chatSel.innerHTML = opts() || `<option value="">（请先添加 API）</option>`;
+    if (prevAsr && providers.some((p) => p.id === prevAsr)) asrSel.value = prevAsr;
+    if (prevChat && providers.some((p) => p.id === prevChat)) chatSel.value = prevChat;
+    asrSel.onchange = () => fillAsrSelect([], "");
+    chatSel.onchange = () => fillChatSelect([], "");
+  }
+
+  function fillAsrSelect(models, selected) {
+    const sel = document.getElementById("cfg-asr");
+    const keepCustom = document.getElementById("cfg-asr-custom").value.trim();
+    sel.innerHTML = models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+    if (selected && ![...sel.options].some((o) => o.value === selected)) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(selected)}">${esc(selected)}</option>`);
+    }
+    if (keepCustom && ![...sel.options].some((o) => o.value === keepCustom)) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(keepCustom)}">${esc(keepCustom)}</option>`);
+    }
+    sel.value = selected || keepCustom || sel.value || "";
+  }
+
+  function fillChatSelect(models, selected) {
+    const sel = document.getElementById("cfg-chat");
+    sel.innerHTML = models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+    if (selected && ![...sel.options].some((o) => o.value === selected)) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(selected)}">${esc(selected)}</option>`);
+    }
+    sel.value = selected || sel.value || "";
+  }
+
+  async function fetchModels(providerId) {
+    if (modelCache[providerId]) return modelCache[providerId];
+    const res = await api(`/api/config/models?provider_id=${encodeURIComponent(providerId)}`);
+    modelCache[providerId] = res;
+    return res;
+  }
+
+  document.getElementById("prov-add").onclick = async () => {
+    collectProviders();
+    providers.push({ id: "", name: "", base_url: "", api_key: "" });
+    drawProviders(); drawRoles();
+  };
+
+  document.getElementById("cfg-refresh-asr").onclick = async () => {
+    await saveConfigQuiet();
+    const pid = document.getElementById("role-asr").value;
+    if (!pid) { toast("请先添加并保存 API"); return; }
+    toast("获取模型列表中…");
+    try {
+      const res = await fetchModels(pid);
+      fillAsrSelect(res.asr_models || [], "");
+      toast(`获取到 ${(res.asr_models || res.models || []).length} 个模型`);
+    } catch (err) { toast("获取失败: " + err.message); }
+  };
+
+  document.getElementById("cfg-refresh-chat").onclick = async () => {
+    await saveConfigQuiet();
+    const pid = document.getElementById("role-chat").value;
+    if (!pid) { toast("请先添加并保存 API"); return; }
+    toast("获取模型列表中…");
+    try {
+      const res = await fetchModels(pid);
+      fillChatSelect(res.models || [], "");
+      toast(`获取到 ${(res.models || []).length} 个模型`);
+    } catch (err) { toast("获取失败: " + err.message); }
+  };
+
+  async function saveConfigQuiet() {
+    collectProviders();
+    const custom = document.getElementById("cfg-asr-custom").value.trim();
+    const asrVal = custom || document.getElementById("cfg-asr").value;
     try {
       await api("/api/config", {
         method: "PUT",
         body: JSON.stringify({
-          base_url: document.getElementById("cfg-base").value.trim(),
-          api_key: document.getElementById("cfg-key").value.trim(),
-          transcribe_model: document.getElementById("cfg-asr").value.trim(),
-          chat_model: document.getElementById("cfg-chat").value.trim(),
+          providers,
+          asr_provider: document.getElementById("role-asr").value,
+          chat_provider: document.getElementById("role-chat").value,
+          asr_model: asrVal === "__custom__" ? "" : asrVal,
+          chat_model: document.getElementById("cfg-chat").value,
         }),
       });
-      toast("已保存");
+      // new providers get server-assigned ids; reload them silently
+      cfgCache = await api("/api/config");
+      providers = (cfgCache.providers || []).map((p) => ({ ...p }));
     } catch (err) { toast(err.message); }
+  }
+
+  document.getElementById("cfg-save").onclick = async () => {
+    await saveConfigQuiet();
+    const custom = document.getElementById("cfg-asr-custom").value.trim();
+    const asrVal = custom || document.getElementById("cfg-asr").value;
+    if (!providers.length) { toast("请至少添加一个 API"); return; }
+    if (!asrVal) { toast("请选择转写模型"); return; }
+    if (!document.getElementById("cfg-chat").value) { toast("请选择 Chat 模型"); return; }
+    await saveConfigQuiet();
+    toast("已保存");
   };
 
   document.getElementById("cfg-test").onclick = async () => {
     const el = document.getElementById("test-result");
     el.className = "test-result"; el.textContent = "测试中…";
-    // save first so the server tests the current values
-    document.getElementById("cfg-save").click();
+    await saveConfigQuiet();
     try {
-      const res = await api("/api/config/test", { method: "POST" });
+      const res = await api("/api/config/test", { method: "POST", body: JSON.stringify({}) });
       const parts = [];
-      parts.push(res.chat ? "✓ chat 端点可用" : "✗ chat 端点不可用");
-      parts.push(res.transcribe ? "✓ 转写端点可用" : "✗ 转写端点不可用");
+      parts.push(res.chat ? "✓ Chat 可用" : "✗ Chat 不可用");
+      parts.push(res.transcribe ? "✓ 转写端点可达" : "✗ 转写端点不可用");
       el.className = "test-result " + (res.chat || res.transcribe ? "ok" : "fail");
       el.textContent = parts.join("　") + (res.detail ? ` · ${res.detail}` : "");
     } catch (err) {
@@ -239,6 +395,8 @@ function renderSettings() {
       el.textContent = "连接失败: " + err.message;
     }
   };
+
+  init();
 }
 
 /* ================= Course page ================= */

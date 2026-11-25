@@ -17,6 +17,22 @@ import httpx
 from pipeline.transcribe import PipelineCancelled, detect_lang
 
 
+def _chat_provider(cfg: dict[str, Any]) -> tuple[str, str, str]:
+    """Resolve (base_url, api_key, model) for the chat provider."""
+    providers = cfg.get("providers") or []
+    pid = cfg.get("chat_provider")
+    prov = next((p for p in providers if p.get("id") == pid), None)
+    if prov is None and providers:
+        prov = providers[0]
+    if prov:
+        return (prov.get("base_url", "").rstrip("/"), prov.get("api_key", ""),
+                cfg.get("chat_model") or "gpt-4o-mini")
+    # legacy flat config
+    return (cfg.get("chat_base_url") or cfg.get("base_url", "").rstrip("/"),
+            cfg.get("chat_api_key") or cfg.get("api_key", ""),
+            cfg.get("chat_model") or "gpt-4o-mini")
+
+
 def _chat(
     client: httpx.Client,
     cfg: dict[str, Any],
@@ -24,12 +40,12 @@ def _chat(
     max_tokens: int = 8000,
     temperature: float = 0.3,
 ) -> str:
-    base_url = (cfg.get("base_url") or "").rstrip("/")
+    base_url, api_key, model = _chat_provider(cfg)
     r = client.post(
         f"{base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {cfg.get('api_key', '')}"},
+        headers={"Authorization": f"Bearer {api_key}"},
         json={
-            "model": cfg.get("chat_model", "gpt-4o-mini"),
+            "model": model,
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
@@ -47,11 +63,11 @@ def _extract_json(text: str) -> Any:
     if text.startswith("```"):
         text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
         text = re.sub(r"\s*```$", "", text).strip()
-    # find first { or [ and match to the balanced end
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = text.find(opener)
-        if start == -1:
-            continue
+    # pick whichever opener appears first — that's the outermost structure
+    candidates = [(text.find("{"), "{", "}"), (text.find("["), "[", "]")]
+    candidates = [c for c in candidates if c[0] != -1]
+    candidates.sort()
+    for start, opener, closer in candidates:
         depth = 0
         in_str = False
         esc = False
@@ -102,8 +118,24 @@ def translate_segments(
             for attempt in range(3):
                 try:
                     reply = _chat(client, cfg, [{"role": "user", "content": prompt}], temperature=0.2)
-                    for item in _extract_json(reply):
-                        translations[ci * 40 + int(item["i"])] = str(item.get("t", "")).strip()
+                    parsed = _extract_json(reply)
+                    if not isinstance(parsed, list):
+                        raise ValueError("expected JSON array")
+                    for item in parsed:
+                        if isinstance(item, dict) and "i" in item:
+                            translations[ci * 40 + int(item["i"])] = str(item.get("t", "")).strip()
+                        elif isinstance(item, str):
+                            # "[12] translation text" or "12. translation"
+                            m = re.match(r"^\[?(\d+)\]?\s*[.、:：]?\s*(.*)$", item.strip())
+                            if m:
+                                translations[ci * 40 + int(m.group(1))] = m.group(2).strip()
+                        elif isinstance(item, dict):
+                            # tolerant key variants like {"id":1,"translation":"..."}
+                            idx = item.get("id", item.get("index", item.get("n")))
+                            if idx is not None:
+                                translations[ci * 40 + int(idx)] = str(
+                                    item.get("t", item.get("translation", item.get("text", "")))
+                                ).strip()
                     break
                 except (ValueError, KeyError, RuntimeError, httpx.HTTPError) as exc:
                     if attempt == 2:

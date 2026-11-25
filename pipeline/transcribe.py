@@ -2,7 +2,9 @@
 OpenAI-compatible /v1/audio/transcriptions endpoint, merge with offsets."""
 from __future__ import annotations
 
+import base64
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
@@ -65,6 +67,64 @@ def split_audio(wav_path: Path, out_dir: Path, seg_seconds: int) -> list[Path]:
     return parts
 
 
+def _transcribe_via_chat(
+    client: httpx.Client,
+    base_url: str,
+    api_key: str,
+    model: str,
+    part: Path,
+    offset: float,
+) -> list[dict[str, Any]]:
+    """Transcribe an audio segment through chat completions with input_audio.
+
+    No native timestamps — we ask the model for line-per-sentence output and
+    distribute the segment duration evenly across lines (line count ≈ speech density).
+    """
+    data = part.read_bytes()
+    b64 = base64.b64encode(data).decode()
+    r = client.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": (
+                    "逐字转写这段音频。要求：按说话顺序输出，每句话单独一行；"
+                    "保留原始语言（中文说中文，英文说英文）；不要添加任何解释、总结或标注。"
+                )},
+                {"type": "input_audio", "input_audio": {"data": f"data:audio/mp3;base64,{b64}", "format": "mp3"}},
+            ]}],
+            "max_tokens": 8000,
+            "temperature": 0,
+        },
+        timeout=600,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"转写 chat API {r.status_code}: {r.text[:300]}")
+    content = r.json()["choices"][0]["message"]["content"].strip()
+    if not content:
+        return []
+
+    part_dur = probe_duration(part)
+    lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    # strip markdown list artifacts
+    lines = [re.sub(r"^[-*\d.、)\s]+", "", ln) or ln for ln in lines]
+    n = max(len(lines), 1)
+    dur_per = part_dur / n
+    segments = []
+    t = offset
+    for ln in lines:
+        segments.append({
+            "start": t,
+            "end": t + dur_per,
+            "text": ln,
+            "lang": detect_lang(ln),
+            "source": "asr",
+        })
+        t += dur_per
+    return segments
+
+
 def _transcribe_segment(
     client: httpx.Client,
     base_url: str,
@@ -73,8 +133,12 @@ def _transcribe_segment(
     part: Path,
     offset: float,
     language: str | None,
+    mode: str = "api",
 ) -> list[dict[str, Any]]:
-    """Call /v1/audio/transcriptions with verbose_json; fall back to plain text."""
+    """Call /v1/audio/transcriptions with verbose_json; fall back to plain text.
+    For omni-style models (mode='chat'), routes through chat completions instead."""
+    if mode == "chat":
+        return _transcribe_via_chat(client, base_url, api_key, model, part, offset)
     with part.open("rb") as fh:
         files = {"file": (part.name, fh, "audio/wav")}
         data: dict[str, Any] = {"model": model, "response_format": "verbose_json"}
@@ -133,6 +197,32 @@ def detect_lang(text: str) -> str:
     return "zh" if cjk > letters * 0.3 else "en"
 
 
+def _provider(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Resolve {base_url, api_key, model, mode} for the ASR provider.
+
+    mode: "api"  -> /v1/audio/transcriptions (whisper-style)
+          "chat" -> chat completions with input_audio (omni models)
+    Determined from the model name: omni/audio/qwen-audio models speak chat.
+    """
+    providers = cfg.get("providers") or []
+    pid = cfg.get("asr_provider")
+    prov = next((p for p in providers if p.get("id") == pid), None)
+    if prov is None and providers:
+        prov = providers[0]
+    if prov:
+        base = prov.get("base_url", "").rstrip("/")
+        key = prov.get("api_key", "")
+        model = cfg.get("asr_model") or "whisper-1"
+    else:  # legacy flat config
+        base = (cfg.get("asr_base_url") or cfg.get("base_url") or "").rstrip("/")
+        key = cfg.get("asr_api_key") or cfg.get("api_key", "")
+        model = cfg.get("asr_model") or cfg.get("transcribe_model") or "whisper-1"
+    low = model.lower()
+    is_chat_audio = any(k in low for k in ("omni", "qwen-audio", "audio-chat", "gemini", "gpt-4o-audio"))
+    return {"base_url": base, "api_key": key, "model": model,
+            "mode": "chat" if is_chat_audio else "api"}
+
+
 def transcribe(
     media_path: Path,
     cfg: dict[str, Any],
@@ -140,11 +230,13 @@ def transcribe(
     progress_cb: Callable[[float, str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
-    base_url = (cfg.get("base_url") or "").rstrip("/")
-    api_key = cfg.get("api_key") or ""
-    model = cfg.get("transcribe_model") or "whisper-1"
+    prov = _provider(cfg)
+    base_url = prov["base_url"]
+    api_key = prov["api_key"]
+    model = prov["model"]
+    mode = prov["mode"]
     if not base_url:
-        raise RuntimeError("API base_url 未配置")
+        raise RuntimeError("转写 API base_url 未配置")
     seg_minutes = int(cfg.get("segment_minutes") or 5)
 
     audio_dir = workdir / "audio"
@@ -169,7 +261,7 @@ def transcribe(
             if progress_cb:
                 progress_cb(i / len(parts), f"转写分段 {i + 1}/{len(parts)}…")
             all_segments.extend(
-                _transcribe_segment(client, base_url, api_key, model, part, offset, None)
+                _transcribe_segment(client, base_url, api_key, model, part, offset, None, mode)
             )
 
     all_segments.sort(key=lambda s: s["start"])

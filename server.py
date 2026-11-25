@@ -1,11 +1,14 @@
-"""DeepRead — English intensive-reading study platform.
+﻿"""DeepRead — English intensive-reading study platform.
 
 FastAPI backend: course library, upload, generation pipeline orchestration,
 progress persistence, media streaming with Range support.
+
+Config model: multiple API providers (name + base_url + api_key); each role
+('asr' = transcription, 'chat' = translations & lesson generation) points at
+one provider.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import shutil
 import threading
@@ -20,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from pipeline.lesson import generate_lesson
-from pipeline.transcribe import transcribe
+from pipeline.transcribe import transcribe, PipelineCancelled
 from pipeline.align import align
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -40,10 +43,11 @@ app = FastAPI(title="DeepRead")
 # ---------------------------------------------------------------- config
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "base_url": "",
-    "api_key": "",
-    "transcribe_model": "whisper-1",
-    "chat_model": "gpt-4o-mini",
+    "providers": [],      # [{id, name, base_url, api_key}]
+    "asr_provider": "",   # provider id used for transcription
+    "chat_provider": "",  # provider id used for chat
+    "asr_model": "",
+    "chat_model": "",
     "segment_minutes": 5,
 }
 
@@ -52,14 +56,59 @@ def load_config() -> dict[str, Any]:
     cfg = dict(DEFAULT_CONFIG)
     if CONFIG_PATH.exists():
         try:
-            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+            stored = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
-            pass
+            stored = {}
+        if stored.get("providers"):
+            cfg.update({k: v for k, v in stored.items() if k in DEFAULT_CONFIG})
+        else:
+            # migrate legacy flat configs (single API or two-group) into providers
+            legacy_groups = []
+            if stored.get("base_url") or stored.get("api_key"):
+                legacy_groups.append({
+                    "name": "旧配置",
+                    "base_url": stored.get("base_url", ""),
+                    "api_key": stored.get("api_key", ""),
+                })
+            for gname, prefix in (("转写(旧)", "asr_"), ("Chat(旧)", "chat_")):
+                if stored.get(f"{prefix}base_url") or stored.get(f"{prefix}api_key"):
+                    legacy_groups.append({
+                        "name": gname,
+                        "base_url": stored.get(f"{prefix}base_url", ""),
+                        "api_key": stored.get(f"{prefix}api_key", ""),
+                    })
+            if legacy_groups:
+                providers = []
+                for g in legacy_groups:
+                    providers.append({
+                        "id": uuid.uuid4().hex[:8],
+                        "name": g["name"],
+                        "base_url": g["base_url"],
+                        "api_key": g["api_key"],
+                    })
+                cfg["providers"] = providers
+                cfg["asr_provider"] = providers[0]["id"]
+                cfg["chat_provider"] = providers[-1]["id"]
+                cfg["asr_model"] = stored.get("transcribe_model") or stored.get("asr_model") or ""
+                cfg["chat_model"] = stored.get("chat_model") or ""
+                # persist the migration so provider ids stay stable across restarts
+                save_config(cfg)
     return cfg
 
 
 def save_config(cfg: dict[str, Any]) -> None:
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_provider_cfg(cfg: dict[str, Any], group: str) -> dict[str, Any]:
+    """Resolve {base_url, api_key} for a role ('asr'/'chat')."""
+    pid = cfg.get(f"{group}_provider")
+    prov = next((p for p in cfg.get("providers", []) if p.get("id") == pid), None)
+    if prov is None and cfg.get("providers"):
+        prov = cfg["providers"][0]
+    if prov is None:
+        return {"base_url": "", "api_key": ""}
+    return {"base_url": prov.get("base_url", ""), "api_key": prov.get("api_key", "")}
 
 
 def mask_key(key: str) -> str:
@@ -70,10 +119,19 @@ def mask_key(key: str) -> str:
     return key[:4] + "*" * (len(key) - 8) + key[-4:]
 
 
+def _masked_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    out = dict(cfg)
+    out["providers"] = [
+        {**p, "api_key": mask_key(p.get("api_key", ""))} for p in cfg.get("providers", [])
+    ]
+    out["has_key"] = any(p.get("api_key") for p in cfg.get("providers", []))
+    return out
+
+
 # ---------------------------------------------------------------- course store
 
 class JobState:
-    """In-memory pipeline job state; disk status.json is the source of truth for recovery."""
+    """In-memory pipeline job state."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -127,11 +185,12 @@ def run_pipeline(cid: str) -> None:
     media_path = Path(meta.get("media_path", ""))
     try:
         try:
+            cfg = load_config()
             # 1. dual-channel text acquisition
             set_stage(cid, "transcribing", "调用转写 API 中…", 0.05)
             transcript = transcribe(
                 media_path,
-                cfg=load_config(),
+                cfg=cfg,
                 workdir=cdir,
                 progress_cb=lambda p, msg: set_stage(cid, "transcribing", msg, 0.05 + 0.5 * p),
                 should_cancel=lambda: bool(job and job.cancelled),
@@ -148,7 +207,7 @@ def run_pipeline(cid: str) -> None:
             # 3. lesson generation
             lesson = generate_lesson(
                 segments,
-                cfg=load_config(),
+                cfg=cfg,
                 progress_cb=lambda p, msg: set_stage(cid, "generating", msg, 0.65 + 0.33 * p),
                 should_cancel=lambda: bool(job and job.cancelled),
             )
@@ -158,18 +217,14 @@ def run_pipeline(cid: str) -> None:
             write_json(cdir / "meta.json", meta)
             set_stage(cid, "ready", "课程生成完成", 1.0)
         except PipelineCancelled:
-            set_stage(cid, "cancelled", "任务已取消", read_json(cdir / "status.json", {}).get("progress", 0))
+            prog = (read_json(cdir / "status.json", {}) or {}).get("progress", 0)
+            set_stage(cid, "cancelled", "任务已取消", prog)
         except Exception as exc:  # noqa: BLE001 — surface any pipeline failure to the UI
             set_stage(cid, "error", f"{type(exc).__name__}: {exc}")
     finally:
         JOBS.pop(cid, None)
 
 
-class PipelineCancelled(Exception):
-    pass
-
-
-# subtitles import placed here to avoid circulars is unnecessary; direct import is fine
 from pipeline.subtitles import extract_subtitle_channel  # noqa: E402
 
 
@@ -177,60 +232,119 @@ from pipeline.subtitles import extract_subtitle_channel  # noqa: E402
 
 @app.get("/api/config")
 def get_config():
-    cfg = load_config()
-    cfg["api_key"] = mask_key(cfg.get("api_key", ""))
-    cfg["has_key"] = bool(load_config().get("api_key"))
-    return cfg
+    return _masked_config(load_config())
 
 
 @app.put("/api/config")
 async def put_config(request: Request):
     body = await request.json()
     cfg = load_config()
-    for k in DEFAULT_CONFIG:
+    if isinstance(body.get("providers"), list):
+        stored = {p["id"]: p for p in cfg.get("providers", [])}
+        incoming = []
+        for p in body["providers"]:
+            pid = p.get("id") or uuid.uuid4().hex[:8]
+            key = p.get("api_key", "")
+            # masked or empty key -> keep the stored one
+            if "*" in key or not key:
+                key = stored.get(pid, {}).get("api_key", "")
+            incoming.append({
+                "id": pid,
+                "name": p.get("name", "未命名"),
+                "base_url": p.get("base_url", ""),
+                "api_key": key,
+            })
+        cfg["providers"] = incoming
+        live_ids = {p["id"] for p in incoming}
+        if cfg.get("asr_provider") not in live_ids:
+            cfg["asr_provider"] = incoming[0]["id"] if incoming else ""
+        if cfg.get("chat_provider") not in live_ids:
+            cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
+    for k in ("asr_provider", "chat_provider", "asr_model", "chat_model", "segment_minutes"):
         if k in body:
-            val = body[k]
-            # don't overwrite a stored key with the masked placeholder
-            if k == "api_key" and isinstance(val, str) and ("*" in val or val == ""):
-                continue
-            cfg[k] = val
+            cfg[k] = body[k]
     save_config(cfg)
     return {"ok": True}
 
 
-@app.post("/api/config/test")
-async def test_config():
-    """Test both the transcription endpoint and the chat endpoint."""
+@app.get("/api/config/models")
+async def list_models(provider_id: str = ""):
+    """Fetch the model list from a provider (default: active chat provider)."""
     import httpx
 
     cfg = load_config()
-    base = (cfg.get("base_url") or "").rstrip("/")
-    if not base:
-        raise HTTPException(400, "base_url 未配置")
-    results = {"transcribe": False, "chat": False, "detail": ""}
-    headers = {"Authorization": f"Bearer {cfg.get('api_key', '')}"}
-    async with httpx.AsyncClient(timeout=30) as client:
-        # chat endpoint probe
-        try:
-            r = await client.post(
-                f"{base}/chat/completions",
-                headers=headers,
-                json={"model": cfg["chat_model"], "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
-            )
-            results["chat"] = r.status_code == 200
-            if r.status_code != 200:
-                results["detail"] = f"chat {r.status_code}: {r.text[:200]}"
-        except Exception as exc:  # noqa: BLE001
-            results["detail"] = f"chat: {exc}"
-        # transcriptions endpoint probe (list models as a cheap proxy)
-        try:
+    pid = provider_id or cfg.get("chat_provider") or (cfg["providers"][0]["id"] if cfg.get("providers") else "")
+    prov = next((p for p in cfg.get("providers", []) if p.get("id") == pid), None)
+    if prov is None:
+        raise HTTPException(400, "provider 不存在")
+    base = (prov.get("base_url") or "").rstrip("/")
+    headers = {"Authorization": f"Bearer {prov.get('api_key', '')}"}
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
             r = await client.get(f"{base}/models", headers=headers)
-            results["transcribe"] = r.status_code == 200
-            if r.status_code != 200 and not results["detail"]:
-                results["detail"] = f"models {r.status_code}: {r.text[:200]}"
-        except Exception as exc:  # noqa: BLE001
-            if not results["detail"]:
-                results["detail"] = f"models: {exc}"
+        if r.status_code != 200:
+            raise HTTPException(502, f"获取模型列表失败 HTTP {r.status_code}")
+        data = r.json().get("data", [])
+        ids = [m.get("id") for m in data if m.get("id")]
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"连接失败: {exc}")
+    asr = [m for m in ids if any(k in m.lower() for k in
+           ("whisper", "transcri", "asr", "audio", "speech", "sensevoice", "paraformer", "funasr", "vox"))]
+    return {"models": ids, "asr_models": asr or ids}
+
+
+@app.post("/api/config/test")
+async def test_config(request: Request):
+    """Probe providers: real chat + transcription endpoint checks.
+
+    Body (all optional): {provider_id?, asr_provider?, chat_provider?, asr_model?, chat_model?}
+    """
+    import httpx
+
+    cfg = load_config()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    results = {"transcribe": False, "chat": False, "detail": ""}
+
+    def resolve(group: str):
+        pid = body.get(f"{group}_provider") or body.get("provider_id") or cfg.get(f"{group}_provider")
+        prov = next((p for p in cfg.get("providers", []) if p.get("id") == pid), None)
+        if prov is None and cfg.get("providers"):
+            prov = cfg["providers"][0]
+        return prov
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        chat_prov = resolve("chat")
+        if chat_prov:
+            base = (chat_prov.get("base_url") or "").rstrip("/")
+            headers = {"Authorization": f"Bearer {chat_prov.get('api_key', '')}"}
+            chat_model = body.get("chat_model") or cfg.get("chat_model") or "gpt-4o-mini"
+            try:
+                r = await client.post(
+                    f"{base}/chat/completions", headers=headers,
+                    json={"model": chat_model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1},
+                )
+                results["chat"] = r.status_code == 200
+                if r.status_code != 200:
+                    results["detail"] = f"chat {r.status_code}: {r.text[:200]}"
+            except Exception as exc:  # noqa: BLE001
+                results["detail"] = f"chat: {exc}"
+
+        asr_prov = resolve("asr")
+        if asr_prov:
+            base = (asr_prov.get("base_url") or "").rstrip("/")
+            headers = {"Authorization": f"Bearer {asr_prov.get('api_key', '')}"}
+            try:
+                r = await client.get(f"{base}/models", headers=headers)
+                results["transcribe"] = r.status_code == 200
+                if r.status_code != 200 and not results["detail"]:
+                    results["detail"] = f"asr models {r.status_code}: {r.text[:200]}"
+            except Exception as exc:  # noqa: BLE001
+                if not results["detail"]:
+                    results["detail"] = f"asr: {exc}"
+
     if not (results["transcribe"] or results["chat"]):
         raise HTTPException(502, results["detail"] or "连接失败")
     return results
@@ -246,7 +360,6 @@ def list_courses():
             continue
         meta = read_json(cdir / "meta.json", {}) or {}
         status = read_json(cdir / "status.json", {}) or {}
-        lesson = read_json(cdir / "lesson.json") or {}
         progress = read_json(cdir / "progress.json", {}) or {}
         items.append({
             "id": cdir.name,
@@ -297,8 +410,13 @@ def generate(cid: str):
     status = read_json(cdir / "status.json", {}) or {}
     if status.get("stage") in {"transcribing", "subtitles", "aligning", "generating"}:
         raise HTTPException(409, "课程正在生成中")
-    if not load_config().get("base_url"):
+    cfg = load_config()
+    if not cfg.get("providers"):
         raise HTTPException(400, "请先在设置页配置 API")
+    if not get_provider_cfg(cfg, "asr").get("base_url"):
+        raise HTTPException(400, "转写 provider 未配置")
+    if not get_provider_cfg(cfg, "chat").get("base_url"):
+        raise HTTPException(400, "Chat provider 未配置")
     if cid not in JOBS:
         JOBS[cid] = JobState()
         threading.Thread(target=run_pipeline, args=(cid,), daemon=True).start()
@@ -370,7 +488,6 @@ def media_file(cid: str, request: Request):
     content_type = "video/mp4" if media_path.suffix == ".mp4" else "application/octet-stream"
     range_header = request.headers.get("range")
     if range_header:
-        # bytes=start-end
         try:
             unit, rng = range_header.split("=", 1)
             start_s, end_s = rng.split("-", 1)
@@ -411,7 +528,10 @@ def media_file(cid: str, request: Request):
 
 @app.get("/")
 def index():
-    return FileResponse(APP_DIR / "index.html")
+    return FileResponse(
+        APP_DIR / "index.html",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 app.mount("/static", StaticFiles(directory=APP_DIR), name="static")
