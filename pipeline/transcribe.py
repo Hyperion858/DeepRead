@@ -82,6 +82,7 @@ def _transcribe_via_chat(
     """
     data = part.read_bytes()
     b64 = base64.b64encode(data).decode()
+    fmt = "mp3" if part.suffix.lower() == ".mp3" else "wav"
     r = client.post(
         f"{base_url}/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
@@ -92,7 +93,7 @@ def _transcribe_via_chat(
                     "逐字转写这段音频。要求：按说话顺序输出，每句话单独一行；"
                     "保留原始语言（中文说中文，英文说英文）；不要添加任何解释、总结或标注。"
                 )},
-                {"type": "input_audio", "input_audio": {"data": f"data:audio/mp3;base64,{b64}", "format": "mp3"}},
+                {"type": "input_audio", "input_audio": {"data": f"data:audio/{fmt};base64,{b64}", "format": fmt}},
             ]}],
             "max_tokens": 8000,
             "temperature": 0,
@@ -256,17 +257,41 @@ def transcribe(
     seg_secs = max(seg_minutes * 60, 60) if mode == "api" else 60
     parts = split_audio(wav, audio_dir / "parts", seg_secs)
 
+    # compress chat-mode parts to mp3: ~6x smaller upload per segment
+    if mode == "chat":
+        mp3_parts = []
+        for part in parts:
+            mp3 = part.with_suffix(".mp3")
+            r = _run(["ffmpeg", "-y", "-i", str(part), "-b:a", "48k", str(mp3)], timeout=300)
+            mp3_parts.append(mp3 if (r.returncode == 0 and mp3.exists()) else part)
+        parts = mp3_parts
+
     all_segments: list[dict[str, Any]] = []
-    with httpx.Client() as client:
-        for i, part in enumerate(parts):
-            if should_cancel and should_cancel():
-                raise PipelineCancelled()
-            offset = i * seg_secs
+
+    # concurrent transcription: segments are independent; 4 workers balance
+    # speed against relay rate limits
+    import concurrent.futures as _futures
+
+    def _transcribe_one(i: int) -> list[dict[str, Any]]:
+        if should_cancel and should_cancel():
+            raise PipelineCancelled()
+        offset = i * seg_secs
+        with httpx.Client(timeout=httpx.Timeout(connect=15, read=300, write=120, pool=15)) as client:
+            return _transcribe_segment(client, base_url, api_key, model, parts[i], offset, None, mode)
+
+    done = 0
+    with _futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(_transcribe_one, i): i for i in range(len(parts))}
+        for fut in _futures.as_completed(futures):
+            i = futures[fut]
+            try:
+                all_segments.extend(fut.result())
+            except PipelineCancelled:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            done += 1
             if progress_cb:
-                progress_cb(i / len(parts), f"转写分段 {i + 1}/{len(parts)}…")
-            all_segments.extend(
-                _transcribe_segment(client, base_url, api_key, model, part, offset, None, mode)
-            )
+                progress_cb(done / len(parts), f"转写分段 {done}/{len(parts)}…")
 
     all_segments.sort(key=lambda s: s["start"])
     if progress_cb:

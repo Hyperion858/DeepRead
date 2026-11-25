@@ -119,6 +119,14 @@ def merge_cues(frame_texts: list[tuple[float, str]], interval: float,
                 cur_text = text  # OCR caught a fuller line (fade-in etc.)
             last_seen = t
             continue
+        # caption switch: if the new caption starts where the old one ended
+        # (a long sentence split across two frames), join instead of cut
+        if (norm and cur_text is not None and last_seen is not None
+                and abs(t - last_seen) <= interval + 0.01
+                and _is_continuation(cur_text, text)):
+            cur_text = cur_text.rstrip("。，,．.？！?!；;：:…") + text.lstrip()
+            last_seen = t
+            continue
         if cur_text is not None and _norm(cur_text):
             cues.append({
                 "start": max(0.0, cur_start - interval / 2),
@@ -135,6 +143,28 @@ def merge_cues(frame_texts: list[tuple[float, str]], interval: float,
             "lang": detect_lang(cur_text),
         })
     return [c for c in cues if len(_norm(c["text"])) >= min_chars]
+
+
+def _is_continuation(prev: str, nxt: str) -> bool:
+    """Heuristic: the next caption continues an unfinished sentence when the
+    previous one lacks terminal punctuation and the next lacks a capital at
+    an English sentence start / is short."""
+    p = prev.strip()
+    n = nxt.strip()
+    if not p or not n:
+        return False
+    # unfinished prev: no ending punctuation
+    if p[-1] in "。．.？！?!":
+        return False
+    # english: next starting lowercase suggests continuation
+    if p[-1] in "，,、；;：:" :
+        return True
+    if n[0].isascii() and n[0].isalpha() and n[0].islower():
+        return True
+    # chinese: prev ending with connector words
+    if p[-1] in "的和是在了把对跟与或":
+        return True
+    return False
 
 
 def extract_ocr_subtitles(
