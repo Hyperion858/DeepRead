@@ -1,12 +1,13 @@
-/* DeepRead SPA — hash routing: #/ library, #/settings, #/course/<id> */
+/* DeepRead SPA — menu layout.
+   Pages: #/ home, #/library materials, #/courses library, #/settings models, #/backup */
 "use strict";
 
 const $app = document.getElementById("app");
 const state = {
-  course: null,      // full course payload {meta, status, source, lesson}
-  progress: null,    // {read:[ids], cards:{termId: 'known'|'unknown'}}
+  course: null,
+  progress: null,
   tab: "read",
-  abLoop: null,      // {a: sec, b: sec}
+  abLoop: null,
   pollTimer: null,
 };
 
@@ -49,6 +50,32 @@ async function api(path, opts = {}) {
   return r.json();
 }
 
+/* ---------------- layout shell ---------------- */
+const NAV = [
+  { hash: "#/",         key: "home",     icon: "🏠", label: "首页" },
+  { hash: "#/library",  key: "library",  icon: "📥", label: "素材库" },
+  { hash: "#/courses",  key: "courses",  icon: "📚", label: "课程库" },
+  { hash: "#/settings", key: "settings", icon: "🧠", label: "模型配置" },
+  { hash: "#/backup",   key: "backup",   icon: "💾", label: "备份与恢复" },
+];
+
+function shell(activeKey, contentHtml) {
+  return `
+  <div class="frame">
+    <aside class="sidebar">
+      <div class="logo"><b><span>Deep</span>Read</b><div class="logo-sub">英语精读工坊</div></div>
+      <nav>
+        ${NAV.map((n) => `
+        <a href="${n.hash}" class="nav-item ${n.key === activeKey ? "active" : ""}">
+          <span class="nav-icon">${n.icon}</span><span>${n.label}</span>
+        </a>`).join("")}
+      </nav>
+      <div class="sidebar-foot">v0.1.0</div>
+    </aside>
+    <main class="main">${contentHtml}</main>
+  </div>`;
+}
+
 /* ---------------- router ---------------- */
 window.addEventListener("hashchange", route);
 
@@ -57,31 +84,73 @@ function route() {
   const hash = location.hash || "#/";
   const m = hash.match(/^#\/course\/([\w-]+)/);
   if (m) return renderCourse(m[1]);
+  if (hash.startsWith("#/library")) return renderLibrary();
+  if (hash.startsWith("#/courses")) return renderCourses();
   if (hash.startsWith("#/settings")) return renderSettings();
-  return renderLibrary();
+  if (hash.startsWith("#/backup")) return renderBackup();
+  return renderHome();
 }
 
-/* ================= Library ================= */
-async function renderLibrary() {
+/* ================= Home ================= */
+async function renderHome() {
   document.title = "DeepRead · 英语精读";
-  $app.innerHTML = `
-    <div class="library">
-      <div class="lib-head">
-        <h1><span>Deep</span>Read</h1>
-        <div class="lib-actions">
-          <button id="btn-settings">⚙ 设置</button>
-        </div>
+  let courses = [];
+  let stats = { ready: 0, learning: 0, minutes: 0 };
+  try {
+    courses = await api("/api/courses");
+    stats.ready = courses.filter((c) => c.stage === "ready").length;
+    stats.learning = courses.filter((c) => c.learned_percent > 0).length;
+    stats.minutes = Math.round(courses.reduce((a, c) => a + (c.duration || 0), 0) / 60);
+  } catch {}
+  const recent = courses.filter((c) => c.stage === "ready").slice(0, 3);
+  $app.innerHTML = shell("home", `
+    <div class="page">
+      <h1>继续学习</h1>
+      <div class="stat-row">
+        <div class="stat"><div class="stat-n">${stats.ready}</div><div class="stat-l">课程</div></div>
+        <div class="stat"><div class="stat-n">${stats.learning}</div><div class="stat-l">学习中</div></div>
+        <div class="stat"><div class="stat-n">${stats.minutes}</div><div class="stat-l">素材分钟数</div></div>
       </div>
+      ${recent.length ? `
+      <div class="course-grid">
+        ${recent.map((c) => `
+        <div class="course-card" onclick="location.hash='#/course/${c.id}'">
+          <div class="cc-title">${esc(c.title)}</div>
+          <div class="cc-meta"><span class="badge ready">可学习</span><span>${fmtDuration(c.duration)}</span></div>
+          <div class="progressbar"><div style="width:${c.learned_percent || 0}%"></div></div>
+          <div class="cc-detail">已学 ${c.learned_percent || 0}%</div>
+        </div>`).join("")}
+      </div>` : `
+      <div class="empty-tip">还没有课程。去 <a href="#/library">素材库</a> 上传视频或粘贴抖音链接，生成第一门精读课。</div>`}
+      <div class="quick-actions">
+        <a class="qa" href="#/library"><b>📥 添加素材</b><span>上传文件 / 抖音链接</span></a>
+        <a class="qa" href="#/courses"><b>📚 课程库</b><span>全部课程与进度</span></a>
+      </div>
+    </div>`);
+}
+
+/* ================= Library (materials) ================= */
+async function renderLibrary() {
+  document.title = "素材库 · DeepRead";
+  $app.innerHTML = shell("library", `
+    <div class="page">
+      <h1>素材库</h1>
       <div class="dropzone" id="dropzone">
         <div class="dz-icon">⬆️</div>
         <div>拖拽视频 / 音频文件到这里，或点击选择</div>
-        <div class="dz-hint">支持 mp4 / mkv / mov / mp3 / wav / m4a 等 · 内嵌字幕会被自动提取并与转写融合</div>
+        <div class="dz-hint">支持 mp4 / mkv / mov / mp3 / wav / m4a 等 · 上传后自动进入生成流水线</div>
         <input type="file" id="file-input" hidden accept="video/*,audio/*">
       </div>
-      <div class="course-grid" id="course-grid"><div class="spinner"></div></div>
-    </div>`;
+      <div class="section-title">或粘贴视频链接（抖音 / B站 / YouTube 等yt-dlp支持的站点）</div>
+      <div style="display:flex;gap:8px">
+        <input id="url-input" type="text" placeholder="https://v.douyin.com/...">
+        <button class="primary" id="url-go">获取视频</button>
+      </div>
+      <div class="cal-hint" style="margin-top:8px">
+        抖音等平台的画面硬字幕会通过 OCR 自动识别，与语音转写交叉校对；无字幕的画面只用转写。
+      </div>
+    </div>`);
 
-  document.getElementById("btn-settings").onclick = () => (location.hash = "#/settings");
   const dz = document.getElementById("dropzone");
   const fi = document.getElementById("file-input");
   dz.onclick = () => fi.click();
@@ -92,9 +161,47 @@ async function renderLibrary() {
     e.preventDefault(); dz.classList.remove("dragover");
     if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
   };
+  document.getElementById("url-go").onclick = importUrl;
+  document.getElementById("url-input").onkeydown = (e) => { if (e.key === "Enter") importUrl(); };
+}
 
+async function uploadFile(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  toast(`上传中: ${file.name}…`);
+  try {
+    const res = await api("/api/courses/upload", { method: "POST", body: fd });
+    toast("上传完成，开始生成…");
+    await api(`/api/courses/${res.id}/generate`, { method: "POST" }).catch(() => {});
+    location.hash = "#/courses";
+  } catch (err) {
+    toast(`上传失败: ${err.message}`);
+  }
+}
+
+async function importUrl() {
+  const input = document.getElementById("url-input");
+  const url = input.value.trim();
+  if (!url) { toast("请先粘贴链接"); return; }
+  toast("链接导入中…");
+  try {
+    const res = await api("/api/courses/import", { method: "POST", body: JSON.stringify({ url }) });
+    toast("已开始下载并生成，可在课程库查看进度");
+    location.hash = "#/courses";
+  } catch (err) {
+    toast(`导入失败: ${err.message}`);
+  }
+}
+
+/* ================= Courses ================= */
+async function renderCourses() {
+  document.title = "课程库 · DeepRead";
+  $app.innerHTML = shell("courses", `
+    <div class="page">
+      <h1>课程库</h1>
+      <div class="course-grid" id="course-grid"><div class="spinner"></div></div>
+    </div>`);
   await refreshCourses();
-  // poll while any course is generating
   state.pollTimer = setInterval(refreshCourses, 3000);
 }
 
@@ -104,15 +211,16 @@ async function refreshCourses() {
     const grid = document.getElementById("course-grid");
     if (!grid) return;
     if (!list.length) {
-      grid.innerHTML = `<div class="empty-tip" style="grid-column:1/-1">还没有课程，上传第一个视频开始吧</div>`;
+      grid.innerHTML = `<div class="empty-tip" style="grid-column:1/-1">还没有课程，去 <a href="#/library">素材库</a> 添加</div>`;
       return;
     }
     grid.innerHTML = list.map((c) => {
       const stageLabel = {
-        uploaded: "待生成", transcribing: "转写", subtitles: "字幕", aligning: "对齐",
-        generating: "精讲", ready: "完成", error: "失败", cancelled: "已取消",
+        downloading: "下载中", uploaded: "待生成", transcribing: "转写", subtitles: "字幕",
+        ocr: "OCR 字幕", aligning: "对齐", generating: "精讲", ready: "完成",
+        error: "失败", cancelled: "已取消",
       }[c.stage] || c.stage;
-      const working = ["transcribing", "subtitles", "aligning", "generating"].includes(c.stage);
+      const working = ["downloading", "transcribing", "subtitles", "ocr", "aligning", "generating"].includes(c.stage);
       const badgeCls = c.stage === "ready" ? "ready" : c.stage === "error" ? "error" : working ? "working" : "";
       return `
       <div class="course-card" data-id="${c.id}">
@@ -124,7 +232,8 @@ async function refreshCourses() {
         </div>
         ${working ? `<div class="progressbar"><div style="width:${Math.round((c.progress || 0) * 100)}%"></div></div>
                      <div class="cc-detail">${esc(c.detail || "")}</div>` : ""}
-        ${c.stage === "ready" ? `<div class="cc-detail">已学 ${c.learned_percent || 0}%</div>` : ""}
+        ${c.stage === "ready" ? `<div class="progressbar"><div style="width:${c.learned_percent || 0}%"></div></div>
+                                 <div class="cc-detail">已学 ${c.learned_percent || 0}%</div>` : ""}
         ${c.stage === "uploaded" ? `<button class="primary" data-gen="${c.id}">开始生成</button>` : ""}
         ${c.stage === "error" ? `<div class="cc-detail" style="color:var(--red)">${esc(c.detail || "")}</div>
                                  <button class="primary" data-gen="${c.id}">重试</button>` : ""}
@@ -162,392 +271,10 @@ async function refreshCourses() {
   }
 }
 
-async function uploadFile(file) {
-  const fd = new FormData();
-  fd.append("file", file);
-  toast(`上传中: ${file.name}…`);
-  try {
-    const res = await api("/api/courses/upload", { method: "POST", body: fd });
-    toast("上传完成，开始生成…");
-    await api(`/api/courses/${res.id}/generate`, { method: "POST" }).catch(() => {});
-    refreshCourses();
-  } catch (err) {
-    toast(`上传失败: ${err.message}`);
-  }
-}
-
-/* ================= Settings ================= */
-function renderSettings() {
-  document.title = "设置 · DeepRead";
-  $app.innerHTML = `
-    <div class="settings" style="max-width:680px">
-      <h1>API 管理</h1>
-      <p style="color:var(--ink-2);font-size:13.5px">
-        添加多个中转 API（OpenAI 兼容），随时切换。转写和 Chat 可使用不同的 API。
-        Key 保存在服务器本地 data/config.json。
-      </p>
-
-      <div class="section-title">API 提供商</div>
-      <div id="prov-list"></div>
-      <button id="prov-add">+ 添加 API</button>
-
-      <div class="section-title">角色分配</div>
-      <div class="form-row"><label>转写 API（需要 /v1/audio/transcriptions，whisper 类模型）</label>
-        <select id="role-asr"></select></div>
-      <div class="form-row"><label>转写模型</label>
-        <div style="display:flex;gap:8px">
-          <select id="cfg-asr" style="flex:1"></select>
-          <button id="cfg-refresh-asr" type="button" title="从转写 API 获取模型列表">↻ 获取模型</button>
-        </div>
-        <input id="cfg-asr-custom" type="text" placeholder="或手动输入模型名" style="margin-top:6px"></div>
-      <div class="form-row"><label>Chat API（翻译 + 精讲生成）</label>
-        <select id="role-chat"></select></div>
-      <div class="form-row"><label>Chat 模型</label>
-        <div style="display:flex;gap:8px">
-          <select id="cfg-chat" style="flex:1"></select>
-          <button id="cfg-refresh-chat" type="button" title="从 Chat API 获取模型列表">↻ 获取模型</button>
-        </div></div>
-
-      <div class="form-actions">
-        <button class="primary" id="cfg-save">保存</button>
-        <button id="cfg-test">测试连接</button>
-        <button id="cfg-back">返回</button>
-      </div>
-      <div class="test-result" id="test-result"></div>
-
-      <div class="section-title" style="margin-top:28px">💾 备份与恢复</div>
-      <div class="form-row" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
-        <label style="display:flex;gap:6px;align-items:center;margin:0">
-          <input type="checkbox" id="bk-enabled" style="width:auto"> 每日自动备份
-        </label>
-        <label style="margin:0;display:flex;gap:6px;align-items:center">时间
-          <input type="time" id="bk-time" style="width:110px"></label>
-        <label style="margin:0;display:flex;gap:6px;align-items:center">保留数量
-          <input type="number" id="bk-keep" min="1" max="90" style="width:70px"></label>
-        <label style="display:flex;gap:6px;align-items:center;margin:0">
-          <input type="checkbox" id="bk-media" style="width:auto"> 包含媒体文件（体积大，含视频的备份会有几百 MB）
-        </label>
-        <button id="bk-save-settings">保存备份设置</button>
-        <button id="bk-now">立即备份</button>
-      </div>
-      <div class="form-row" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <label style="margin:0;font-size:13px;color:var(--ink-2)">恢复：选择备份 zip 上传</label>
-        <input type="file" id="bk-restore-file" accept=".zip" style="width:auto">
-        <button id="bk-restore" class="danger">恢复（覆盖当前数据）</button>
-      </div>
-      <div class="cal-hint" style="margin-bottom:8px">
-        备份包含 API 配置、全部课程（转写/精讲/进度/校准）；不含媒体文件 — 恢复后按提示重新上传视频即可自动关联。
-        换部署环境：新机器 docker compose up 后，在此上传备份恢复，再补传媒体。
-      </div>
-      <div id="bk-list"></div>
-      <div id="bk-missing" style="margin-top:10px"></div>
-    </div>`;
-
-  document.getElementById("cfg-back").onclick = () => (location.hash = "#/");
-
-  let providers = [];   // working copy [{id,name,base_url,api_key}]
-  let cfgCache = null;
-  let modelCache = {};  // provider_id -> {models, asr_models}
-
-  async function init() {
-    cfgCache = await api("/api/config");
-    providers = (cfgCache.providers || []).map((p) => ({ ...p }));
-    drawProviders();
-    drawRoles();
-    document.getElementById("role-asr").value = cfgCache.asr_provider || "";
-    document.getElementById("role-chat").value = cfgCache.chat_provider || "";
-    // restore saved models into dropdowns
-    if (cfgCache.asr_model) {
-      fillAsrSelect([cfgCache.asr_model], cfgCache.asr_model);
-      document.getElementById("cfg-asr-custom").value = "";
-    }
-    if (cfgCache.chat_model) fillChatSelect([cfgCache.chat_model], cfgCache.chat_model);
-  }
-
-  function drawProviders() {
-    const wrap = document.getElementById("prov-list");
-    if (!providers.length) {
-      wrap.innerHTML = `<div class="panel-empty" style="padding:16px">还没有 API，点击下方添加</div>`;
-    } else {
-      wrap.innerHTML = providers.map((p, i) => `
-        <div class="hs-card" data-pi="${i}">
-          <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
-            <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 beichenapi）" style="flex:1">
-            <button class="danger p-del" title="删除">✕</button>
-          </div>
-          <div class="form-row" style="margin-bottom:8px"><input class="p-url" value="${esc(p.base_url)}" placeholder="Base URL（https://.../v1）"></div>
-          <div class="form-row" style="margin-bottom:0"><input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="API Key（sk-...）"></div>
-        </div>`).join("");
-    }
-    wrap.querySelectorAll(".p-del").forEach((btn) => {
-      btn.onclick = () => {
-        const i = +btn.closest("[data-pi]").dataset.pi;
-        if (!confirm(`删除 API「${providers[i].name}」？`)) return;
-        providers.splice(i, 1);
-        drawProviders(); drawRoles();
-      };
-    });
-  }
-
-  function collectProviders() {
-    document.querySelectorAll("#prov-list [data-pi]").forEach((card) => {
-      const i = +card.dataset.pi;
-      if (providers[i]) {
-        providers[i].name = card.querySelector(".p-name").value.trim() || `API ${i + 1}`;
-        providers[i].base_url = card.querySelector(".p-url").value.trim();
-        providers[i].api_key = card.querySelector(".p-key").value.trim();
-      }
-    });
-  }
-
-  function drawRoles() {
-    collectProviders();
-    const opts = (sel) => providers.map((p, i) =>
-      `<option value="${esc(p.id)}">${esc(p.name || `API ${i + 1}`)}</option>`).join("");
-    const asrSel = document.getElementById("role-asr");
-    const chatSel = document.getElementById("role-chat");
-    const prevAsr = asrSel.value, prevChat = chatSel.value;
-    asrSel.innerHTML = opts() || `<option value="">（请先添加 API）</option>`;
-    chatSel.innerHTML = opts() || `<option value="">（请先添加 API）</option>`;
-    if (prevAsr && providers.some((p) => p.id === prevAsr)) asrSel.value = prevAsr;
-    if (prevChat && providers.some((p) => p.id === prevChat)) chatSel.value = prevChat;
-    asrSel.onchange = () => fillAsrSelect([], "");
-    chatSel.onchange = () => fillChatSelect([], "");
-  }
-
-  function fillAsrSelect(models, selected) {
-    const sel = document.getElementById("cfg-asr");
-    const keepCustom = document.getElementById("cfg-asr-custom").value.trim();
-    sel.innerHTML = models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
-    if (selected && ![...sel.options].some((o) => o.value === selected)) {
-      sel.insertAdjacentHTML("beforeend", `<option value="${esc(selected)}">${esc(selected)}</option>`);
-    }
-    if (keepCustom && ![...sel.options].some((o) => o.value === keepCustom)) {
-      sel.insertAdjacentHTML("beforeend", `<option value="${esc(keepCustom)}">${esc(keepCustom)}</option>`);
-    }
-    sel.value = selected || keepCustom || sel.value || "";
-  }
-
-  function fillChatSelect(models, selected) {
-    const sel = document.getElementById("cfg-chat");
-    sel.innerHTML = models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
-    if (selected && ![...sel.options].some((o) => o.value === selected)) {
-      sel.insertAdjacentHTML("beforeend", `<option value="${esc(selected)}">${esc(selected)}</option>`);
-    }
-    sel.value = selected || sel.value || "";
-  }
-
-  async function fetchModels(providerId) {
-    if (modelCache[providerId]) return modelCache[providerId];
-    const res = await api(`/api/config/models?provider_id=${encodeURIComponent(providerId)}`);
-    modelCache[providerId] = res;
-    return res;
-  }
-
-  document.getElementById("prov-add").onclick = async () => {
-    collectProviders();
-    providers.push({ id: "", name: "", base_url: "", api_key: "" });
-    drawProviders(); drawRoles();
-  };
-
-  document.getElementById("cfg-refresh-asr").onclick = async () => {
-    await saveConfigQuiet();
-    const pid = document.getElementById("role-asr").value;
-    if (!pid) { toast("请先添加并保存 API"); return; }
-    toast("获取模型列表中…");
-    try {
-      const res = await fetchModels(pid);
-      fillAsrSelect(res.asr_models || [], "");
-      toast(`获取到 ${(res.asr_models || res.models || []).length} 个模型`);
-    } catch (err) { toast("获取失败: " + err.message); }
-  };
-
-  document.getElementById("cfg-refresh-chat").onclick = async () => {
-    await saveConfigQuiet();
-    const pid = document.getElementById("role-chat").value;
-    if (!pid) { toast("请先添加并保存 API"); return; }
-    toast("获取模型列表中…");
-    try {
-      const res = await fetchModels(pid);
-      fillChatSelect(res.models || [], "");
-      toast(`获取到 ${(res.models || []).length} 个模型`);
-    } catch (err) { toast("获取失败: " + err.message); }
-  };
-
-  async function saveConfigQuiet() {
-    collectProviders();
-    const custom = document.getElementById("cfg-asr-custom").value.trim();
-    const asrVal = custom || document.getElementById("cfg-asr").value;
-    try {
-      await api("/api/config", {
-        method: "PUT",
-        body: JSON.stringify({
-          providers,
-          asr_provider: document.getElementById("role-asr").value,
-          chat_provider: document.getElementById("role-chat").value,
-          asr_model: asrVal === "__custom__" ? "" : asrVal,
-          chat_model: document.getElementById("cfg-chat").value,
-        }),
-      });
-      // new providers get server-assigned ids; reload them silently
-      cfgCache = await api("/api/config");
-      providers = (cfgCache.providers || []).map((p) => ({ ...p }));
-    } catch (err) { toast(err.message); }
-  }
-
-  document.getElementById("cfg-save").onclick = async () => {
-    await saveConfigQuiet();
-    const custom = document.getElementById("cfg-asr-custom").value.trim();
-    const asrVal = custom || document.getElementById("cfg-asr").value;
-    if (!providers.length) { toast("请至少添加一个 API"); return; }
-    if (!asrVal) { toast("请选择转写模型"); return; }
-    if (!document.getElementById("cfg-chat").value) { toast("请选择 Chat 模型"); return; }
-    await saveConfigQuiet();
-    toast("已保存");
-  };
-
-  document.getElementById("cfg-test").onclick = async () => {
-    const el = document.getElementById("test-result");
-    el.className = "test-result"; el.textContent = "测试中…";
-    await saveConfigQuiet();
-    try {
-      const res = await api("/api/config/test", { method: "POST", body: JSON.stringify({}) });
-      const parts = [];
-      parts.push(res.chat ? "✓ Chat 可用" : "✗ Chat 不可用");
-      parts.push(res.transcribe ? "✓ 转写端点可达" : "✗ 转写端点不可用");
-      el.className = "test-result " + (res.chat || res.transcribe ? "ok" : "fail");
-      el.textContent = parts.join("　") + (res.detail ? ` · ${res.detail}` : "");
-    } catch (err) {
-      el.className = "test-result fail";
-      el.textContent = "连接失败: " + err.message;
-    }
-  };
-
-  // ---------- backup & restore ----------
-  async function loadBackupSettings() {
-    const cfg = cfgCache || (cfgCache = await api("/api/config"));
-    document.getElementById("bk-enabled").checked = !!cfg.backup_enabled;
-    document.getElementById("bk-time").value = cfg.backup_time || "04:00";
-    document.getElementById("bk-keep").value = cfg.backup_keep || 3;
-    document.getElementById("bk-media").checked = cfg.backup_include_media !== false;
-  }
-
-  async function refreshBackups() {
-    const listEl = document.getElementById("bk-list");
-    try {
-      const items = await api("/api/backups");
-      if (!items.length) {
-        listEl.innerHTML = `<div class="panel-empty" style="padding:14px">暂无备份</div>`;
-        return;
-      }
-      listEl.innerHTML = `<table class="bk-table"><tr><th>时间</th><th>类型</th><th>大小</th><th></th></tr>` +
-        items.map((b) => `
-        <tr>
-          <td>${esc((b.created_at || "").replace("T", " ").slice(0, 19))}</td>
-          <td>${b.auto ? "自动" : "手动"}${b.note && b.note !== "auto" && b.note !== "manual" ? " · " + esc(b.note) : ""}${b.has_media ? ' <span class="badge">含媒体</span>' : ""}</td>
-          <td>${b.size_mb} MB</td>
-          <td>
-            <a href="/api/backups/${esc(b.file)}/download" download>下载</a>
-            <button class="danger bk-del" data-f="${esc(b.file)}" style="padding:2px 8px;font-size:12px">删除</button>
-          </td>
-        </tr>`).join("") + `</table>`;
-      listEl.querySelectorAll(".bk-del").forEach((btn) => {
-        btn.onclick = async () => {
-          if (!confirm("删除这个备份？")) return;
-          await api(`/api/backups/${btn.dataset.f}`, { method: "DELETE" });
-          refreshBackups();
-        };
-      });
-    } catch (err) {
-      listEl.innerHTML = `<div class="panel-empty" style="padding:14px">加载失败: ${esc(err.message)}</div>`;
-    }
-  }
-
-  document.getElementById("bk-save-settings").onclick = async () => {
-    try {
-      await api("/api/config", {
-        method: "PUT",
-        body: JSON.stringify({
-          backup_enabled: document.getElementById("bk-enabled").checked,
-          backup_time: document.getElementById("bk-time").value || "04:00",
-          backup_keep: parseInt(document.getElementById("bk-keep").value, 10) || 3,
-          backup_include_media: document.getElementById("bk-media").checked,
-        }),
-      });
-      toast("备份设置已保存");
-    } catch (err) { toast(err.message); }
-  };
-
-  document.getElementById("bk-now").onclick = async () => {
-    try {
-      await api("/api/backups/create", { method: "POST" });
-      toast("备份完成");
-      refreshBackups();
-    } catch (err) { toast(err.message); }
-  };
-
-  document.getElementById("bk-restore").onclick = async () => {
-    const fi = document.getElementById("bk-restore-file");
-    if (!fi.files[0]) { toast("请先选择备份 zip"); return; }
-    if (!confirm("恢复会覆盖当前的 API 配置和所有课程数据，确定继续？")) return;
-    const fd = new FormData();
-    fd.append("file", fi.files[0]);
-    try {
-      const res = await api("/api/backups/restore", { method: "POST", body: fd });
-      let msg = `恢复完成：${res.courses} 门课程${res.config ? " + API 配置" : ""}`;
-      if (res.missing_media?.length) {
-        msg += `；${res.missing_media.length} 个课程缺媒体文件（见下方列表）`;
-        renderMissingMedia(res.missing_media);
-      } else {
-        document.getElementById("bk-missing").innerHTML = "";
-      }
-      toast(msg, 5000);
-      // reload settings — config was restored
-      cfgCache = await api("/api/config");
-      providers = (cfgCache.providers || []).map((p) => ({ ...p }));
-      drawProviders(); drawRoles();
-      loadBackupSettings();
-      refreshBackups();
-    } catch (err) { toast("恢复失败: " + err.message, 5000); }
-  };
-
-  function renderMissingMedia(missing) {
-    document.getElementById("bk-missing").innerHTML = `
-      <div class="section-title">缺媒体文件的课程（重新上传后自动关联）</div>` +
-      missing.map((m) => `
-      <div class="hs-card" style="padding:10px 14px">
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <span style="flex:1">${esc(m.title)}</span>
-          <span class="cal-hint">需要文件名: ${esc(m.media_file)}</span>
-          <label style="margin:0">
-            <input type="file" class="mm-file" data-cid="${esc(m.course_id)}" style="width:auto">
-          </label>
-        </div>
-      </div>`).join("");
-    document.querySelectorAll(".mm-file").forEach((inp) => {
-      inp.onchange = async () => {
-        if (!inp.files[0]) return;
-        const fd = new FormData();
-        fd.append("file", inp.files[0]);
-        fd.append("course_id", inp.dataset.cid);
-        try {
-          await api("/api/backups/media", { method: "POST", body: fd });
-          toast("媒体已关联");
-          inp.closest(".hs-card").style.display = "none";
-        } catch (err) { toast(err.message); }
-      };
-    });
-  }
-
-  loadBackupSettings();
-  refreshBackups();
-  init();
-}
-
 /* ================= Course page ================= */
 async function renderCourse(cid) {
   document.title = "课程 · DeepRead";
-  $app.innerHTML = `<div style="padding:60px;text-align:center"><div class="spinner"></div></div>`;
+  $app.innerHTML = shell("", `<div class="page"><div class="spinner"></div></div>`);
   try {
     const [course, progress] = await Promise.all([
       api(`/api/courses/${cid}`),
@@ -558,7 +285,7 @@ async function renderCourse(cid) {
     if (!state.progress.read) state.progress.read = [];
     if (!state.progress.cards) state.progress.cards = {};
   } catch (err) {
-    $app.innerHTML = `<div style="padding:60px;text-align:center;color:var(--red)">${esc(err.message)}</div>`;
+    $app.innerHTML = shell("", `<div class="page" style="color:var(--red)">${esc(err.message)}</div>`);
     return;
   }
   drawCoursePage();
@@ -604,15 +331,15 @@ async function saveCalibration() {
 function drawCoursePage() {
   const { meta, status, lesson } = state.course;
   if (status.stage !== "ready") {
-    const working = ["transcribing", "subtitles", "aligning", "generating"].includes(status.stage);
-    $app.innerHTML = `
-      <div style="padding:60px;text-align:center">
+    const working = ["downloading", "transcribing", "subtitles", "ocr", "aligning", "generating"].includes(status.stage);
+    $app.innerHTML = shell("", `
+      <div class="page" style="text-align:center;padding-top:80px">
         <h2>${esc(meta.title)}</h2>
         <p>${working ? `<div class="spinner"></div><p>正在生成: ${esc(status.detail || status.stage)} (${Math.round((status.progress || 0) * 100)}%)</p>` : `课程尚未生成: ${esc(status.detail || status.stage)}`}
         </p>
         ${!working ? `<button class="primary" onclick="location.reload()">刷新</button>` : ""}
-        <p><a href="#/">返回课程库</a></p>
-      </div>`;
+        <p><a href="#/courses">返回课程库</a></p>
+      </div>`);
     if (working) {
       state.pollTimer = setInterval(async () => {
         const st = await api(`/api/courses/${meta.id}`).catch(() => null);
@@ -630,9 +357,9 @@ function drawCoursePage() {
   $app.innerHTML = `
   <div class="course-page">
     <div class="cp-top">
-      <button class="back" id="btn-back">←</button>
+      <a class="back" href="#/courses">←</a>
       <div class="cp-title">${esc(meta.title)}</div>
-      <button id="btn-settings2">⚙</button>
+      <a href="#/courses" class="cp-home" title="返回课程库">📚</a>
     </div>
     <div class="cp-body">
       <div class="cp-left">
@@ -669,7 +396,6 @@ function drawCoursePage() {
   const player = document.getElementById("player");
   player.preload = "metadata";
 
-  // vocabulary marks over sentence text
   const vocabIndex = buildVocabIndex(lesson);
 
   // ---- tabs ----
@@ -684,12 +410,9 @@ function drawCoursePage() {
   });
   renderReadTab();
 
-  document.getElementById("btn-back").onclick = () => (location.hash = "#/");
-  document.getElementById("btn-settings2").onclick = () => (location.hash = "#/settings");
-
   // ---- playback sync ----
   let activeId = -1;
-  let follow = false; // off by default: don't yank the scroll position while reading
+  let follow = false;
   player.addEventListener("timeupdate", () => {
     handleAbLoop(player);
     const t = player.currentTime;
@@ -738,7 +461,6 @@ function drawCoursePage() {
     }
   };
 
-  // ---- calibration panel ----
   document.getElementById("ctl-cal").onclick = () => {
     openCalibrationPanel({
       player,
@@ -746,7 +468,6 @@ function drawCoursePage() {
       rawSentences,
       activeId,
       onApplied: () => {
-        // re-render tabs with recalibrated times
         panels[state.tab]();
       },
     });
@@ -787,7 +508,6 @@ function drawCoursePage() {
     };
   });
 
-  // expose a global jump for card/link clicks
   window.__jumpTo = (sec) => {
     player.currentTime = sec;
     player.play();
@@ -797,7 +517,6 @@ function drawCoursePage() {
     player.currentTime = start;
     if (rate) player.playbackRate = rate;
     player.play();
-    // stop at end if not already looping
     const stopAt = () => {
       if (player.currentTime >= end) { player.pause(); player.removeEventListener("timeupdate", stopAt); }
       else requestAnimationFrame(stopAt);
@@ -818,6 +537,7 @@ function drawCoursePage() {
       const flags = [];
       if (s.uncertain) flags.push(`<span class="s-flags flag-uncertain" title="字幕轨与转写不一致，建议对照原声确认">⚠ 不确定</span>`);
       if (s.source === "embedded" && !s.uncertain) flags.push(`<span class="s-flags flag-embedded" title="取自内嵌字幕轨">内嵌字幕</span>`);
+      if (s.source === "OCR" && !s.uncertain) flags.push(`<span class="s-flags flag-embedded" title="取自画面 OCR 字幕">OCR 字幕</span>`);
       return `
       <div class="sent ${s.lang === "zh" ? "zh" : ""}" data-idx="${s.id}">
         <span class="s-time">${fmtTime(s.start)} → ${fmtTime(s.end)}${flags.join("")}${read ? " ✓" : ""}</span>
@@ -900,7 +620,7 @@ function drawCoursePage() {
     const expr = lesson.expressions || [];
     const dom = lesson.domain || [];
     const cult = lesson.culture || [];
-    const item = (x, cls) => `
+    const item = (x) => `
       <div class="hs-card">
         <div class="hs-orig">${esc(x.phrase || x.term || x.topic)}</div>
         <div class="hs-structure">${esc(x.meaning || x.explanation || x.note || "")}</div>
@@ -1018,11 +738,10 @@ function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApp
   const listEl = overlay.querySelector(".cal-list");
   const refEl = overlay.querySelector(".cal-ref");
   const applyWrap = overlay.querySelector(".cal-apply-global");
-  let refPoint = null;   // captured playback time
-  let selId = null;      // selected sentence id
+  let refPoint = null;
+  let selId = null;
 
   function renderList() {
-    const kw = "";
     const items = sentences.map((s) => {
       const o = cal.overrides[String(s.id)];
       const isSel = selId === s.id;
@@ -1054,11 +773,6 @@ function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApp
     saveCalibration().then(() => {}).catch((e) => toast("保存失败: " + e.message));
   }
 
-  function shiftGlobal(d) {
-    cal.global_offset = Math.round(((parseFloat(cal.global_offset) || 0) + d) * 10) / 10;
-    persist();
-  }
-
   overlay.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-act],[data-d],.cal-close,.cal-reset,.cal-pick-start,.cal-align-here");
     if (!btn) {
@@ -1074,7 +788,6 @@ function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApp
     }
     if (btn.classList.contains("cal-align-here")) {
       if (refPoint === null || selId === null) { toast("先取参考点并选中句子"); return; }
-      // shift the selected sentence so its start lands on the reference point
       const raw = rawSentences.find((s) => s.id === selId);
       const dur = (raw.end - raw.start);
       cal.overrides[String(selId)] = {
@@ -1086,7 +799,11 @@ function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApp
       renderList();
       return;
     }
-    if (btn.dataset.d !== undefined) { shiftGlobal(parseFloat(btn.dataset.d)); return; }
+    if (btn.dataset.d !== undefined) {
+      cal.global_offset = Math.round(((parseFloat(cal.global_offset) || 0) + parseFloat(btn.dataset.d)) * 10) / 10;
+      persist();
+      return;
+    }
 
     const act = btn.dataset.act;
     const item = btn.closest(".cal-item");
@@ -1152,7 +869,6 @@ function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApp
   });
 
   function refreshSentences() {
-    // recompute the live `sentences` array used by playback sync
     const list = calibratedSentences();
     sentences.splice(0, sentences.length, ...list);
     if (onApplied) onApplied();
@@ -1167,12 +883,391 @@ function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApp
   document.body.appendChild(overlay);
 }
 
+/* ================= Settings (model config) ================= */
+function renderSettings() {
+  document.title = "模型配置 · DeepRead";
+  $app.innerHTML = shell("settings", `
+    <div class="page" style="max-width:680px">
+      <h1>模型配置</h1>
+      <p style="color:var(--ink-2);font-size:13.5px">
+        添加多个中转 API（OpenAI 兼容），随时切换。转写和 Chat 可使用不同的 API。Key 保存在服务器本地。
+      </p>
+
+      <div class="section-title">API 提供商</div>
+      <div id="prov-list"></div>
+      <button id="prov-add">+ 添加 API</button>
+
+      <div class="section-title">角色分配</div>
+      <div class="form-row"><label>转写 API（需要 /v1/audio/transcriptions 或 omni 音频模型）</label>
+        <select id="role-asr"></select></div>
+      <div class="form-row"><label>转写模型</label>
+        <div style="display:flex;gap:8px">
+          <select id="cfg-asr" style="flex:1"></select>
+          <button id="cfg-refresh-asr" type="button">↻ 获取模型</button>
+        </div>
+        <input id="cfg-asr-custom" type="text" placeholder="或手动输入模型名" style="margin-top:6px"></div>
+      <div class="form-row"><label>Chat API（翻译 + 精讲生成）</label>
+        <select id="role-chat"></select></div>
+      <div class="form-row"><label>Chat 模型</label>
+        <div style="display:flex;gap:8px">
+          <select id="cfg-chat" style="flex:1"></select>
+          <button id="cfg-refresh-chat" type="button">↻ 获取模型</button>
+        </div></div>
+      <div class="form-row"><label>OCR API（识别画面硬字幕，需支持图片输入；留空则用 Chat API）</label>
+        <select id="role-vision"></select></div>
+      <div class="form-row"><label>OCR 视觉模型</label>
+        <input id="cfg-vision" type="text" placeholder="如 qwen3.5-ocr / qwen-vl-plus（留空用 Chat 模型）"></div>
+
+      <div class="form-actions">
+        <button class="primary" id="cfg-save">保存</button>
+        <button id="cfg-test">测试连接</button>
+      </div>
+      <div class="test-result" id="test-result"></div>
+    </div>`);
+
+  let providers = [];
+  let cfgCache = null;
+  let modelCache = {};
+
+  async function init() {
+    cfgCache = await api("/api/config");
+    providers = (cfgCache.providers || []).map((p) => ({ ...p }));
+    drawProviders();
+    drawRoles();
+    document.getElementById("role-asr").value = cfgCache.asr_provider || "";
+    document.getElementById("role-chat").value = cfgCache.chat_provider || "";
+    document.getElementById("role-vision").value = cfgCache.vision_provider || "";
+    document.getElementById("cfg-vision").value = cfgCache.vision_model || "";
+    if (cfgCache.asr_model) {
+      fillAsrSelect([cfgCache.asr_model], cfgCache.asr_model);
+      document.getElementById("cfg-asr-custom").value = "";
+    }
+    if (cfgCache.chat_model) fillChatSelect([cfgCache.chat_model], cfgCache.chat_model);
+  }
+
+  function drawProviders() {
+    const wrap = document.getElementById("prov-list");
+    if (!providers.length) {
+      wrap.innerHTML = `<div class="panel-empty" style="padding:16px">还没有 API，点击下方添加</div>`;
+    } else {
+      wrap.innerHTML = providers.map((p, i) => `
+        <div class="hs-card" data-pi="${i}">
+          <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+            <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 beichenapi）" style="flex:1">
+            <button class="danger p-del" title="删除">✕</button>
+          </div>
+          <div class="form-row" style="margin-bottom:8px"><input class="p-url" value="${esc(p.base_url)}" placeholder="Base URL（https://.../v1）"></div>
+          <div class="form-row" style="margin-bottom:0"><input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="API Key（sk-...）"></div>
+        </div>`).join("");
+    }
+    wrap.querySelectorAll(".p-del").forEach((btn) => {
+      btn.onclick = () => {
+        const i = +btn.closest("[data-pi]").dataset.pi;
+        if (!confirm(`删除 API「${providers[i].name}」？`)) return;
+        providers.splice(i, 1);
+        drawProviders(); drawRoles();
+      };
+    });
+  }
+
+  function collectProviders() {
+    document.querySelectorAll("#prov-list [data-pi]").forEach((card) => {
+      const i = +card.dataset.pi;
+      if (providers[i]) {
+        providers[i].name = card.querySelector(".p-name").value.trim() || `API ${i + 1}`;
+        providers[i].base_url = card.querySelector(".p-url").value.trim();
+        providers[i].api_key = card.querySelector(".p-key").value.trim();
+      }
+    });
+  }
+
+  function drawRoles() {
+    collectProviders();
+    const opts = () => providers.map((p, i) =>
+      `<option value="${esc(p.id)}">${esc(p.name || `API ${i + 1}`)}</option>`).join("");
+    const asrSel = document.getElementById("role-asr");
+    const chatSel = document.getElementById("role-chat");
+    const visSel = document.getElementById("role-vision");
+    const prevAsr = asrSel.value, prevChat = chatSel.value, prevVis = visSel.value;
+    asrSel.innerHTML = opts() || `<option value="">（请先添加 API）</option>`;
+    chatSel.innerHTML = opts() || `<option value="">（请先添加 API）</option>`;
+    visSel.innerHTML = `<option value="">（用 Chat API）</option>` + (opts() || "");
+    if (prevAsr && providers.some((p) => p.id === prevAsr)) asrSel.value = prevAsr;
+    if (prevChat && providers.some((p) => p.id === prevChat)) chatSel.value = prevChat;
+    if (prevVis && providers.some((p) => p.id === prevVis)) visSel.value = prevVis;
+    asrSel.onchange = () => fillAsrSelect([], "");
+    chatSel.onchange = () => fillChatSelect([], "");
+  }
+
+  function fillAsrSelect(models, selected) {
+    const sel = document.getElementById("cfg-asr");
+    const keepCustom = document.getElementById("cfg-asr-custom").value.trim();
+    sel.innerHTML = models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+    if (selected && ![...sel.options].some((o) => o.value === selected)) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(selected)}">${esc(selected)}</option>`);
+    }
+    if (keepCustom && ![...sel.options].some((o) => o.value === keepCustom)) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(keepCustom)}">${esc(keepCustom)}</option>`);
+    }
+    sel.value = selected || keepCustom || sel.value || "";
+  }
+
+  function fillChatSelect(models, selected) {
+    const sel = document.getElementById("cfg-chat");
+    sel.innerHTML = models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+    if (selected && ![...sel.options].some((o) => o.value === selected)) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(selected)}">${esc(selected)}</option>`);
+    }
+    sel.value = selected || sel.value || "";
+  }
+
+  async function fetchModels(providerId) {
+    if (modelCache[providerId]) return modelCache[providerId];
+    const res = await api(`/api/config/models?provider_id=${encodeURIComponent(providerId)}`);
+    modelCache[providerId] = res;
+    return res;
+  }
+
+  document.getElementById("prov-add").onclick = async () => {
+    collectProviders();
+    providers.push({ id: "", name: "", base_url: "", api_key: "" });
+    drawProviders(); drawRoles();
+  };
+
+  document.getElementById("cfg-refresh-asr").onclick = async () => {
+    await saveConfigQuiet();
+    const pid = document.getElementById("role-asr").value;
+    if (!pid) { toast("请先添加并保存 API"); return; }
+    toast("获取模型列表中…");
+    try {
+      const res = await fetchModels(pid);
+      fillAsrSelect(res.asr_models || [], "");
+      toast(`获取到 ${(res.asr_models || res.models || []).length} 个模型`);
+    } catch (err) { toast("获取失败: " + err.message); }
+  };
+
+  document.getElementById("cfg-refresh-chat").onclick = async () => {
+    await saveConfigQuiet();
+    const pid = document.getElementById("role-chat").value;
+    if (!pid) { toast("请先添加并保存 API"); return; }
+    toast("获取模型列表中…");
+    try {
+      const res = await fetchModels(pid);
+      fillChatSelect(res.models || [], "");
+      toast(`获取到 ${(res.models || []).length} 个模型`);
+    } catch (err) { toast("获取失败: " + err.message); }
+  };
+
+  async function saveConfigQuiet() {
+    collectProviders();
+    const custom = document.getElementById("cfg-asr-custom").value.trim();
+    const asrVal = custom || document.getElementById("cfg-asr").value;
+    try {
+      await api("/api/config", {
+        method: "PUT",
+        body: JSON.stringify({
+          providers,
+          asr_provider: document.getElementById("role-asr").value,
+          chat_provider: document.getElementById("role-chat").value,
+          vision_provider: document.getElementById("role-vision").value,
+          asr_model: asrVal === "__custom__" ? "" : asrVal,
+          chat_model: document.getElementById("cfg-chat").value,
+          vision_model: document.getElementById("cfg-vision").value.trim(),
+        }),
+      });
+      cfgCache = await api("/api/config");
+      providers = (cfgCache.providers || []).map((p) => ({ ...p }));
+    } catch (err) { toast(err.message); }
+  }
+
+  document.getElementById("cfg-save").onclick = async () => {
+    await saveConfigQuiet();
+    const custom = document.getElementById("cfg-asr-custom").value.trim();
+    const asrVal = custom || document.getElementById("cfg-asr").value;
+    if (!providers.length) { toast("请至少添加一个 API"); return; }
+    if (!asrVal) { toast("请选择转写模型"); return; }
+    if (!document.getElementById("cfg-chat").value) { toast("请选择 Chat 模型"); return; }
+    await saveConfigQuiet();
+    toast("已保存");
+  };
+
+  document.getElementById("cfg-test").onclick = async () => {
+    const el = document.getElementById("test-result");
+    el.className = "test-result"; el.textContent = "测试中…";
+    await saveConfigQuiet();
+    try {
+      const res = await api("/api/config/test", { method: "POST", body: JSON.stringify({}) });
+      const parts = [];
+      parts.push(res.chat ? "✓ Chat 可用" : "✗ Chat 不可用");
+      parts.push(res.transcribe ? "✓ 转写端点可达" : "✗ 转写端点不可用");
+      el.className = "test-result " + (res.chat || res.transcribe ? "ok" : "fail");
+      el.textContent = parts.join("　") + (res.detail ? ` · ${res.detail}` : "");
+    } catch (err) {
+      el.className = "test-result fail";
+      el.textContent = "连接失败: " + err.message;
+    }
+  };
+
+  init();
+}
+
+/* ================= Backup ================= */
+function renderBackup() {
+  document.title = "备份与恢复 · DeepRead";
+  $app.innerHTML = shell("backup", `
+    <div class="page" style="max-width:720px">
+      <h1>备份与恢复</h1>
+      <div class="form-row" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+        <label style="display:flex;gap:6px;align-items:center;margin:0">
+          <input type="checkbox" id="bk-enabled" style="width:auto"> 每日自动备份
+        </label>
+        <label style="margin:0;display:flex;gap:6px;align-items:center">时间
+          <input type="time" id="bk-time" style="width:110px"></label>
+        <label style="margin:0;display:flex;gap:6px;align-items:center">保留数量
+          <input type="number" id="bk-keep" min="1" max="90" style="width:70px"></label>
+        <label style="display:flex;gap:6px;align-items:center;margin:0">
+          <input type="checkbox" id="bk-media" style="width:auto"> 包含媒体文件（体积大）
+        </label>
+        <button id="bk-save-settings">保存设置</button>
+        <button id="bk-now" class="primary">立即备份</button>
+      </div>
+      <div class="form-row" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="margin:0;font-size:13px;color:var(--ink-2)">恢复：选择备份 zip 上传</label>
+        <input type="file" id="bk-restore-file" accept=".zip" style="width:auto">
+        <button id="bk-restore" class="danger">恢复（覆盖当前数据）</button>
+      </div>
+      <div class="cal-hint" style="margin-bottom:8px">
+        备份包含 API 配置、全部课程（转写/精讲/进度/校准）；媒体文件可选。
+        换部署环境：新机器 docker compose up 后，在此上传备份恢复，再按提示补传媒体。
+      </div>
+      <div id="bk-list"></div>
+      <div id="bk-missing" style="margin-top:10px"></div>
+    </div>`);
+
+  let cfgCache = null;
+  let providers = [];
+
+  async function loadBackupSettings() {
+    cfgCache = await api("/api/config");
+    document.getElementById("bk-enabled").checked = !!cfgCache.backup_enabled;
+    document.getElementById("bk-time").value = cfgCache.backup_time || "04:00";
+    document.getElementById("bk-keep").value = cfgCache.backup_keep || 3;
+    document.getElementById("bk-media").checked = cfgCache.backup_include_media !== false;
+  }
+
+  async function refreshBackups() {
+    const listEl = document.getElementById("bk-list");
+    try {
+      const items = await api("/api/backups");
+      if (!items.length) {
+        listEl.innerHTML = `<div class="panel-empty" style="padding:14px">暂无备份</div>`;
+        return;
+      }
+      listEl.innerHTML = `<table class="bk-table"><tr><th>时间</th><th>类型</th><th>大小</th><th></th></tr>` +
+        items.map((b) => `
+        <tr>
+          <td>${esc((b.created_at || "").replace("T", " ").slice(0, 19))}</td>
+          <td>${b.auto ? "自动" : "手动"}${b.has_media ? ' <span class="badge">含媒体</span>' : ""}</td>
+          <td>${b.size_mb} MB</td>
+          <td>
+            <a href="/api/backups/${esc(b.file)}/download" download>下载</a>
+            <button class="danger bk-del" data-f="${esc(b.file)}" style="padding:2px 8px;font-size:12px">删除</button>
+          </td>
+        </tr>`).join("") + `</table>`;
+      listEl.querySelectorAll(".bk-del").forEach((btn) => {
+        btn.onclick = async () => {
+          if (!confirm("删除这个备份？")) return;
+          await api(`/api/backups/${btn.dataset.f}`, { method: "DELETE" });
+          refreshBackups();
+        };
+      });
+    } catch (err) {
+      listEl.innerHTML = `<div class="panel-empty" style="padding:14px">加载失败: ${esc(err.message)}</div>`;
+    }
+  }
+
+  document.getElementById("bk-save-settings").onclick = async () => {
+    try {
+      await api("/api/config", {
+        method: "PUT",
+        body: JSON.stringify({
+          backup_enabled: document.getElementById("bk-enabled").checked,
+          backup_time: document.getElementById("bk-time").value || "04:00",
+          backup_keep: parseInt(document.getElementById("bk-keep").value, 10) || 3,
+          backup_include_media: document.getElementById("bk-media").checked,
+        }),
+      });
+      toast("备份设置已保存");
+    } catch (err) { toast(err.message); }
+  };
+
+  document.getElementById("bk-now").onclick = async () => {
+    try {
+      await api("/api/backups/create", { method: "POST" });
+      toast("备份完成");
+      refreshBackups();
+    } catch (err) { toast(err.message); }
+  };
+
+  document.getElementById("bk-restore").onclick = async () => {
+    const fi = document.getElementById("bk-restore-file");
+    if (!fi.files[0]) { toast("请先选择备份 zip"); return; }
+    if (!confirm("恢复会覆盖当前的 API 配置和所有课程数据，确定继续？")) return;
+    const fd = new FormData();
+    fd.append("file", fi.files[0]);
+    try {
+      const res = await api("/api/backups/restore", { method: "POST", body: fd });
+      let msg = `恢复完成：${res.courses} 门课程${res.config ? " + API 配置" : ""}`;
+      if (res.media_restored) msg += `；媒体 ${res.media_restored} 个`;
+      if (res.missing_media?.length) {
+        msg += `；${res.missing_media.length} 个课程缺媒体（见下方）`;
+        renderMissingMedia(res.missing_media);
+      } else {
+        document.getElementById("bk-missing").innerHTML = "";
+      }
+      toast(msg, 5000);
+      loadBackupSettings();
+      refreshBackups();
+    } catch (err) { toast("恢复失败: " + err.message, 5000); }
+  };
+
+  function renderMissingMedia(missing) {
+    document.getElementById("bk-missing").innerHTML = `
+      <div class="section-title">缺媒体文件的课程（重新上传后自动关联）</div>` +
+      missing.map((m) => `
+      <div class="hs-card" style="padding:10px 14px">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <span style="flex:1">${esc(m.title)}</span>
+          <span class="cal-hint">需要文件名: ${esc(m.media_file)}</span>
+          <label style="margin:0">
+            <input type="file" class="mm-file" data-cid="${esc(m.course_id)}" style="width:auto">
+          </label>
+        </div>
+      </div>`).join("");
+    document.querySelectorAll(".mm-file").forEach((inp) => {
+      inp.onchange = async () => {
+        if (!inp.files[0]) return;
+        const fd = new FormData();
+        fd.append("file", inp.files[0]);
+        fd.append("course_id", inp.dataset.cid);
+        try {
+          await api("/api/backups/media", { method: "POST", body: fd });
+          toast("媒体已关联");
+          inp.closest(".hs-card").style.display = "none";
+        } catch (err) { toast(err.message); }
+      };
+    });
+  }
+
+  loadBackupSettings();
+  refreshBackups();
+}
+
 /* ---------------- helpers ---------------- */
 function findSentenceAt(t, sentences) {
   for (let i = 0; i < sentences.length; i++) {
     if (t >= sentences[i].start && t < sentences[i].end + 0.5) return i;
   }
-  // after last sentence
   if (sentences.length && t >= sentences[sentences.length - 1].end) return sentences.length - 1;
   return null;
 }
@@ -1189,7 +1284,7 @@ function buildVocabIndex(lesson) {
   const idx = [];
   for (const v of lesson.vocabulary || []) {
     if (!v.term || v.term.length < 2) continue;
-    if (!/[一-鿿]/.test(v.term)) idx.push(v);  // only mark English terms
+    if (!/[一-鿿]/.test(v.term)) idx.push(v);
   }
   idx.sort((a, b) => b.term.length - a.term.length);
   return idx;

@@ -49,6 +49,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "chat_provider": "",  # provider id used for chat
     "asr_model": "",
     "chat_model": "",
+    "vision_provider": "",
+    "vision_model": "",
     "segment_minutes": 5,
     # backup settings
     "backup_enabled": True,
@@ -198,15 +200,29 @@ def run_pipeline(cid: str) -> None:
                 media_path,
                 cfg=cfg,
                 workdir=cdir,
-                progress_cb=lambda p, msg: set_stage(cid, "transcribing", msg, 0.05 + 0.5 * p),
+                progress_cb=lambda p, msg: set_stage(cid, "transcribing", msg, 0.05 + 0.45 * p),
                 should_cancel=lambda: bool(job and job.cancelled),
             )
 
-            set_stage(cid, "subtitles", "提取内嵌字幕轨…", 0.58)
+            set_stage(cid, "subtitles", "提取内嵌字幕轨…", 0.52)
             sub_lines = extract_subtitle_channel(media_path, cdir)
 
-            # 2. align / merge the two channels
-            set_stage(cid, "aligning", "字幕与转写对齐融合…", 0.62)
+            # OCR channel: burned-in subtitles (douyin etc.) — only when no embedded track
+            if not sub_lines and meta.get("kind") == "video":
+                set_stage(cid, "ocr", "OCR 识别画面硬字幕…", 0.54)
+                try:
+                    ocr_lines = extract_ocr_subtitles(
+                        media_path, cdir, cfg,
+                        progress_cb=lambda p, msg: set_stage(cid, "ocr", msg, 0.52 + 0.13 * p),
+                        should_cancel=lambda: bool(job and job.cancelled),
+                    )
+                except Exception as ocr_exc:  # noqa: BLE001 — OCR is best-effort
+                    set_stage(cid, "ocr", f"OCR 失败，继续转写融合: {ocr_exc}", 0.55)
+                    ocr_lines = []
+                sub_lines = ocr_lines
+
+            # 2. align / merge the channels
+            set_stage(cid, "aligning", "字幕与转写对齐融合…", 0.66)
             segments = align(transcript, sub_lines)
             write_json(cdir / "source.json", {"segments": segments})
 
@@ -214,7 +230,7 @@ def run_pipeline(cid: str) -> None:
             lesson = generate_lesson(
                 segments,
                 cfg=cfg,
-                progress_cb=lambda p, msg: set_stage(cid, "generating", msg, 0.65 + 0.33 * p),
+                progress_cb=lambda p, msg: set_stage(cid, "generating", msg, 0.68 + 0.3 * p),
                 should_cancel=lambda: bool(job and job.cancelled),
             )
             write_json(cdir / "lesson.json", lesson)
@@ -232,6 +248,8 @@ def run_pipeline(cid: str) -> None:
 
 
 from pipeline.subtitles import extract_subtitle_channel  # noqa: E402
+from pipeline.ocr import extract_ocr_subtitles  # noqa: E402
+from pipeline import fetcher  # noqa: E402
 
 
 # ---------------------------------------------------------------- API: config
@@ -266,7 +284,7 @@ async def put_config(request: Request):
             cfg["asr_provider"] = incoming[0]["id"] if incoming else ""
         if cfg.get("chat_provider") not in live_ids:
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
-    for k in ("asr_provider", "chat_provider", "asr_model", "chat_model", "segment_minutes",
+    for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model", "segment_minutes",
               "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):
         if k in body:
             cfg[k] = body[k]
@@ -525,6 +543,54 @@ async def upload(file: UploadFile = File(...)):
     })
     write_json(cdir / "status.json", {"stage": "uploaded", "detail": "已上传，等待生成", "progress": 0})
     return {"id": cid, "title": title, "kind": kind}
+
+
+@app.post("/api/courses/import")
+async def import_url(request: Request):
+    """Create a course from a share URL (douyin etc.): download + generate."""
+    body = await request.json()
+    url = (body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "缺少链接")
+    cid = new_course_id()
+    cdir = course_dir(cid)
+    cdir.mkdir(parents=True)
+    write_json(cdir / "meta.json", {
+        "id": cid,
+        "title": "正在获取视频信息…",
+        "filename": "",
+        "kind": "video",
+        "media_path": "",
+        "source_url": url,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    write_json(cdir / "status.json", {"stage": "downloading", "detail": "链接导入中…", "progress": 0})
+    threading.Thread(target=_download_and_generate, args=(cid, url), daemon=True).start()
+    return {"id": cid, "title": url}
+
+
+def _download_and_generate(cid: str, url: str) -> None:
+    cdir = course_dir(cid)
+    job = JOBS.setdefault(cid, JobState())
+    try:
+        set_stage(cid, "downloading", "下载视频…", 0.02)
+        result = fetcher.download(url, MEDIA_DIR, cid,
+                                  progress_cb=lambda p, msg: set_stage(cid, "downloading", msg, 0.02 + 0.02 * p))
+        media_path = result["path"]
+        meta = read_json(cdir / "meta.json", {}) or {}
+        meta.update({
+            "title": result["title"] or url,
+            "filename": media_path.name,
+            "kind": result["kind"],
+            "media_path": str(media_path),
+            "duration": result.get("duration") or 0,
+        })
+        write_json(cdir / "meta.json", meta)
+        JOBS.pop(cid, None)
+        run_pipeline(cid)
+    except Exception as exc:  # noqa: BLE001
+        JOBS.pop(cid, None)
+        set_stage(cid, "error", f"下载失败: {exc}")
 
 
 @app.post("/api/courses/{cid}/generate")

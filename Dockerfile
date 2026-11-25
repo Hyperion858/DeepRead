@@ -1,8 +1,9 @@
 FROM python:3.12-slim
 
-# ffmpeg for audio extraction / subtitle demuxing, plus runtime probe tools
+# ffmpeg for audio extraction / subtitle demuxing / frame sampling;
+# yt-dlp for downloading from share URLs (douyin etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
+    ffmpeg yt-dlp \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
