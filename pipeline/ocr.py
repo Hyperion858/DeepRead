@@ -145,6 +145,27 @@ def merge_cues(frame_texts: list[tuple[float, str]], interval: float,
     return [c for c in cues if len(_norm(c["text"])) >= min_chars]
 
 
+def merge_fragments(cues: list[dict[str, Any]], min_len: int = 14) -> list[dict[str, Any]]:
+    """Post-merge: short cues (fragments left by frame sampling, e.g. 'quick',
+    'm on a Friday') are absorbed into the neighbor they continue."""
+    if not cues:
+        return cues
+    out: list[dict[str, Any]] = [dict(cues[0])]
+    for c in cues[1:]:
+        prev = out[-1]
+        prev_n = _norm(prev["text"])
+        cur_n = _norm(c["text"])
+        gap = c["start"] - prev["end"]
+        # either side is short, they are temporally adjacent, and text continues
+        if (gap <= 3.0 and (len(prev_n) <= min_len or len(cur_n) <= min_len)
+                and _is_continuation(prev["text"], c["text"])):
+            prev["text"] = prev["text"].rstrip("。，,．.？！?!；;：:…") + c["text"].lstrip()
+            prev["end"] = max(prev["end"], c["end"])
+        else:
+            out.append(dict(c))
+    return out
+
+
 def _is_continuation(prev: str, nxt: str) -> bool:
     """Heuristic: the next caption continues an unfinished sentence when the
     previous one lacks terminal punctuation and the next lacks a capital at
@@ -240,6 +261,7 @@ def extract_ocr_subtitles(
     results.sort(key=lambda x: x[0])
 
     cues = merge_cues(results, interval)
+    cues = merge_fragments(cues)
     for c in cues:
         c["source"] = OCR_PREFIX
     if progress_cb:

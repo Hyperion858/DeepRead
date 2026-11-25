@@ -42,29 +42,69 @@ def extract_audio(media_path: Path, out_wav: Path) -> Path:
     return out_wav
 
 
-def split_audio(wav_path: Path, out_dir: Path, seg_seconds: int) -> list[Path]:
-    """Split wav into fixed-length segments (re-encoding pcm is cheap)."""
+def detect_silences(wav_path: Path, noise_db: str = "-30dB", min_silence: float = 0.4) -> list[float]:
+    """Midpoints of silence stretches — natural cut points."""
+    r = _run([
+        "ffmpeg", "-i", str(wav_path), "-af",
+        f"silencedetect=noise={noise_db}:d={min_silence}",
+        "-f", "null", "-",
+    ], timeout=600)
+    if r.returncode != 0:
+        return []
+    out = r.stderr.decode(errors="replace")
+    starts = [float(x) for x in re.findall(r"silence_start: ([\d.]+)", out)]
+    ends = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", out)]
+    # midpoint of each silence stretch
+    points = []
+    for i, s in enumerate(starts):
+        e = ends[i] if i < len(ends) else s + min_silence
+        points.append((s + e) / 2)
+    return points
+
+
+def split_audio(wav_path: Path, out_dir: Path, seg_seconds: int,
+                cut_points: list[float] | None = None) -> list[Path]:
+    """Split wav into segments. When cut_points (silence midpoints) are given,
+    cuts land at natural pauses near each window boundary instead of mid-word."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    parts: list[Path] = []
     duration = probe_duration(wav_path)
-    n = max(1, int(duration // seg_seconds) + (1 if duration % seg_seconds else 0))
-    for i in range(n):
-        start = i * seg_seconds
+    # choose boundaries: ideal boundary every seg_seconds; snap to the nearest
+    # silence midpoint within ±8s when available
+    boundaries = [0.0]
+    ideal = seg_seconds
+    while ideal < duration:
+        target = ideal
+        if cut_points:
+            candidates = [p for p in cut_points if abs(p - target) <= 8.0 and p > boundaries[-1] + 10]
+            if candidates:
+                target = min(candidates, key=lambda p: abs(p - target))
+        if target <= boundaries[-1] + 10:  # no usable snap — hard cut
+            target = ideal
+        boundaries.append(target)
+        ideal += seg_seconds
+    boundaries.append(duration)
+    # dedupe + sort
+    boundaries = sorted(set(round(b, 2) for b in boundaries))
+
+    parts: list[Path] = []
+    for i in range(len(boundaries) - 1):
+        start, end = boundaries[i], boundaries[i + 1]
+        if end - start < 5:
+            continue
         part = out_dir / f"seg_{i:04d}.wav"
         r = _run([
-            "ffmpeg", "-y", "-i", str(wav_path), "-ss", str(start), "-t", str(seg_seconds),
+            "ffmpeg", "-y", "-i", str(wav_path), "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}",
             "-c", "copy", str(part),
         ])
         if r.returncode != 0:
-            # stream copy with -ss can fail on wav in some builds; re-encode fallback
             r = _run([
-                "ffmpeg", "-y", "-i", str(wav_path), "-ss", str(start), "-t", str(seg_seconds),
+                "ffmpeg", "-y", "-i", str(wav_path), "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}",
                 "-c:a", "pcm_s16le", str(part),
             ])
             if r.returncode != 0:
                 raise RuntimeError(f"音频分段失败 seg_{i}: {r.stderr.decode(errors='replace')[-300:]}")
         parts.append(part)
-    return parts
+    return parts, boundaries[:-1]  # part start times for offset math
 
 
 def _transcribe_via_chat(
@@ -256,7 +296,10 @@ def transcribe(
     # tighter time accuracy (each segment's lines are spread across its window).
     # API mode (whisper-style) returns real timestamps, so long segments are fine.
     seg_secs = max(seg_minutes * 60, 60) if mode == "api" else 60
-    parts = split_audio(wav, audio_dir / "parts", seg_secs)
+    # snap cuts to natural speech pauses where possible — avoids mid-sentence
+    # splits at window boundaries
+    silences = detect_silences(wav)
+    parts, part_starts = split_audio(wav, audio_dir / "parts", seg_secs, cut_points=silences)
 
     # compress chat-mode parts to mp3: ~6x smaller upload per segment
     if mode == "chat":
@@ -276,7 +319,7 @@ def transcribe(
     def _transcribe_one(i: int) -> list[dict[str, Any]]:
         if should_cancel and should_cancel():
             raise PipelineCancelled()
-        offset = i * seg_secs
+        offset = part_starts[i] if i < len(part_starts) else i * seg_secs
         # auto_model_switch: walk the ASR model priority list per segment
         if cfg.get("auto_model_switch"):
             from pipeline.lesson import audio_transcribe_with_failover

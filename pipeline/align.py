@@ -216,13 +216,16 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]]) ->
 
         sim = _similarity(seg["text"], sub_text)
         if sim > 0.75:
+            # strong agreement: caption text is human-authored, take it whole
             results.append({
                 **seg,
                 "text": sub_text,
                 "source": "embedded",
                 "uncertain": False,
             })
-        elif sim > 0.4:
+        elif sim > 0.4 and len(_norm(sub_text)) >= len(_norm(seg["text"])) * 0.6:
+            # partial agreement AND the caption carries substantial text:
+            # prefer it but flag for review
             results.append({
                 **seg,
                 "text": sub_text,
@@ -230,7 +233,21 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]]) ->
                 "uncertain": True,
             })
         else:
-            results.append({**seg, "source": "asr", "uncertain": True})
+            # weak match: keep the ASR text (more complete) but BORROW the
+            # caption's timing when the warp didn't anchor this segment —
+            # never let a fragmentary caption degrade the text.
+            if overlapping and not seg.get("aligned_to_cue"):
+                first = overlapping[0][1]
+                last = overlapping[-1][1]
+                results.append({
+                    **seg,
+                    "start": min(seg["start"], first["start"]),
+                    "end": max(seg["end"], last["end"]),
+                    "source": "asr",
+                    "uncertain": True,
+                })
+            else:
+                results.append({**seg, "source": "asr", "uncertain": True})
 
     # embedded lines that matched no ASR segment (e.g. ASR dropped them): append
     orphans = [embedded[i] for i in range(len(embedded)) if i not in used_embedded]
