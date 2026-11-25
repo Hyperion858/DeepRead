@@ -154,14 +154,19 @@ def extract_ocr_subtitles(
 
     interval = SAMPLE_INTERVAL
     results: list[tuple[float, str]] = []
-    failed = 0
-    for i, frame in enumerate(frames):
-        if should_cancel and should_cancel():
-            return []
-        t = (i + 0.5) * interval  # ffmpeg fps=1/interval yields frames centered in each window
+    if should_cancel and should_cancel():
+        return []
+
+    # concurrent OCR: frames are independent; 6 workers cut wall time ~6x
+    # vs serial while staying polite to the relay.
+    import concurrent.futures as _futures
+
+    n_frames = len(frames)
+
+    def _ocr_one(i: int) -> tuple[int, str]:
+        frame = frames[i]
+        t = (i + 0.5) * interval
         text = ""
-        # per-frame fresh client: a dead pooled connection can hang forever;
-        # 2 retries with a short timeout keep the pipeline moving on flaky relays
         for attempt in range(3):
             try:
                 with httpx.Client(timeout=httpx.Timeout(connect=15, read=90, write=30, pool=15)) as client:
@@ -169,16 +174,25 @@ def extract_ocr_subtitles(
                 break
             except Exception:
                 if attempt == 2:
-                    failed += 1
-                else:
-                    import time as _time
-                    _time.sleep(1.5 * (attempt + 1))
-        results.append((t, text))
-        if progress_cb:
-            # update every frame in OCR stage — it's the slowest part,
-            # and a stalled progress read is indistinguishable from a hang
-            progress_cb(0.3 + 0.6 * (i + 1) / len(frames),
-                        f"OCR 识别 {i + 1}/{len(frames)} 帧…")
+                    return (i, "")
+                _time_module.sleep(1.0 * (attempt + 1))
+        return (i, text)
+
+    done_count = 0
+    with _futures.ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(_ocr_one, i): i for i in range(n_frames)}
+        for fut in _futures.as_completed(futures):
+            i, text = fut.result()
+            if not text and text != "":
+                text = ""
+            results.append(((i + 0.5) * interval, text))
+            done_count += 1
+            if progress_cb and done_count % 5 == 0:
+                progress_cb(0.3 + 0.6 * done_count / n_frames,
+                            f"OCR 识别 {done_count}/{n_frames} 帧…")
+    if progress_cb:
+        progress_cb(0.9, f"OCR 完成 {n_frames} 帧")
+    results.sort(key=lambda x: x[0])
 
     cues = merge_cues(results, interval)
     for c in cues:

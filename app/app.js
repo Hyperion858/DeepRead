@@ -170,7 +170,25 @@ async function renderLibrary() {
   document.getElementById("url-input").onkeydown = (e) => { if (e.key === "Enter") importUrl(); };
 
   await refreshMaterials();
+  highlightFromHash();
   state.pollTimer = setInterval(refreshMaterials, 3000);
+}
+
+// read ?hl=<id> from the hash and flash-highlight that row/card
+function highlightFromHash() {
+  const m = location.hash.match(/[?&]hl=([\w-]+)/);
+  if (!m) return;
+  const id = m[1];
+  requestAnimationFrame(() => {
+    const el = document.querySelector(`[data-mid="${id}"], [data-id="${id}"]`);
+    if (el) {
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+      el.classList.add("hl-flash");
+      setTimeout(() => el.classList.remove("hl-flash"), 2500);
+    }
+    // clean the query from the hash so refreshes don't re-highlight
+    history.replaceState(null, "", location.pathname + location.hash.split("?")[0]);
+  });
 }
 
 async function refreshMaterials() {
@@ -199,6 +217,7 @@ async function refreshMaterials() {
         <td>${m.source_url ? `<a href="${esc(m.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">链接</a>` : "上传"}</td>
         <td>${downloading ? '<span class="spinner"></span> ' : ""}<span class="${m.status === "error" ? "flag-uncertain" : ""}">${statusLabel}${m.error ? " · " + esc(m.error.slice(0, 40)) : ""}</span></td>
         <td>
+          ${m.course_id && m.media_exists ? `<a class="badge ready" style="text-decoration:none" href="#/course/${esc(m.course_id)}?hl=material">查看课程 →</a>` : ""}
           ${!m.course_id && !downloading ? `<button class="primary" data-genc="${esc(m.id)}" ${m.media_exists ? "" : "disabled"}>生成课程</button>` : ""}
           ${m.media_exists && m.course_id ? `<button data-regen="${esc(m.course_id)}" title="重新生成课程">↻</button>` : ""}
           <button class="danger" data-del="${esc(m.id)}">删除</button>
@@ -290,6 +309,7 @@ async function renderCourses() {
       <div class="course-grid" id="course-grid"><div class="spinner"></div></div>
     </div>`);
   await refreshCourses();
+  highlightFromHash();
   state.pollTimer = setInterval(refreshCourses, 3000);
 }
 
@@ -311,7 +331,7 @@ async function refreshCourses() {
       const working = ["downloading", "transcribing", "subtitles", "ocr", "aligning", "generating"].includes(c.stage);
       const badgeCls = c.stage === "ready" ? "ready" : c.stage === "error" ? "error" : working ? "working" : "";
       return `
-      <div class="course-card" data-id="${c.id}">
+      <div class="course-card" data-id="${c.id}" data-mid="${esc(c.material_id || "")}">
         <div class="cc-title">${esc(c.title)}</div>
         <div class="cc-meta">
           <span class="badge ${badgeCls}">${stageLabel}</span>
@@ -325,7 +345,7 @@ async function refreshCourses() {
         ${c.stage === "uploaded" ? `<button class="primary" data-gen="${c.id}">开始生成</button>` : ""}
         ${c.stage === "error" ? `<div class="cc-detail" style="color:var(--red)">${esc(c.detail || "")}</div>
                                  <button class="primary" data-gen="${c.id}">重试</button>` : ""}
-        <button class="cc-del" data-del="${c.id}" title="删除">✕</button>
+        ${c.material_id ? `<a class="cc-viewmat" href="#/library?hl=${esc(c.material_id)}" title="查看素材" onclick="event.stopPropagation()">📥 素材</a>` : ""}        <button class="cc-del" data-del="${c.id}" title="删除">✕</button>
       </div>`;
     }).join("");
 
@@ -419,19 +439,50 @@ async function saveCalibration() {
 function drawCoursePage() {
   const { meta, status, lesson } = state.course;
   if (status.stage !== "ready") {
-    const working = ["downloading", "transcribing", "subtitles", "ocr", "aligning", "generating"].includes(status.stage);
+    const working = ["downloading", "transcribing", "subtitles", "ocr", "aligning", "generating", "channels"].includes(status.stage);
+    const pct = Math.round((status.progress || 0) * 100);
+    const stageNames = {
+      downloading: "下载视频", uploaded: "等待生成", transcribing: "语音转写",
+      subtitles: "内嵌字幕", ocr: "OCR 硬字幕", channels: "通道处理",
+      aligning: "对齐融合", generating: "翻译与精讲",
+    };
+    const stageOrder = ["downloading", "uploaded", "transcribing", "subtitles", "ocr", "channels", "aligning", "generating"];
+    const cur = stageNames[status.stage] || status.stage;
+    const curIdx = stageOrder.indexOf(status.stage);
     $app.innerHTML = shell("", `
-      <div class="page" style="text-align:center;padding-top:80px">
-        <h2>${esc(meta.title)}</h2>
-        <p>${working ? `<div class="spinner"></div><p>正在生成: ${esc(status.detail || status.stage)} (${Math.round((status.progress || 0) * 100)}%)</p>` : `课程尚未生成: ${esc(status.detail || status.stage)}`}
-        </p>
-        ${!working ? `<button class="primary" onclick="location.reload()">刷新</button>` : ""}
-        <p><a href="#/courses">返回课程库</a></p>
+      <div class="page" style="max-width:640px;margin:0 auto;padding-top:clamp(40px,10vh,100px)">
+        <div class="gen-card">
+          <h2 style="margin:0 0 6px;text-align:left">${esc(meta.title)}</h2>
+          <div class="gen-sub">${meta.kind === "audio" ? "音频" : "视频"}课程 · 生成中</div>
+          <div class="progressbar gen-bar"><div style="width:${pct}%"></div></div>
+          <div class="gen-status">
+            <span class="spinner"></span>
+            <span><b>${cur}</b> — ${esc(status.detail || "")} <b class="gen-pct">${pct}%</b></span>
+          </div>
+          ${working ? `
+          <div class="gen-steps">
+            ${stageOrder.filter((s) => s !== "uploaded").map((s, i) => `
+              <span class="gen-step ${i < curIdx ? "done" : s === status.stage ? "now" : ""}">${stageNames[s]}</span>`).join(" → ")}
+          </div>` : `
+          <div class="form-actions" style="justify-content:center">
+            <button class="primary" onclick="location.reload()">刷新状态</button>
+          </div>`}
+          <div style="text-align:center;margin-top:18px"><a href="#/courses" class="gen-back">← 返回课程库</a></div>
+        </div>
       </div>`);
     if (working) {
       state.pollTimer = setInterval(async () => {
         const st = await api(`/api/courses/${meta.id}`).catch(() => null);
         if (st && st.status.stage === "ready") { clearInterval(state.pollTimer); renderCourse(meta.id); }
+        else if (st) {
+          // live-update in place without re-rendering the whole shell
+          const bar = document.querySelector(".gen-bar > div");
+          const pctEl = document.querySelector(".gen-pct");
+          const stEl = document.querySelector(".gen-status span:last-child");
+          if (bar) bar.style.width = Math.round((st.status.progress || 0) * 100) + "%";
+          if (pctEl) pctEl.textContent = Math.round((st.status.progress || 0) * 100) + "%";
+          if (stEl) stEl.innerHTML = `<b>${stageNames[st.status.stage] || st.status.stage}</b> — ${esc(st.status.detail || "")} <b class="gen-pct">${Math.round((st.status.progress || 0) * 100)}%</b>`;
+        }
       }, 3000);
     }
     return;

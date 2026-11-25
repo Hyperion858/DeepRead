@@ -884,6 +884,7 @@ def list_courses():
             "progress": status.get("progress", 0),
             "sentence_count": len((read_json(cdir / "source.json", {}) or {}).get("segments", []) or []),
             "learned_percent": progress.get("learned_percent", 0),
+            "material_id": meta.get("material_id", ""),
         })
     return items
 

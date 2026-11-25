@@ -289,6 +289,38 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .ch-text b { font-size: 14px; display: block; }
 .ch-text small { color: var(--ink-3); font-size: 12px; line-height: 1.5; }
 
+/* course generation status card */
+.gen-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: clamp(20px, 3vw, 32px); box-shadow: var(--shadow-lg);
+}
+.gen-sub { font-size: 13px; color: var(--ink-3); margin-bottom: 18px; }
+.gen-bar { height: 8px; margin-bottom: 16px; }
+.gen-status { display: flex; align-items: center; gap: 10px; font-size: 14px; margin-bottom: 14px; }
+.gen-pct { color: var(--accent); margin-left: 4px; }
+.gen-steps {
+  display: flex; flex-wrap: wrap; gap: 6px 4px; font-size: 12px; color: var(--ink-3);
+  padding: 10px 12px; background: var(--bg); border-radius: 8px;
+}
+.gen-step { white-space: nowrap; }
+.gen-step.done { color: var(--green); }
+.gen-step.now { color: var(--accent); font-weight: 600; }
+.gen-back { color: var(--ink-2); font-size: 13.5px; text-decoration: none; }
+.gen-back:hover { color: var(--accent); }
+
+/* cross-link highlight flash */
+.hl-flash { animation: hlflash 2.2s ease; }
+@keyframes hlflash {
+  0%, 100% { background: transparent; }
+  20%, 70% { background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent); }
+}
+.cc-viewmat {
+  position: absolute; bottom: 12px; right: 40px; font-size: 12px;
+  color: var(--accent); text-decoration: none; padding: 2px 8px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--panel);
+}
+.cc-viewmat:hover { border-color: var(--accent); }
+
 /* ---------------- course study page ---------------- */
 .course-page { display: flex; height: 100vh; height: 100dvh; flex-direction: column; }
 .cp-top {
