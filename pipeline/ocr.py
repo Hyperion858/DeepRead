@@ -77,7 +77,7 @@ def ocr_frame(client: httpx.Client, prov: dict[str, Any], img_path: Path) -> str
             "max_tokens": 200,
             "temperature": 0,
         },
-        timeout=120,
+        timeout=httpx.Timeout(connect=15, read=90, write=30, pool=15),
     )
     if r.status_code != 200:
         raise RuntimeError(f"OCR API {r.status_code}: {r.text[:200]}")
@@ -143,19 +143,30 @@ def extract_ocr_subtitles(
     interval = SAMPLE_INTERVAL
     results: list[tuple[float, str]] = []
     failed = 0
-    with httpx.Client() as client:
-        for i, frame in enumerate(frames):
-            if should_cancel and should_cancel():
-                return []
-            t = (i + 0.5) * interval  # ffmpeg fps=1/interval yields frames centered in each window
+    for i, frame in enumerate(frames):
+        if should_cancel and should_cancel():
+            return []
+        t = (i + 0.5) * interval  # ffmpeg fps=1/interval yields frames centered in each window
+        text = ""
+        # per-frame fresh client: a dead pooled connection can hang forever;
+        # 2 retries with a short timeout keep the pipeline moving on flaky relays
+        for attempt in range(3):
             try:
-                text = ocr_frame(client, prov, frame)
-                results.append((t, text))
+                with httpx.Client(timeout=httpx.Timeout(connect=15, read=90, write=30, pool=15)) as client:
+                    text = ocr_frame(client, prov, frame)
+                break
             except Exception:
-                failed += 1
-                results.append((t, ""))
-            if progress_cb and i % 5 == 0:
-                progress_cb(0.3 + 0.6 * i / len(frames), f"OCR 识别 {i + 1}/{len(frames)} 帧…")
+                if attempt == 2:
+                    failed += 1
+                else:
+                    import time as _time
+                    _time.sleep(1.5 * (attempt + 1))
+        results.append((t, text))
+        if progress_cb:
+            # update every frame in OCR stage — it's the slowest part,
+            # and a stalled progress read is indistinguishable from a hang
+            progress_cb(0.3 + 0.6 * (i + 1) / len(frames),
+                        f"OCR 识别 {i + 1}/{len(frames)} 帧…")
 
     cues = merge_cues(results, interval)
     for c in cues:

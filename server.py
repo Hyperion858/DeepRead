@@ -186,12 +186,31 @@ def set_stage(cid: str, stage: str, detail: str = "", progress: float | None = N
     write_json(course_dir(cid) / "status.json", status)
 
 
-def run_pipeline(cid: str) -> None:
-    """Background pipeline: preprocess -> dual-channel text -> align -> lesson."""
+def run_pipeline(cid: str, timeout_sec: int = 7200) -> None:
+    """Background pipeline with a hard watchdog: if it hasn't finished in
+    timeout_sec, mark the course errored so a hung API call can't stall forever."""
+    import time as _time
+
     job = JOBS.get(cid)
     cdir = course_dir(cid)
     meta = read_json(cdir / "meta.json", {}) or {}
     media_path = Path(meta.get("media_path", ""))
+    started = _time.time()
+    _result: dict[str, Any] = {"done": False}
+
+    def _watchdog() -> None:
+        while not _result["done"] and _time.time() - started < timeout_sec:
+            _time.sleep(20)
+        if not _result["done"] and cid in JOBS:
+            job = JOBS.get(cid)
+            if job:
+                job.cancelled = True
+            status = read_json(cdir / "status.json", {}) or {}
+            if status.get("stage") not in ("ready", "error", "cancelled"):
+                set_stage(cid, "error", f"流水线超时（{timeout_sec // 60} 分钟），已中止")
+
+    watchdog = threading.Thread(target=_watchdog, daemon=True)
+    watchdog.start()
     try:
         try:
             cfg = load_config()
@@ -245,6 +264,7 @@ def run_pipeline(cid: str) -> None:
         except Exception as exc:  # noqa: BLE001 — surface any pipeline failure to the UI
             set_stage(cid, "error", f"{type(exc).__name__}: {exc}")
     finally:
+        _result["done"] = True
         JOBS.pop(cid, None)
 
 
