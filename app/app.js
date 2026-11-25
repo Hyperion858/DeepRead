@@ -623,9 +623,47 @@ function drawCoursePage() {
     if (el) el.classList.add("active");
   }
 
+  // calibration toolbar shown at the top of every tab
+  function calToolbarHtml() {
+    return `
+      <div class="cal-quick" id="cal-quick">
+        <button id="calq-here" title="把当前高亮句子对齐到视频当前播放位置">⚡ 对齐到播放位置</button>
+        <button id="calq-open" title="打开完整校准面板（全局偏移/单句调整）">⏱ 校准面板</button>
+        <span class="cal-quick-hint">播放到某句的声音起点，点「对齐」即修好这句的时间</span>
+      </div>`;
+  }
+
+  function wireCalToolbar() {
+    const here = document.getElementById("calq-here");
+    const open = document.getElementById("calq-open");
+    if (!here || !open) return;
+    here.onclick = () => {
+      if (activeId < 0) { toast("请先播放视频，让要校准的句子处于高亮状态"); return; }
+      const raw = rawSentences.find((s) => s.id === activeId);
+      const cal = state.course.calibration;
+      const t = player.currentTime;
+      cal.overrides[String(activeId)] = {
+        start: Math.max(0, t),
+        end: Math.max(0, t + (raw.end - raw.start)),
+      };
+      saveCalibration().catch((e) => toast("保存失败: " + e.message));
+      // live-update the sentences array used by playback sync
+      const list = calibratedSentences();
+      sentences.splice(0, sentences.length, ...list);
+      panels[state.tab]();
+      toast(`已将第 ${activeId + 1} 句对齐到 ${fmtTime(t)} ✓`);
+    };
+    open.onclick = () => {
+      openCalibrationPanel({
+        player, sentences, rawSentences, activeId,
+        onApplied: () => panels[state.tab](),
+      });
+    };
+  }
+
   function renderReadTab() {
     const panel = document.getElementById("tab-panel");
-    panel.innerHTML = sentences.map((s) => {
+    panel.innerHTML = calToolbarHtml() + sentences.map((s) => {
       const read = state.progress.read.includes(s.id);
       const flags = [];
       if (s.uncertain) flags.push(`<span class="s-flags flag-uncertain" title="字幕轨与转写不一致，建议对照原声确认">⚠ 不确定</span>`);
@@ -637,12 +675,13 @@ function drawCoursePage() {
         <div class="s-text">${markVocab(s.text, s.lang, vocabIndex)}</div>
         ${s.translation ? `<div class="s-trans">${esc(s.translation)}</div>` : ""}
         ${s.grammar ? `<div class="s-grammar">语法: ${esc(s.grammar)}</div>` : ""}
+        <button class="s-cal" data-cal="${s.id}" title="把这句对齐到当前播放位置">⏱ 校准此句</button>
       </div>`;
     }).join("");
 
     panel.querySelectorAll(".sent").forEach((el) => {
       el.onclick = (e) => {
-        if (e.target.closest(".vmark")) return;
+        if (e.target.closest(".vmark") || e.target.closest(".s-cal")) return;
         const idx = parseInt(el.dataset.idx, 10);
         player.currentTime = sentences[idx].start;
         player.play();
@@ -652,14 +691,34 @@ function drawCoursePage() {
         }
       };
     });
+    // per-sentence quick calibration
+    panel.querySelectorAll(".s-cal").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const sid = +btn.dataset.cal;
+        const raw = rawSentences.find((s) => s.id === sid);
+        const cal = state.course.calibration;
+        const t = player.currentTime;
+        cal.overrides[String(sid)] = {
+          start: Math.max(0, t),
+          end: Math.max(0, t + (raw.end - raw.start)),
+        };
+        saveCalibration().catch((er) => toast("保存失败: " + er.message));
+        const list = calibratedSentences();
+        sentences.splice(0, sentences.length, ...list);
+        panels[state.tab]();
+        toast(`第 ${sid + 1} 句已对齐到 ${fmtTime(t)} ✓`);
+      };
+    });
+    wireCalToolbar();
   }
 
   function renderCardsTab() {
     const panel = document.getElementById("tab-panel");
     const vocab = lesson.vocabulary || [];
-    if (!vocab.length) { panel.innerHTML = `<div class="panel-empty">本课程暂无生词数据</div>`; return; }
+    if (!vocab.length) { panel.innerHTML = calToolbarHtml() + `<div class="panel-empty">本课程暂无生词数据</div>`; wireCalToolbar(); return; }
     const order = shuffle([...vocab.keys()]);
-    panel.innerHTML = `
+    panel.innerHTML = calToolbarHtml() + `
       <div style="margin-bottom:12px;color:var(--ink-2);font-size:13px">
         点击卡片翻面 · 底部按钮标记认识/不认识 · 点击句号跳转原句
       </div>
@@ -720,7 +779,7 @@ function drawCoursePage() {
         ${x.usage ? `<div class="hs-breakdown">${esc(x.usage)}</div>` : ""}
         ${(x.sentenceIds || []).length ? `<div class="hs-jump"><a class="jump" data-sid="${x.sentenceIds[0]}" href="#">→ 原句</a></div>` : ""}
       </div>`;
-    panel.innerHTML = `
+    panel.innerHTML = calToolbarHtml() + `
       <div class="section-title">💬 口语表达</div>
       ${expr.length ? expr.map((x) => item(x)).join("") : `<div class="panel-empty">暂无</div>`}
       <div class="section-title">⚖ 行业词汇</div>
@@ -730,13 +789,14 @@ function drawCoursePage() {
     panel.querySelectorAll(".jump").forEach((a) => {
       a.onclick = (e) => { e.preventDefault(); window.__jumpTo(sentences[+a.dataset.sid].start); };
     });
+    wireCalToolbar();
   }
 
   function renderHardTab() {
     const panel = document.getElementById("tab-panel");
     const hs = lesson.hardSentences || [];
-    if (!hs.length) { panel.innerHTML = `<div class="panel-empty">本课程暂无长难句拆解</div>`; return; }
-    panel.innerHTML = hs.map((h) => {
+    if (!hs.length) { panel.innerHTML = calToolbarHtml() + `<div class="panel-empty">本课程暂无长难句拆解</div>`; wireCalToolbar(); return; }
+    panel.innerHTML = calToolbarHtml() + hs.map((h) => {
       const s = sentences[h.sentenceId] || {};
       return `
       <div class="hs-card">
@@ -750,13 +810,14 @@ function drawCoursePage() {
     panel.querySelectorAll(".jump").forEach((a) => {
       a.onclick = (e) => { e.preventDefault(); window.__jumpTo(sentences[+a.dataset.sid].start); };
     });
+    wireCalToolbar();
   }
 
   function renderShadowTab() {
     const panel = document.getElementById("tab-panel");
     const sh = (lesson.shadowing || []).filter((s) => sentences[s.sentenceId]);
-    if (!sh.length) { panel.innerHTML = `<div class="panel-empty">本课程暂无跟读数据</div>`; return; }
-    panel.innerHTML = `
+    if (!sh.length) { panel.innerHTML = calToolbarHtml() + `<div class="panel-empty">本课程暂无跟读数据</div>`; wireCalToolbar(); return; }
+    panel.innerHTML = calToolbarHtml() + `
       <div style="margin-bottom:12px;color:var(--ink-2);font-size:13px">
         🔁 A-B 循环 + 0.75x 慢速播放 → 暂停 → 影子跟读
       </div>` + sh.map((s) => {
@@ -788,6 +849,7 @@ function drawCoursePage() {
         window.__jumpTo(s.start);
       };
     });
+    wireCalToolbar();
   }
 }
 

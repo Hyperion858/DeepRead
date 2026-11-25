@@ -217,43 +217,52 @@ def run_pipeline(cid: str, timeout_sec: int = 7200) -> None:
     try:
         try:
             cfg = load_config()
-            # 1. dual-channel text acquisition
-            set_stage(cid, "transcribing", "调用转写 API 中…", 0.05)
-            transcript = transcribe(
-                media_path,
-                cfg=cfg,
-                workdir=cdir,
-                progress_cb=lambda p, msg: set_stage(cid, "transcribing", msg, 0.05 + 0.45 * p),
-                should_cancel=lambda: bool(job and job.cancelled),
-            )
 
-            set_stage(cid, "subtitles", "提取内嵌字幕轨…", 0.52)
+            # 1. subtitle channels first (embedded track -> OCR burned-in).
+            # Both are preferable to ASR: real authored text + true timestamps.
+            set_stage(cid, "subtitles", "提取内嵌字幕轨…", 0.05)
             sub_lines = extract_subtitle_channel(media_path, cdir)
 
-            # OCR channel: burned-in subtitles (douyin etc.) — only when no embedded track
             if not sub_lines and meta.get("kind") == "video":
-                set_stage(cid, "ocr", "OCR 识别画面硬字幕…", 0.54)
+                set_stage(cid, "ocr", "OCR 识别画面硬字幕…", 0.08)
                 try:
                     ocr_lines = extract_ocr_subtitles(
                         media_path, cdir, cfg,
-                        progress_cb=lambda p, msg: set_stage(cid, "ocr", msg, 0.52 + 0.13 * p),
+                        progress_cb=lambda p, msg: set_stage(cid, "ocr", msg, 0.08 + 0.6 * p),
                         should_cancel=lambda: bool(job and job.cancelled),
                     )
                 except Exception as ocr_exc:  # noqa: BLE001 — OCR is best-effort
-                    set_stage(cid, "ocr", f"OCR 失败，继续转写融合: {ocr_exc}", 0.55)
+                    set_stage(cid, "ocr", f"OCR 失败: {ocr_exc}", 0.6)
                     ocr_lines = []
                 sub_lines = ocr_lines
 
-            # 2. align / merge the channels
-            set_stage(cid, "aligning", "字幕与转写对齐融合…", 0.66)
-            segments = align(transcript, sub_lines)
+            # 2. ASR only when there is no subtitle text at all (audio-only courses
+            #    and videos without captions). With captions present we skip ASR
+            #    entirely: cue timing is already accurate.
+            transcript: list[dict[str, Any]] = []
+            if not sub_lines:
+                set_stage(cid, "transcribing", "调用转写 API 中…", 0.1)
+                transcript = transcribe(
+                    media_path,
+                    cfg=cfg,
+                    workdir=cdir,
+                    progress_cb=lambda p, msg: set_stage(cid, "transcribing", msg, 0.1 + 0.75 * p),
+                    should_cancel=lambda: bool(job and job.cancelled),
+                )
+                set_stage(cid, "aligning", "对齐融合…", 0.9)
+                segments = align(transcript, [])
+            else:
+                set_stage(cid, "aligning", "整理字幕时间线…", 0.9)
+                # merge cues into readable sentence units (they may be fragmentary)
+                segments = align([], sub_lines)
+
             write_json(cdir / "source.json", {"segments": segments})
 
             # 3. lesson generation
             lesson = generate_lesson(
                 segments,
                 cfg=cfg,
-                progress_cb=lambda p, msg: set_stage(cid, "generating", msg, 0.68 + 0.3 * p),
+                progress_cb=lambda p, msg: set_stage(cid, "generating", msg, 0.92 + 0.07 * p),
                 should_cancel=lambda: bool(job and job.cancelled),
             )
             write_json(cdir / "lesson.json", lesson)

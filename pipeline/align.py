@@ -88,6 +88,77 @@ def split_long_segment(seg: dict[str, Any], max_chars: int = 120) -> list[dict[s
     return out
 
 
+def _warp_asr_to_cues(asr: list[dict[str, Any]], cues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Warp ASR segment times onto cue times.
+
+    When embedded/OCR cues carry reliable timing (frame sampling for OCR,
+    authoring for embedded tracks), ASR's evenly-spread estimates within a
+    long window are the weaker clock. This maps each ASR segment matched to
+    a cue onto the cue's real interval, then re-flows unmatched segments
+    between anchored points.
+    """
+    # build anchor list: (asr_idx, cue_start, cue_end) matched by similarity
+    anchors: list[tuple[int, float, float]] = []
+    used_cues: set[int] = set()
+    for ai, seg in enumerate(asr):
+        best_i, best_sim = None, 0.0
+        for ci, cue in enumerate(cues):
+            if ci in used_cues:
+                continue
+            s = _similarity(seg["text"], cue["text"])
+            if s > best_sim:
+                best_sim, best_i = s, ci
+        if best_i is not None and best_sim > 0.5:
+            used_cues.add(best_i)
+            anchors.append((ai, cues[best_i]["start"], cues[best_i]["end"]))
+    anchors.sort(key=lambda a: a[0])
+
+    out: list[dict[str, Any]] = [None] * len(asr)
+    # place anchored segments at cue times
+    for ai, cs, ce in anchors:
+        seg = asr[ai]
+        dur = max(seg["end"] - seg["start"], 0.1)
+        out[ai] = {
+            **seg,
+            "start": cs,
+            "end": max(cs + dur * 0.6, ce) if ce - cs < dur else ce,
+            "source": seg.get("source", "asr"),
+            "aligned_to_cue": True,
+        }
+    # re-flow unmatched segments in the gaps between anchored ones
+    n = len(asr)
+    for idx in range(n):
+        if out[idx] is not None:
+            continue
+        prev_anchor = next((a for a in anchors if a[0] < idx), None)
+        next_anchor = next((a for a in anchors if a[0] > idx), None)
+        lo = prev_anchor[2] if prev_anchor else (asr[idx]["start"] if not next_anchor else 0.0)
+        hi = next_anchor[1] if next_anchor else None
+        seg = asr[idx]
+        dur = max(seg["end"] - seg["start"], 0.1)
+        if hi is None:
+            new_start = lo
+        else:
+            # spread unmatched segments evenly in [lo, hi)
+            gap = hi - lo
+            # count consecutive unmatched segments from idx
+            run = 0
+            k = idx
+            while k < n and out[k] is None:
+                run += 1
+                k += 1
+            before = idx - (prev_anchor[0] + 1 if prev_anchor else 0)
+            new_start = lo + gap * (before / max(run, 1))
+        out[idx] = {
+            **seg,
+            "start": new_start,
+            "end": new_start + dur,
+        }
+    result = [x for x in out if x]
+    result.sort(key=lambda x: x["start"])
+    return result
+
+
 def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # normalize + merge ASR fragments first
     asr = merge_asr_fragments(asr_segments)
@@ -97,6 +168,25 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]]) ->
         for s in asr:
             s["uncertain"] = False
         return asr
+
+    # caption-only path: no ASR at all, cues ARE the timeline (accurate times)
+    if not asr:
+        results = []
+        for i, sub in enumerate(embedded):
+            if _norm(sub["text"]):
+                results.append({
+                    "start": sub["start"],
+                    "end": sub["end"],
+                    "text": sub["text"],
+                    "lang": sub.get("lang") or "en",
+                    "source": sub.get("source", "embedded"),
+                    "uncertain": False,
+                })
+        results.sort(key=lambda x: x["start"])
+        return results
+
+    # when cues have trustworthy timing, warp the ASR timeline onto them
+    asr = _warp_asr_to_cues(asr, embedded)
 
     used_embedded: set[int] = set()
     results: list[dict[str, Any]] = []
@@ -126,7 +216,6 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]]) ->
 
         sim = _similarity(seg["text"], sub_text)
         if sim > 0.75:
-            # agree: embedded text is human-authored, prefer it
             results.append({
                 **seg,
                 "text": sub_text,
@@ -134,7 +223,6 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]]) ->
                 "uncertain": False,
             })
         elif sim > 0.4:
-            # partial agreement: prefer embedded but flag for review
             results.append({
                 **seg,
                 "text": sub_text,
@@ -142,7 +230,6 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]]) ->
                 "uncertain": True,
             })
         else:
-            # strong disagreement: keep ASR, flag
             results.append({**seg, "source": "asr", "uncertain": True})
 
     # embedded lines that matched no ASR segment (e.g. ASR dropped them): append
