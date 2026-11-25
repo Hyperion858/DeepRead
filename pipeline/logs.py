@@ -19,6 +19,7 @@ _KEEP = 5
 RUNTIME = "runtime"      # pipeline internals, API errors, downloads
 ACTION = "action"        # user operations
 PIPELINE = "pipeline"    # course generation lifecycle detail
+MATERIAL = "material"    # material lifecycle: import/download/rename/delete/generate link
 
 
 def _init_dir(data_dir: Path) -> Path:
@@ -70,7 +71,7 @@ def query_logs(data_dir: Path, categories: list[str], keyword: str = "",
     out: list[dict[str, Any]] = []
     kw = (keyword or "").lower()
     for cat in categories:
-        if cat not in (RUNTIME, ACTION, PIPELINE):
+        if cat not in (RUNTIME, ACTION, PIPELINE, MATERIAL):
             continue
         path = d / f"{cat}.jsonl"
         if not path.exists():

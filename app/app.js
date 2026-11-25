@@ -1599,6 +1599,7 @@ function renderLogs() {
           <div class="log-tabs">
             <button data-cat="all" class="active">全部</button>
             <button data-cat="pipeline">课程生成</button>
+            <button data-cat="material">素材</button>
             <button data-cat="action">用户操作</button>
             <button data-cat="runtime">运行日志</button>
           </div>
@@ -1632,7 +1633,7 @@ function renderLogs() {
       const levelTag = (lv) => lv === "error" ? `<span class="log-lv err">ERROR</span>`
         : lv === "warn" ? `<span class="log-lv warn">WARN</span>`
         : "";
-      const catTag = (c) => ({ runtime: "运行", pipeline: "生成", action: "操作" }[c] || c);
+      const catTag = (c) => ({ runtime: "运行", pipeline: "生成", action: "操作", material: "素材" }[c] || c);
       listEl.innerHTML = items.map((e) => `
         <div class="log-row ${e.level === "error" ? "log-err" : e.level === "warn" ? "log-warn" : ""}">
           <span class="log-ts">${esc((e.ts || "").replace("T", " ").slice(0, 19))}</span>

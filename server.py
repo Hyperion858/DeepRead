@@ -151,9 +151,10 @@ def _masked_config(cfg: dict[str, Any]) -> dict[str, Any]:
 class JobState:
     """In-memory pipeline job state."""
 
-    def __init__(self) -> None:
+    def __init__(self, stage_lock: str = "") -> None:
         self.lock = threading.Lock()
         self.cancelled = False
+        self.stage_lock = stage_lock  # material id this job is generating from
 
 
 JOBS: dict[str, JobState] = {}
@@ -646,7 +647,7 @@ async def material_upload(file: UploadFile = File(...)):
         "source_url": "",
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
-    log_event("action", f"上传素材「{title}」", detail=f"{file.filename} ({kind})")
+    log_event("material", f"上传素材「{title}」", detail=f"{file.filename} ({kind})")
     return {"id": mid, "title": title, "kind": kind}
 
 
@@ -671,7 +672,7 @@ async def material_import(request: Request):
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     threading.Thread(target=_download_material, args=(mid, url), daemon=True).start()
-    log_event("action", f"链接导入素材", detail=url)
+    log_event("material", f"链接导入素材", detail=url)
     return {"id": mid, "title": url}
 
 
@@ -698,14 +699,14 @@ def _download_material(mid: str, url: str) -> None:
             "status": "ready",
         })
         write_json(mdir / "material.json", mat)
-        log_event("runtime", f"素材下载完成「{mat.get('title', '')}」",
+        log_event("material", f"素材下载完成「{mat.get('title', '')}」",
                   detail=f"{media_path.name} {result.get('duration', 0):.0f}s")
     except Exception as exc:  # noqa: BLE001
         mat = read_json(mdir / "material.json", {}) or {}
         mat["status"] = "error"
         mat["error"] = str(exc)
         write_json(mdir / "material.json", mat)
-        log_event("runtime", "素材下载失败", detail=f"{url} · {exc}", level="error")
+        log_event("material", "素材下载失败", detail=f"{url} · {exc}", level="error")
     finally:
         MATERIAL_JOBS.pop(mid, None)
 
@@ -717,8 +718,16 @@ async def material_rename(mid: str, request: Request):
         raise HTTPException(404, "素材不存在")
     body = await request.json()
     mat = read_json(mdir / "material.json", {}) or {}
-    mat["title"] = (body.get("title") or "").strip() or mat.get("title", "")
+    old_title = mat.get("title", "")
+    mat["title"] = (body.get("title") or "").strip() or old_title
     write_json(mdir / "material.json", mat)
+    # keep the linked course title in sync
+    cid = mat.get("course_id", "")
+    if cid and (COURSES_DIR / cid).exists():
+        cmeta = read_json(COURSES_DIR / cid / "meta.json", {}) or {}
+        cmeta["title"] = mat["title"]
+        write_json(COURSES_DIR / cid / "meta.json", cmeta)
+    log_event("material", f"重命名素材：「{old_title}」→「{mat['title']}」")
     return {"ok": True}
 
 
@@ -733,7 +742,7 @@ def material_delete(mid: str):
     # also clean legacy media if it lives there
     for f in MEDIA_DIR.glob(f"{mid}.*"):
         f.unlink(missing_ok=True)
-    log_event("action", f"删除素材「{mat.get('title', mid)}」")
+    log_event("material", f"删除素材「{mat.get('title', mid)}」")
     return {"ok": True}
 
 
@@ -773,8 +782,18 @@ def material_generate(mid: str, request: Request = None):
     media = find_media_file(mat)
     if not media:
         raise HTTPException(400, "素材媒体文件缺失")
-    if mat.get("course_id") and (COURSES_DIR / mat["course_id"]).exists():
-        raise HTTPException(409, "该素材已生成课程，如需重新生成请先删除课程")
+    # lock: one generating course per material — course exists OR a stale
+    # course_id points at a course currently in a working stage
+    if mat.get("course_id"):
+        cstatus = read_json(COURSES_DIR / mat["course_id"] / "status.json", {}) or {}
+        if (COURSES_DIR / mat["course_id"]).exists():
+            if cstatus.get("stage") in ("uploaded", "downloading", "transcribing", "subtitles", "ocr", "channels", "aligning", "generating"):
+                raise HTTPException(409, "该素材已有课程正在生成中，请等待完成或先删除课程")
+        # stale link to a deleted course — clean it
+        if not (COURSES_DIR / mat["course_id"]).exists():
+            mat["course_id"] = ""
+    if any(j.stage_lock == mid for j in JOBS.values() if hasattr(j, "stage_lock")):
+        raise HTTPException(409, "该素材已有课程正在生成中")
     cfg = load_config()
     if not cfg.get("providers"):
         raise HTTPException(400, "请先在模型配置页配置 API")
@@ -801,7 +820,7 @@ def material_generate(mid: str, request: Request = None):
     mat["course_id"] = cid
     mat["last_channels"] = sorted(channels)   # remember for next time
     write_json(mdir / "material.json", mat)
-    JOBS[cid] = JobState()
+    JOBS[cid] = JobState(stage_lock=mid)
     threading.Thread(target=run_pipeline, args=(cid,), kwargs={"channels": channels}, daemon=True).start()
     log_event("action", f"生成课程（通道: {', '.join(sorted(channels))}）", course_id=cid)
     return {"id": cid, "title": mat.get("title")}
@@ -822,17 +841,19 @@ def media_material_file(mid: str, request: Request):
 
 @app.get("/api/logs")
 def query_logs(category: str = "all", keyword: str = "", level: str = "", limit: int = 300):
-    """Query logs. category: all | runtime | pipeline | action."""
-    cats = {"all": ["runtime", "pipeline", "action"],
+    """Query logs. category: all | runtime | pipeline | action | material."""
+    cats = {"all": ["runtime", "pipeline", "action", "material"],
             "runtime": ["runtime"],
             "pipeline": ["pipeline"],
-            "action": ["action"]}.get(category, ["runtime", "pipeline", "action"])
+            "action": ["action"],
+            "material": ["material"]}.get(category,
+            ["runtime", "pipeline", "action", "material"])
     return logs_mod.query_logs(DATA_DIR, cats, keyword=keyword, limit=min(limit, 1000), level=level)
 
 
 @app.get("/api/logs/{category}/download")
 def download_logs(category: str):
-    if category not in ("runtime", "pipeline", "action"):
+    if category not in ("runtime", "pipeline", "action", "material"):
         raise HTTPException(400, "无效的日志类别")
     path = DATA_DIR / "logs" / f"{category}.jsonl"
     if not path.exists():
