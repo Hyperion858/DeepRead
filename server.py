@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pipeline.lesson import generate_lesson
 from pipeline.transcribe import transcribe, PipelineCancelled
 from pipeline.align import align
+from pipeline import backup as backup_mod
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -49,6 +50,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "asr_model": "",
     "chat_model": "",
     "segment_minutes": 5,
+    # backup settings
+    "backup_enabled": True,
+    "backup_time": "04:00",   # local time HH:MM
+    "backup_keep": 14,        # max archives to retain
 }
 
 
@@ -350,6 +355,126 @@ async def test_config(request: Request):
     return results
 
 
+# ---------------------------------------------------------------- API: backup
+
+BACKUPS_DIR = DATA_DIR / "backups"
+
+
+def run_auto_backup() -> None:
+    try:
+        backup_mod.create_backup(DATA_DIR, BACKUPS_DIR, note="auto")
+        # retention
+        keep = max(1, int(load_config().get("backup_keep") or 14))
+        archives = sorted(BACKUPS_DIR.glob("deepread-backup-*.zip"), reverse=True)
+        for old in archives[keep:]:
+            old.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 — backups must never crash the app
+        pass
+
+
+def _backup_scheduler() -> None:
+    """Daily auto-backup thread. Sleeps in short increments; checks the wall clock."""
+    last_run_date = None
+    while True:
+        try:
+            cfg = load_config()
+            if cfg.get("backup_enabled"):
+                hh, mm = (cfg.get("backup_time") or "04:00").split(":")[:2]
+                now = datetime.now()
+                target_h, target_m = int(hh) % 24, int(mm) % 60
+                if now.hour == target_h and now.minute == target_m:
+                    today = now.strftime("%Y-%m-%d")
+                    if last_run_date != today:
+                        last_run_date = today
+                        run_auto_backup()
+        except Exception:  # noqa: BLE001
+            pass
+        threading.Event().wait(30)
+
+
+@app.get("/api/backups")
+def list_backups():
+    return backup_mod.list_backups(BACKUPS_DIR)
+
+
+@app.post("/api/backups/create")
+def create_backup_now():
+    path = backup_mod.create_backup(DATA_DIR, BACKUPS_DIR, note="manual")
+    run_retention()
+    return {"ok": True, "file": path.name}
+
+
+def run_retention() -> None:
+    keep = max(1, int(load_config().get("backup_keep") or 14))
+    archives = sorted(BACKUPS_DIR.glob("deepread-backup-*.zip"), reverse=True)
+    for old in archives[keep:]:
+        old.unlink(missing_ok=True)
+
+
+@app.get("/api/backups/{name}/download")
+def download_backup(name: str):
+    if "/" in name or "\\" in name or not name.startswith("deepread-backup-"):
+        raise HTTPException(400, "无效的备份名")
+    path = BACKUPS_DIR / name
+    if not path.exists():
+        raise HTTPException(404, "备份不存在")
+    return FileResponse(path, media_type="application/zip", filename=name)
+
+
+@app.delete("/api/backups/{name}")
+def delete_backup(name: str):
+    if "/" in name or "\\" in name or not name.startswith("deepread-backup-"):
+        raise HTTPException(400, "无效的备份名")
+    path = BACKUPS_DIR / name
+    if path.exists():
+        path.unlink()
+    return {"ok": True}
+
+
+@app.post("/api/backups/restore")
+async def restore_backup(request: Request):
+    """Restore from an uploaded backup zip."""
+    import tempfile
+
+    form = await request.form()
+    up = form.get("file")
+    if up is None:
+        raise HTTPException(400, "缺少备份文件")
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        shutil.copyfileobj(up.file, tmp)
+        tmp_path = Path(tmp.name)
+    try:
+        result = backup_mod.restore_backup(DATA_DIR, tmp_path)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    return result
+
+
+@app.post("/api/backups/media")
+async def restore_media(request: Request):
+    """Attach a re-uploaded media file to a restored course.
+
+    multipart: file=<media>, course_id=<id>
+    """
+    import tempfile
+
+    form = await request.form()
+    up = form.get("file")
+    cid = form.get("course_id", "")
+    if up is None or not cid:
+        raise HTTPException(400, "缺少文件或课程 ID")
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td) / Path(up.filename or "media").name
+        with tmp_path.open("wb") as fh:
+            shutil.copyfileobj(up.file, fh)
+        result = backup_mod.attach_media(cid, DATA_DIR, tmp_path)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("detail", "媒体关联失败"))
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- API: courses
 
 @app.get("/api/courses")
@@ -567,6 +692,9 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=APP_DIR), name="static")
+
+# start the daily auto-backup scheduler
+threading.Thread(target=_backup_scheduler, daemon=True).start()
 
 
 if __name__ == "__main__":

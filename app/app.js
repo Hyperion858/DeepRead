@@ -214,6 +214,30 @@ function renderSettings() {
         <button id="cfg-back">返回</button>
       </div>
       <div class="test-result" id="test-result"></div>
+
+      <div class="section-title" style="margin-top:28px">💾 备份与恢复</div>
+      <div class="form-row" style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+        <label style="display:flex;gap:6px;align-items:center;margin:0">
+          <input type="checkbox" id="bk-enabled" style="width:auto"> 每日自动备份
+        </label>
+        <label style="margin:0;display:flex;gap:6px;align-items:center">时间
+          <input type="time" id="bk-time" style="width:110px"></label>
+        <label style="margin:0;display:flex;gap:6px;align-items:center">保留数量
+          <input type="number" id="bk-keep" min="1" max="90" style="width:70px"></label>
+        <button id="bk-save-settings">保存备份设置</button>
+        <button id="bk-now">立即备份</button>
+      </div>
+      <div class="form-row" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="margin:0;font-size:13px;color:var(--ink-2)">恢复：选择备份 zip 上传</label>
+        <input type="file" id="bk-restore-file" accept=".zip" style="width:auto">
+        <button id="bk-restore" class="danger">恢复（覆盖当前数据）</button>
+      </div>
+      <div class="cal-hint" style="margin-bottom:8px">
+        备份包含 API 配置、全部课程（转写/精讲/进度/校准）；不含媒体文件 — 恢复后按提示重新上传视频即可自动关联。
+        换部署环境：新机器 docker compose up 后，在此上传备份恢复，再补传媒体。
+      </div>
+      <div id="bk-list"></div>
+      <div id="bk-missing" style="margin-top:10px"></div>
     </div>`;
 
   document.getElementById("cfg-back").onclick = () => (location.hash = "#/");
@@ -396,6 +420,122 @@ function renderSettings() {
     }
   };
 
+  // ---------- backup & restore ----------
+  async function loadBackupSettings() {
+    const cfg = cfgCache || (cfgCache = await api("/api/config"));
+    document.getElementById("bk-enabled").checked = !!cfg.backup_enabled;
+    document.getElementById("bk-time").value = cfg.backup_time || "04:00";
+    document.getElementById("bk-keep").value = cfg.backup_keep || 14;
+  }
+
+  async function refreshBackups() {
+    const listEl = document.getElementById("bk-list");
+    try {
+      const items = await api("/api/backups");
+      if (!items.length) {
+        listEl.innerHTML = `<div class="panel-empty" style="padding:14px">暂无备份</div>`;
+        return;
+      }
+      listEl.innerHTML = `<table class="bk-table"><tr><th>时间</th><th>类型</th><th>大小</th><th></th></tr>` +
+        items.map((b) => `
+        <tr>
+          <td>${esc((b.created_at || "").replace("T", " ").slice(0, 19))}</td>
+          <td>${b.auto ? "自动" : "手动"}${b.note && b.note !== "auto" && b.note !== "manual" ? " · " + esc(b.note) : ""}</td>
+          <td>${b.size_mb} MB</td>
+          <td>
+            <a href="/api/backups/${esc(b.file)}/download" download>下载</a>
+            <button class="danger bk-del" data-f="${esc(b.file)}" style="padding:2px 8px;font-size:12px">删除</button>
+          </td>
+        </tr>`).join("") + `</table>`;
+      listEl.querySelectorAll(".bk-del").forEach((btn) => {
+        btn.onclick = async () => {
+          if (!confirm("删除这个备份？")) return;
+          await api(`/api/backups/${btn.dataset.f}`, { method: "DELETE" });
+          refreshBackups();
+        };
+      });
+    } catch (err) {
+      listEl.innerHTML = `<div class="panel-empty" style="padding:14px">加载失败: ${esc(err.message)}</div>`;
+    }
+  }
+
+  document.getElementById("bk-save-settings").onclick = async () => {
+    try {
+      await api("/api/config", {
+        method: "PUT",
+        body: JSON.stringify({
+          backup_enabled: document.getElementById("bk-enabled").checked,
+          backup_time: document.getElementById("bk-time").value || "04:00",
+          backup_keep: parseInt(document.getElementById("bk-keep").value, 10) || 14,
+        }),
+      });
+      toast("备份设置已保存");
+    } catch (err) { toast(err.message); }
+  };
+
+  document.getElementById("bk-now").onclick = async () => {
+    try {
+      await api("/api/backups/create", { method: "POST" });
+      toast("备份完成");
+      refreshBackups();
+    } catch (err) { toast(err.message); }
+  };
+
+  document.getElementById("bk-restore").onclick = async () => {
+    const fi = document.getElementById("bk-restore-file");
+    if (!fi.files[0]) { toast("请先选择备份 zip"); return; }
+    if (!confirm("恢复会覆盖当前的 API 配置和所有课程数据，确定继续？")) return;
+    const fd = new FormData();
+    fd.append("file", fi.files[0]);
+    try {
+      const res = await api("/api/backups/restore", { method: "POST", body: fd });
+      let msg = `恢复完成：${res.courses} 门课程${res.config ? " + API 配置" : ""}`;
+      if (res.missing_media?.length) {
+        msg += `；${res.missing_media.length} 个课程缺媒体文件（见下方列表）`;
+        renderMissingMedia(res.missing_media);
+      } else {
+        document.getElementById("bk-missing").innerHTML = "";
+      }
+      toast(msg, 5000);
+      // reload settings — config was restored
+      cfgCache = await api("/api/config");
+      providers = (cfgCache.providers || []).map((p) => ({ ...p }));
+      drawProviders(); drawRoles();
+      loadBackupSettings();
+      refreshBackups();
+    } catch (err) { toast("恢复失败: " + err.message, 5000); }
+  };
+
+  function renderMissingMedia(missing) {
+    document.getElementById("bk-missing").innerHTML = `
+      <div class="section-title">缺媒体文件的课程（重新上传后自动关联）</div>` +
+      missing.map((m) => `
+      <div class="hs-card" style="padding:10px 14px">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <span style="flex:1">${esc(m.title)}</span>
+          <span class="cal-hint">需要文件名: ${esc(m.media_file)}</span>
+          <label style="margin:0">
+            <input type="file" class="mm-file" data-cid="${esc(m.course_id)}" style="width:auto">
+          </label>
+        </div>
+      </div>`).join("");
+    document.querySelectorAll(".mm-file").forEach((inp) => {
+      inp.onchange = async () => {
+        if (!inp.files[0]) return;
+        const fd = new FormData();
+        fd.append("file", inp.files[0]);
+        fd.append("course_id", inp.dataset.cid);
+        try {
+          await api("/api/backups/media", { method: "POST", body: fd });
+          toast("媒体已关联");
+          inp.closest(".hs-card").style.display = "none";
+        } catch (err) { toast(err.message); }
+      };
+    });
+  }
+
+  loadBackupSettings();
+  refreshBackups();
   init();
 }
 
