@@ -209,7 +209,7 @@ async function refreshMaterials() {
       <tr data-mid="${esc(m.id)}">
         <td class="mat-title-cell">
           <span class="mat-title">${esc(m.title)}</span>
-          <button class="mat-rename" data-rename="${esc(m.id)}" title="重命名">✎</button>
+          <button class="mat-rename" data-rename="${esc(m.id)}" title="重命名">✎ 改名</button>
           ${m.course_id ? `<a class="badge ready" style="text-decoration:none" href="#/course/${esc(m.course_id)}">已有课程 →</a>` : ""}
         </td>
         <td>${m.kind === "audio" ? "音频" : "视频"}</td>
@@ -680,9 +680,9 @@ function drawCoursePage() {
   function calToolbarHtml() {
     return `
       <div class="cal-quick" id="cal-quick">
-        <button id="calq-here" title="把当前高亮句子对齐到视频当前播放位置">⚡ 对齐到播放位置</button>
-        <button id="calq-open" title="打开完整校准面板（全局偏移/单句调整）">⏱ 校准面板</button>
-        <span class="cal-quick-hint">播放到某句的声音起点，点「对齐」即修好这句的时间</span>
+        <button id="calq-here" class="primary" title="把当前高亮句子对齐到视频当前播放位置">⚡ 对齐当前句到播放位置</button>
+        <button id="calq-open" title="打开完整校准面板（全局偏移/单句调整/文字修正）">⏱ 校准面板</button>
+        <span class="cal-quick-hint" id="calq-hint">先播放视频，高亮的句子就是要校准的对象；拖到这句声音开始的时刻，点「⚡ 对齐」即可修好</span>
       </div>`;
   }
 
@@ -690,6 +690,21 @@ function drawCoursePage() {
     const here = document.getElementById("calq-here");
     const open = document.getElementById("calq-open");
     if (!here || !open) return;
+    // live hint: show which sentence is currently highlighted (the calibration target)
+    const hint = document.getElementById("calq-hint");
+    const updateHint = () => {
+      if (!hint) return;
+      if (activeId >= 0 && sentences[activeId]) {
+        hint.innerHTML = `当前校准目标：第 <b>${activeId + 1}</b> 句「${esc(sentences[activeId].text.slice(0, 30))}…」— 播放到它的声音起点，点 <b>⚡ 对齐</b>`;
+      } else {
+        hint.textContent = "先播放视频，高亮的句子就是要校准的对象";
+      }
+    };
+    updateHint();
+    const oldTimeupdate = player.__calHintUpdater;
+    if (oldTimeupdate) player.removeEventListener("timeupdate", oldTimeupdate);
+    player.__calHintUpdater = updateHint;
+    player.addEventListener("timeupdate", updateHint);
     here.onclick = () => {
       if (activeId < 0) { toast("请先播放视频，让要校准的句子处于高亮状态"); return; }
       const raw = rawSentences.find((s) => s.id === activeId);
@@ -854,11 +869,13 @@ function drawCoursePage() {
           <button data-mark="unknown" class="${known === "unknown" ? "mark-unknown" : ""}">不认识</button>
           <button data-mark="known" class="${known === "known" ? "mark-known" : ""}">认识</button>
         </div>
-        ${(v.sentenceIds || []).length ? `<a class="jump" data-sid="${v.sentenceIds[0]}" href="#">→ 原句 ${fmtTime(sentences[v.sentenceIds[0]]?.start)}</a>` : ""}
+        ${(v.sentenceIds || []).length && sentences[v.sentenceIds[0]] ? `
+          <div class="hs-time">⏱ ${fmtTime(sentences[v.sentenceIds[0]].start)} → ${fmtTime(sentences[v.sentenceIds[0]].end)}</div>
+          <a class="jump jump-btn" data-sid="${v.sentenceIds[0]}" href="#">▶ 播放原句</a>` : ""}
       </div>
       <div class="face back">
         <div class="def">${esc(v.definition || "")}</div>
-        <div class="ex">${esc(v.example || "")}</div>
+        <div class="ex">${markVocab(v.example || "", "en", vocabIndex)}</div>
       </div>
     </div>`;
   }
@@ -868,13 +885,19 @@ function drawCoursePage() {
     const expr = lesson.expressions || [];
     const dom = lesson.domain || [];
     const cult = lesson.culture || [];
-    const item = (x) => `
+    const item = (x) => {
+      const sid = (x.sentenceIds || [])[0];
+      const s = sid !== undefined && sentences[sid] ? sentences[sid] : null;
+      return `
       <div class="hs-card">
         <div class="hs-orig">${esc(x.phrase || x.term || x.topic)}</div>
         <div class="hs-structure">${esc(x.meaning || x.explanation || x.note || "")}</div>
         ${x.usage ? `<div class="hs-breakdown">${esc(x.usage)}</div>` : ""}
-        ${(x.sentenceIds || []).length ? `<div class="hs-jump"><a class="jump" data-sid="${x.sentenceIds[0]}" href="#">→ 原句</a></div>` : ""}
+        ${s ? `<div class="hs-jump hs-time">⏱ ${fmtTime(s.start)} → ${fmtTime(s.end)}
+                <a class="jump jump-btn" data-sid="${sid}" href="#">▶ 播放原句</a>
+                <span class="hs-snip">${esc(s.text.slice(0, 60))}</span></div>` : ""}
       </div>`;
+    };
     panel.innerHTML = calToolbarHtml() + `
       <div class="section-title">💬 口语表达</div>
       ${expr.length ? expr.map((x) => item(x)).join("") : `<div class="panel-empty">暂无</div>`}
@@ -896,11 +919,12 @@ function drawCoursePage() {
       const s = sentences[h.sentenceId] || {};
       return `
       <div class="hs-card">
-        <div class="hs-orig">${esc(s.text || "")}</div>
+        ${s.start !== undefined ? `<div class="hs-time">⏱ ${fmtTime(s.start)} → ${fmtTime(s.end)}</div>` : ""}
+        <div class="hs-orig">${markVocab(s.text || "", "en", vocabIndex)}</div>
         ${s.translation ? `<div class="s-trans">${esc(s.translation)}</div>` : ""}
         <div class="hs-structure">结构: ${esc(h.structure || "")}</div>
         <div class="hs-breakdown">${esc(h.breakdown || "")}</div>
-        <div class="hs-jump"><a class="jump" data-sid="${h.sentenceId}" href="#">→ 播放原句</a></div>
+        <div class="hs-jump"><a class="jump jump-btn" data-sid="${h.sentenceId}" href="#">▶ 播放原句</a></div>
       </div>`;
     }).join("");
     panel.querySelectorAll(".jump").forEach((a) => {
