@@ -839,9 +839,20 @@ def delete_course(cid: str):
     cdir = course_dir(cid)
     if not cdir.exists():
         raise HTTPException(404, "课程不存在")
+    meta = read_json(cdir / "meta.json", {}) or {}
     shutil.rmtree(cdir, ignore_errors=True)
-    for f in MEDIA_DIR.glob(f"{cid}.*"):
-        f.unlink(missing_ok=True)
+    # unlink the material's course reference (materials are NOT deleted)
+    mid = meta.get("material_id", "")
+    if mid:
+        mat_path = material_dir(mid) / "material.json"
+        mat = read_json(mat_path)
+        if mat is not None:
+            mat["course_id"] = ""
+            write_json(mat_path, mat)
+    # legacy courses (no material): the media file in MEDIA_DIR belongs to no one now — remove it
+    if not mid:
+        for f in MEDIA_DIR.glob(f"{cid}.*"):
+            f.unlink(missing_ok=True)
     return {"ok": True}
 
 

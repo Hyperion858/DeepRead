@@ -353,7 +353,7 @@ async function refreshCourses() {
     grid.querySelectorAll("[data-del]").forEach((btn) => {
       btn.onclick = async (e) => {
         e.stopPropagation();
-        if (!confirm("确定删除这门课程？媒体文件也会一并删除。")) return;
+        if (!confirm("确定删除这门课程？\n只删除课程的学习内容（转写/精讲/进度），原始素材仍保留在素材库。")) return;
         await api(`/api/courses/${btn.dataset.del}`, { method: "DELETE" });
         refreshCourses();
       };
