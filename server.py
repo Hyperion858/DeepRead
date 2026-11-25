@@ -186,6 +186,10 @@ def new_course_id() -> str:
 
 def set_stage(cid: str, stage: str, detail: str = "", progress: float | None = None) -> None:
     status = read_json(course_dir(cid) / "status.json", {}) or {}
+    # disk-level kill switch: a cancelled status halts any further stage writes
+    # (covers the restart-wipes-JOBS case where in-memory cancel flags vanish)
+    if status.get("stage") in ("cancelled",) and stage not in ("cancelled",):
+        raise PipelineCancelled()
     status.update({
         "stage": stage,
         "detail": detail,
@@ -971,6 +975,13 @@ def cancel(cid: str):
     if job:
         job.cancelled = True
         log_event("action", "取消课程生成", course_id=cid)
+    else:
+        # no in-memory job (e.g. after a container restart): persist a cancelled
+        # marker so the running pipeline halts at its next stage write
+        status = read_json(course_dir(cid) / "status.json", {}) or {}
+        if status.get("stage") in ("transcribing", "subtitles", "ocr", "channels", "aligning", "generating"):
+            set_stage(cid, "cancelled", "任务已取消")
+            log_event("action", "取消课程生成（磁盘标记）", course_id=cid)
     return {"ok": True}
 
 
