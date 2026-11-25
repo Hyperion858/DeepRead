@@ -980,7 +980,7 @@ function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApp
 function renderSettings() {
   document.title = "模型配置 · DeepRead";
   $app.innerHTML = shell("settings", `
-    <div class="page" style="max-width:760px">
+    <div class="page page-narrow">
       <h1>模型配置</h1>
       <p style="color:var(--ink-2);font-size:13.5px;margin-top:-8px">
         添加多个中转 API（OpenAI 兼容），随时切换。转写 / Chat / OCR 可使用不同的 API。Key 保存在服务器本地。
@@ -1312,7 +1312,7 @@ function renderSettings() {
 function renderBackup() {
   document.title = "备份与恢复 · DeepRead";
   $app.innerHTML = shell("backup", `
-    <div class="page" style="max-width:760px">
+    <div class="page page-narrow">
       <h1>备份与恢复</h1>
 
       <div class="cfg-card">

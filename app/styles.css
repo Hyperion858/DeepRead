@@ -63,6 +63,10 @@ body {
   margin: 0 auto;
   padding: clamp(20px, 3.5vh, 40px) clamp(16px, 3vw, 44px) clamp(40px, 6vh, 72px);
 }
+/* form-centric pages keep readable line lengths but occupy the same frame width */
+.page-narrow { max-width: min(1280px, 94%) !important; }
+.page-narrow > * { max-width: 860px; margin-left: auto; margin-right: auto; }
+.page-narrow .page-head { max-width: 860px; }
 .page h1 { font-size: clamp(20px, 1.1vw + 14px, 27px); margin: 0 0 clamp(14px, 2.5vh, 24px); letter-spacing: -.4px; }
 .page > p { color: var(--ink-2); }
 
