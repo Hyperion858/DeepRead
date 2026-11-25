@@ -57,6 +57,7 @@ const NAV = [
   { hash: "#/courses",  key: "courses",  icon: "📚", label: "课程库" },
   { hash: "#/settings", key: "settings", icon: "🧠", label: "模型配置" },
   { hash: "#/backup",   key: "backup",   icon: "💾", label: "备份与恢复" },
+  { hash: "#/logs",     key: "logs",     icon: "📋", label: "日志" },
 ];
 
 function shell(activeKey, contentHtml) {
@@ -88,6 +89,7 @@ function route() {
   if (hash.startsWith("#/courses")) return renderCourses();
   if (hash.startsWith("#/settings")) return renderSettings();
   if (hash.startsWith("#/backup")) return renderBackup();
+  if (hash.startsWith("#/logs")) return renderLogs();
   return renderHome();
 }
 
@@ -205,21 +207,14 @@ async function refreshMaterials() {
       }).join("") + `</table></div>`;
 
     wrap.querySelectorAll("[data-genc]").forEach((btn) => {
-      btn.onclick = async () => {
-        try {
-          const res = await api(`/api/materials/${btn.dataset.genc}/generate`, { method: "POST" });
-          toast("课程生成已开始");
-          location.hash = `#/course/${res.id}`;
-        } catch (err) { toast(err.message); }
-      };
+      btn.onclick = () => openChannelDialog({ mid: btn.dataset.genc, kind: "material" });
     });
     wrap.querySelectorAll("[data-regen]").forEach((btn) => {
-      btn.onclick = async () => {
+      btn.onclick = () => {
         if (!confirm("重新生成会覆盖这门课程的转写和精讲，继续？")) return;
-        try {
-          await api(`/api/courses/${btn.dataset.regen}/generate`, { method: "POST" });
-          toast("重新生成已开始");
-        } catch (err) { toast(err.message); }
+        api(`/api/courses/${btn.dataset.regen}/generate`, { method: "POST" })
+          .then(() => toast("重新生成已开始"))
+          .catch((err) => toast(err.message));
       };
     });
     wrap.querySelectorAll("[data-del]").forEach((btn) => {
@@ -851,6 +846,52 @@ function drawCoursePage() {
     });
     wireCalToolbar();
   }
+}
+
+/* ---------------- channel selection dialog ---------------- */
+function openChannelDialog({ mid, kind, lastChannels }) {
+  document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
+  const CH = [
+    { key: "embedded", name: "📺 内嵌字幕", desc: "提取视频内封装的字幕轨（最准，有则强烈推荐）" },
+    { key: "ocr", name: "🖼 OCR 硬字幕", desc: "识别烧在画面上的字幕（抖音等平台），耗时较长" },
+    { key: "asr", name: "🎙 语音转写", desc: "音频转文字（无字幕视频/纯音频必选；与字幕多选可交叉校验提升准确度）" },
+  ];
+  const checked = new Set(lastChannels || ["embedded", "ocr", "asr"]);
+  const overlay = document.createElement("div");
+  overlay.className = "cal-overlay";
+  overlay.innerHTML = `
+    <div class="cal-panel" style="width:min(520px,100%)">
+      <div class="cal-head"><b>选择生成通道</b><button class="cal-close">✕</button></div>
+      <div class="cal-hint" style="margin:8px 0 12px">至少选一项，可多选 — 多选时各通道结果会融合比对，准确度更高。</div>
+      ${CH.map((c) => `
+        <label class="ch-row">
+          <input type="checkbox" data-ch="${c.key}" ${checked.has(c.key) ? "checked" : ""}>
+          <div class="ch-text"><b>${c.name}</b><small>${c.desc}</small></div>
+        </label>`).join("")}
+      <div class="form-actions" style="margin-top:14px">
+        <button class="primary ch-go" style="flex:1">开始生成课程</button>
+        <button class="cal-close" style="flex-shrink:0">取消</button>
+      </div>
+    </div>`;
+  overlay.querySelector(".ch-go").onclick = async () => {
+    const channels = [...overlay.querySelectorAll("[data-ch]:checked")].map((el) => el.dataset.ch);
+    if (!channels.length) { toast("至少选择一个通道"); return; }
+    try {
+      let res;
+      if (kind === "material") {
+        res = await api(`/api/materials/${mid}/generate`, {
+          method: "POST", body: JSON.stringify({ channels }),
+        });
+        toast("课程生成已开始");
+        location.hash = `#/course/${res.id}`;
+      }
+      overlay.remove();
+    } catch (err) { toast(err.message); }
+  };
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay || e.target.closest(".cal-close")) overlay.remove();
+  });
+  document.body.appendChild(overlay);
 }
 
 /* ---------------- calibration panel ---------------- */
@@ -1541,6 +1582,84 @@ function renderBackup() {
 
   loadBackupSettings();
   refreshBackups();
+}
+
+/* ================= Logs ================= */
+function renderLogs() {
+  document.title = "日志 · DeepRead";
+  $app.innerHTML = shell("logs", `
+    <div class="page">
+      <h1>日志</h1>
+
+      <div class="cfg-card">
+        <div class="cfg-card-head"><span class="cfg-card-title">📋 查询</span>
+          <a href="/api/logs/runtime/download" download style="font-size:12.5px">下载运行日志</a>
+        </div>
+        <div class="log-filter-row">
+          <div class="log-tabs">
+            <button data-cat="all" class="active">全部</button>
+            <button data-cat="pipeline">课程生成</button>
+            <button data-cat="action">用户操作</button>
+            <button data-cat="runtime">运行日志</button>
+          </div>
+          <input id="log-kw" type="text" placeholder="关键字搜索（消息/详情/课程ID）" style="flex:1;min-width:180px">
+          <select id="log-level" style="width:110px;flex-shrink:0">
+            <option value="">全部级别</option>
+            <option value="info">info</option>
+            <option value="warn">warn</option>
+            <option value="error">error</option>
+          </select>
+          <button id="log-refresh" style="flex-shrink:0">查询</button>
+        </div>
+        <div id="log-list" class="log-list"><div class="spinner"></div></div>
+        <div class="cal-hint" style="margin-top:8px">自动刷新：生成过程中每 5 秒更新；手动点「查询」立即刷新</div>
+      </div>
+    </div>`);
+
+  let curCat = "all";
+  let autoTimer = null;
+
+  async function refresh() {
+    const kw = document.getElementById("log-kw").value.trim();
+    const level = document.getElementById("log-level").value;
+    const listEl = document.getElementById("log-list");
+    try {
+      const items = await api(`/api/logs?category=${curCat}&keyword=${encodeURIComponent(kw)}&level=${level}&limit=300`);
+      if (!items.length) {
+        listEl.innerHTML = `<div class="panel-empty">暂无日志</div>`;
+        return;
+      }
+      const levelTag = (lv) => lv === "error" ? `<span class="log-lv err">ERROR</span>`
+        : lv === "warn" ? `<span class="log-lv warn">WARN</span>`
+        : "";
+      const catTag = (c) => ({ runtime: "运行", pipeline: "生成", action: "操作" }[c] || c);
+      listEl.innerHTML = items.map((e) => `
+        <div class="log-row ${e.level === "error" ? "log-err" : e.level === "warn" ? "log-warn" : ""}">
+          <span class="log-ts">${esc((e.ts || "").replace("T", " ").slice(0, 19))}</span>
+          <span class="log-cat">${catTag(e.category)}</span>
+          ${levelTag(e.level)}
+          <span class="log-msg">${esc(e.message)}${e.course_id ? ` <a href="#/course/${esc(e.course_id)}" style="color:var(--accent);font-size:12px">课程</a>` : ""}</span>
+          ${e.detail ? `<div class="log-detail">${esc(e.detail)}</div>` : ""}
+        </div>`).join("");
+    } catch (err) {
+      listEl.innerHTML = `<div class="panel-empty">加载失败: ${esc(err.message)}</div>`;
+    }
+  }
+
+  document.querySelectorAll(".log-tabs button").forEach((btn) => {
+    btn.onclick = () => {
+      document.querySelectorAll(".log-tabs button").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      curCat = btn.dataset.cat;
+      refresh();
+    };
+  });
+  document.getElementById("log-refresh").onclick = refresh;
+  document.getElementById("log-kw").onkeydown = (e) => { if (e.key === "Enter") refresh(); };
+  document.getElementById("log-level").onchange = refresh;
+
+  refresh();
+  state.pollTimer = setInterval(refresh, 5000);
 }
 
 /* ---------------- helpers ---------------- */

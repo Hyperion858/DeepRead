@@ -255,6 +255,40 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .sent:hover .s-cal { opacity: 1; }
 .sent .s-cal:hover { color: var(--accent); border-color: var(--accent); }
 
+/* logs page */
+.log-filter-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.log-tabs { display: flex; gap: 2px; background: var(--bg); border-radius: 8px; padding: 3px; }
+.log-tabs button { border: none; background: none; padding: 6px 14px; border-radius: 6px; font-size: 13px; color: var(--ink-2); }
+.log-tabs button.active { background: var(--accent); color: #fff; }
+.log-list { max-height: 60vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; }
+.log-row { display: flex; gap: 10px; align-items: baseline; padding: 7px 12px; border-bottom: 1px solid var(--line); font-size: 13px; flex-wrap: wrap; }
+.log-row:last-child { border-bottom: none; }
+.log-row.log-err { background: #fef2f2; }
+.log-row.log-warn { background: #fffbeb; }
+.log-ts { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.log-cat { font-size: 10.5px; background: var(--accent-soft); color: var(--accent-ink); border-radius: 4px; padding: 1px 7px; white-space: nowrap; }
+.log-lv { font-size: 10px; font-weight: 700; border-radius: 4px; padding: 1px 6px; }
+.log-lv.err { background: #fee2e2; color: #991b1b; }
+.log-lv.warn { background: #fef3c7; color: #92400e; }
+.log-msg { flex: 1; min-width: 200px; }
+.log-detail { flex-basis: 100%; font-size: 12px; color: var(--ink-2); font-family: ui-monospace, monospace; word-break: break-all; padding-left: 12px; }
+@media (prefers-color-scheme: dark) {
+  .log-row.log-err { background: #2a1518; }
+  .log-row.log-warn { background: #2a2210; }
+}
+
+/* channel dialog */
+.ch-row {
+  display: flex; gap: 12px; align-items: flex-start; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px;
+  cursor: pointer; transition: border-color .15s, background .15s;
+}
+.ch-row:hover { border-color: var(--accent); }
+.ch-row:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.ch-row input { width: auto; margin-top: 3px; }
+.ch-text b { font-size: 14px; display: block; }
+.ch-text small { color: var(--ink-3); font-size: 12px; line-height: 1.5; }
+
 /* ---------------- course study page ---------------- */
 .course-page { display: flex; height: 100vh; height: 100dvh; flex-direction: column; }
 .cp-top {

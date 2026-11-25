@@ -26,9 +26,15 @@ from pipeline.lesson import generate_lesson
 from pipeline.transcribe import transcribe, PipelineCancelled
 from pipeline.align import align
 from pipeline import backup as backup_mod
+from pipeline import logs as logs_mod
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
+
+
+def log_event(category: str, message: str, **kw) -> None:
+    logs_mod.log_event(category, message, data_dir=DATA_DIR, **kw)
+
 MEDIA_DIR = DATA_DIR / "media"          # legacy: direct uploads (still readable)
 MATERIALS_DIR = DATA_DIR / "materials"  # material-centric storage: materials/<mid>/...
 COURSES_DIR = DATA_DIR / "courses"
@@ -189,11 +195,17 @@ def set_stage(cid: str, stage: str, detail: str = "", progress: float | None = N
     write_json(course_dir(cid) / "status.json", status)
 
 
-def run_pipeline(cid: str, timeout_sec: int = 7200) -> None:
+def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = None) -> None:
     """Background pipeline with a hard watchdog: if it hasn't finished in
-    timeout_sec, mark the course errored so a hung API call can't stall forever."""
+    timeout_sec, mark the course errored so a hung API call can't stall forever.
+
+    channels: subset of {"embedded", "ocr", "asr"} — which text channels to run.
+    All requested channels run, then results are fused (best text wins per
+    sentence, cross-checked across channels for accuracy). Default: all three.
+    """
     import time as _time
 
+    channels = channels or {"embedded", "ocr", "asr"}
     job = JOBS.get(cid)
     cdir = course_dir(cid)
     meta = read_json(cdir / "meta.json", {}) or {}
@@ -218,43 +230,61 @@ def run_pipeline(cid: str, timeout_sec: int = 7200) -> None:
         try:
             cfg = load_config()
 
-            # 1. subtitle channels first (embedded track -> OCR burned-in).
-            # Both are preferable to ASR: real authored text + true timestamps.
-            set_stage(cid, "subtitles", "提取内嵌字幕轨…", 0.05)
-            sub_lines = extract_subtitle_channel(media_path, cdir)
+            # weight per channel: embedded (human-authored) > ocr (frame-sampled)
+            # > asr (audio-derived). Fusion prefers higher-weight text.
+            channel_weight = {"embedded": 3, "OCR": 2, "asr": 1}
 
-            if not sub_lines and meta.get("kind") == "video":
+            embedded_lines: list[dict[str, Any]] = []
+            ocr_lines: list[dict[str, Any]] = []
+            asr_segments: list[dict[str, Any]] = []
+
+            n_steps = len(channels) + 1
+            step = 0
+
+            def _bump(msg: str, base: float) -> None:
+                set_stage(cid, f"channels", msg, base)
+
+            # 1. embedded subtitle track
+            if "embedded" in channels:
+                step += 1
+                set_stage(cid, "subtitles", "提取内嵌字幕轨…", 0.05)
+                embedded_lines = extract_subtitle_channel(media_path, cdir)
+                if not embedded_lines:
+                    set_stage(cid, "subtitles", "无内嵌字幕轨", 0.08)
+
+            # 2. OCR burned-in subtitles (video only)
+            if "ocr" in channels and meta.get("kind") == "video":
+                step += 1
                 set_stage(cid, "ocr", "OCR 识别画面硬字幕…", 0.08)
                 try:
                     ocr_lines = extract_ocr_subtitles(
                         media_path, cdir, cfg,
-                        progress_cb=lambda p, msg: set_stage(cid, "ocr", msg, 0.08 + 0.6 * p),
+                        progress_cb=lambda p, msg: set_stage(cid, "ocr", msg, 0.08 + 0.62 * p),
                         should_cancel=lambda: bool(job and job.cancelled),
                     )
                 except Exception as ocr_exc:  # noqa: BLE001 — OCR is best-effort
-                    set_stage(cid, "ocr", f"OCR 失败: {ocr_exc}", 0.6)
+                    set_stage(cid, "ocr", f"OCR 失败: {ocr_exc}", 0.7)
                     ocr_lines = []
-                sub_lines = ocr_lines
 
-            # 2. ASR only when there is no subtitle text at all (audio-only courses
-            #    and videos without captions). With captions present we skip ASR
-            #    entirely: cue timing is already accurate.
-            transcript: list[dict[str, Any]] = []
-            if not sub_lines:
-                set_stage(cid, "transcribing", "调用转写 API 中…", 0.1)
-                transcript = transcribe(
+            # 3. ASR
+            if "asr" in channels:
+                step += 1
+                set_stage(cid, "transcribing", "调用转写 API 中…", 0.15)
+                asr_segments = transcribe(
                     media_path,
                     cfg=cfg,
                     workdir=cdir,
-                    progress_cb=lambda p, msg: set_stage(cid, "transcribing", msg, 0.1 + 0.75 * p),
+                    progress_cb=lambda p, msg: set_stage(cid, "transcribing", msg, 0.15 + 0.7 * p),
                     should_cancel=lambda: bool(job and job.cancelled),
                 )
-                set_stage(cid, "aligning", "对齐融合…", 0.9)
-                segments = align(transcript, [])
-            else:
-                set_stage(cid, "aligning", "整理字幕时间线…", 0.9)
-                # merge cues into readable sentence units (they may be fragmentary)
-                segments = align([], sub_lines)
+
+            # 4. fusion
+            caption_lines = embedded_lines + ocr_lines
+            caption_lines.sort(key=lambda x: x["start"])
+            log_event("runtime", f"通道结果：内嵌字幕 {len(embedded_lines)} 条 / OCR {len(ocr_lines)} 条 / ASR {len(asr_segments)} 段",
+                      course_id=cid)
+            set_stage(cid, "aligning", f"融合 {len(caption_lines)} 条字幕 + {len(asr_segments)} 段转写…", 0.9)
+            segments = align(asr_segments, caption_lines)
 
             write_json(cdir / "source.json", {"segments": segments})
 
@@ -270,11 +300,16 @@ def run_pipeline(cid: str, timeout_sec: int = 7200) -> None:
             meta["duration"] = sum((s.get("end", 0) - s.get("start", 0)) for s in segments) or meta.get("duration")
             write_json(cdir / "meta.json", meta)
             set_stage(cid, "ready", "课程生成完成", 1.0)
+            log_event("pipeline", f"课程生成完成", course_id=cid,
+                      detail=f"通道: {sorted(channels)}, 句子数: {len(segments)}")
         except PipelineCancelled:
             prog = (read_json(cdir / "status.json", {}) or {}).get("progress", 0)
             set_stage(cid, "cancelled", "任务已取消", prog)
+            log_event("pipeline", "课程生成被取消", course_id=cid, level="warn")
         except Exception as exc:  # noqa: BLE001 — surface any pipeline failure to the UI
             set_stage(cid, "error", f"{type(exc).__name__}: {exc}")
+            log_event("pipeline", f"课程生成失败: {type(exc).__name__}", course_id=cid,
+                      detail=str(exc), level="error")
     finally:
         _result["done"] = True
         JOBS.pop(cid, None)
@@ -323,6 +358,8 @@ async def put_config(request: Request):
         if k in body:
             cfg[k] = body[k]
     save_config(cfg)
+    changed = [k for k in body if k in DEFAULT_CONFIG]
+    log_event("action", "修改模型/系统配置", detail="字段: " + ", ".join(changed[:10]))
     return {"ok": True}
 
 
@@ -460,6 +497,7 @@ def create_backup_now():
     path = backup_mod.create_backup(DATA_DIR, BACKUPS_DIR, note="manual",
                                     include_media=bool(load_config().get("backup_include_media", True)))
     run_retention()
+    log_event("action", "手动创建备份", detail=path.name)
     return {"ok": True, "file": path.name}
 
 
@@ -497,6 +535,8 @@ async def restore_backup(request: Request):
         tmp_path = Path(tmp.name)
     try:
         result = backup_mod.restore_backup(DATA_DIR, tmp_path)
+        log_event("action", "从备份恢复数据",
+                  detail=f"{result.get('courses', 0)} 门课程, {result.get('materials', 0)} 个素材")
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     finally:
@@ -606,6 +646,7 @@ async def material_upload(file: UploadFile = File(...)):
         "source_url": "",
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
+    log_event("action", f"上传素材「{title}」", detail=f"{file.filename} ({kind})")
     return {"id": mid, "title": title, "kind": kind}
 
 
@@ -630,6 +671,7 @@ async def material_import(request: Request):
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     threading.Thread(target=_download_material, args=(mid, url), daemon=True).start()
+    log_event("action", f"链接导入素材", detail=url)
     return {"id": mid, "title": url}
 
 
@@ -656,11 +698,14 @@ def _download_material(mid: str, url: str) -> None:
             "status": "ready",
         })
         write_json(mdir / "material.json", mat)
+        log_event("runtime", f"素材下载完成「{mat.get('title', '')}」",
+                  detail=f"{media_path.name} {result.get('duration', 0):.0f}s")
     except Exception as exc:  # noqa: BLE001
         mat = read_json(mdir / "material.json", {}) or {}
         mat["status"] = "error"
         mat["error"] = str(exc)
         write_json(mdir / "material.json", mat)
+        log_event("runtime", "素材下载失败", detail=f"{url} · {exc}", level="error")
     finally:
         MATERIAL_JOBS.pop(mid, None)
 
@@ -688,12 +733,37 @@ def material_delete(mid: str):
     # also clean legacy media if it lives there
     for f in MEDIA_DIR.glob(f"{mid}.*"):
         f.unlink(missing_ok=True)
+    log_event("action", f"删除素材「{mat.get('title', mid)}」")
     return {"ok": True}
 
 
 @app.post("/api/materials/{mid}/generate")
-def material_generate(mid: str):
-    """Create a course from a material and start the pipeline."""
+def material_generate(mid: str, request: Request = None):
+    """Create a course from a material and start the pipeline.
+
+    Body (optional JSON): {"channels": ["embedded","ocr","asr"]} — at least one.
+    Defaults to all three; the choice is remembered on the material.
+    """
+    body = {}
+    if request is not None:
+        try:
+            import asyncio
+            body = asyncio.get_event_loop().run_until_complete(request.json())
+        except Exception:
+            body = {}
+    channels_in = body.get("channels")
+    valid = {"embedded", "ocr", "asr"}
+    if isinstance(channels_in, list) and channels_in:
+        channels = {c for c in channels_in if c in valid}
+        if not channels:
+            raise HTTPException(400, "channels 无效，至少选择一个：embedded / ocr / asr")
+    else:
+        channels = valid
+    if "ocr" in channels or "embedded" in channels:
+        kind = (read_json(material_dir(mid) / "material.json", {}) or {}).get("kind", "video")
+        if kind != "video" and channels != {"asr"}:
+            channels = {"asr"}  # audio materials have no picture to OCR
+
     mdir = material_dir(mid)
     if not mdir.exists():
         raise HTTPException(404, "素材不存在")
@@ -704,11 +774,11 @@ def material_generate(mid: str):
     if not media:
         raise HTTPException(400, "素材媒体文件缺失")
     if mat.get("course_id") and (COURSES_DIR / mat["course_id"]).exists():
-        raise HTTPException(409, "该素材已生成课程")
+        raise HTTPException(409, "该素材已生成课程，如需重新生成请先删除课程")
     cfg = load_config()
     if not cfg.get("providers"):
         raise HTTPException(400, "请先在模型配置页配置 API")
-    if not get_provider_cfg(cfg, "asr").get("base_url"):
+    if "asr" in channels and not get_provider_cfg(cfg, "asr").get("base_url"):
         raise HTTPException(400, "转写 provider 未配置")
     if not get_provider_cfg(cfg, "chat").get("base_url"):
         raise HTTPException(400, "Chat provider 未配置")
@@ -724,13 +794,16 @@ def material_generate(mid: str):
         "kind": mat.get("kind", "video"),
         "media_path": str(media),   # course points INTO the material storage
         "source_url": mat.get("source_url", ""),
+        "channels": sorted(channels),
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     write_json(cdir / "status.json", {"stage": "uploaded", "detail": "已创建，等待生成", "progress": 0})
     mat["course_id"] = cid
+    mat["last_channels"] = sorted(channels)   # remember for next time
     write_json(mdir / "material.json", mat)
     JOBS[cid] = JobState()
-    threading.Thread(target=run_pipeline, args=(cid,), daemon=True).start()
+    threading.Thread(target=run_pipeline, args=(cid,), kwargs={"channels": channels}, daemon=True).start()
+    log_event("action", f"生成课程（通道: {', '.join(sorted(channels))}）", course_id=cid)
     return {"id": cid, "title": mat.get("title")}
 
 
@@ -743,6 +816,28 @@ def media_material_file(mid: str, request: Request):
     if not media:
         raise HTTPException(404, "媒体文件不存在")
     return _stream_media(media, request)
+
+
+# ---------------------------------------------------------------- API: logs
+
+@app.get("/api/logs")
+def query_logs(category: str = "all", keyword: str = "", level: str = "", limit: int = 300):
+    """Query logs. category: all | runtime | pipeline | action."""
+    cats = {"all": ["runtime", "pipeline", "action"],
+            "runtime": ["runtime"],
+            "pipeline": ["pipeline"],
+            "action": ["action"]}.get(category, ["runtime", "pipeline", "action"])
+    return logs_mod.query_logs(DATA_DIR, cats, keyword=keyword, limit=min(limit, 1000), level=level)
+
+
+@app.get("/api/logs/{category}/download")
+def download_logs(category: str):
+    if category not in ("runtime", "pipeline", "action"):
+        raise HTTPException(400, "无效的日志类别")
+    path = DATA_DIR / "logs" / f"{category}.jsonl"
+    if not path.exists():
+        raise HTTPException(404, "日志文件不存在")
+    return FileResponse(path, media_type="application/octet-stream", filename=f"deepread-{category}.jsonl")
 
 
 # ---------------------------------------------------------------- API: courses
@@ -819,12 +914,12 @@ async def upload(file: UploadFile = File(...)):
 
 
 @app.post("/api/courses/{cid}/generate")
-def generate(cid: str):
+def generate(cid: str, request: Request = None):
     cdir = course_dir(cid)
     if not cdir.exists():
         raise HTTPException(404, "课程不存在")
     status = read_json(cdir / "status.json", {}) or {}
-    if status.get("stage") in {"transcribing", "subtitles", "aligning", "generating"}:
+    if status.get("stage") in {"transcribing", "subtitles", "ocr", "aligning", "generating", "channels"}:
         raise HTTPException(409, "课程正在生成中")
     cfg = load_config()
     if not cfg.get("providers"):
@@ -833,9 +928,18 @@ def generate(cid: str):
         raise HTTPException(400, "转写 provider 未配置")
     if not get_provider_cfg(cfg, "chat").get("base_url"):
         raise HTTPException(400, "Chat provider 未配置")
+    # channel choice: meta.channels from course creation, or material's last choice
+    meta = read_json(cdir / "meta.json", {}) or {}
+    channels = set(meta.get("channels") or [])
+    if not channels and meta.get("material_id"):
+        mat = read_json(material_dir(meta["material_id"]) / "material.json", {}) or {}
+        channels = set(mat.get("last_channels") or [])
+    if not channels:
+        channels = {"embedded", "ocr", "asr"}
     if cid not in JOBS:
         JOBS[cid] = JobState()
-        threading.Thread(target=run_pipeline, args=(cid,), daemon=True).start()
+        threading.Thread(target=run_pipeline, args=(cid,), kwargs={"channels": channels}, daemon=True).start()
+        log_event("action", f"重新生成课程（通道: {', '.join(sorted(channels))}）", course_id=cid)
     return {"ok": True}
 
 
@@ -844,6 +948,7 @@ def cancel(cid: str):
     job = JOBS.get(cid)
     if job:
         job.cancelled = True
+        log_event("action", "取消课程生成", course_id=cid)
     return {"ok": True}
 
 
@@ -886,6 +991,7 @@ def delete_course(cid: str):
     if not mid:
         for f in MEDIA_DIR.glob(f"{cid}.*"):
             f.unlink(missing_ok=True)
+    log_event("action", f"删除课程「{meta.get('title', cid)}」", course_id=cid)
     return {"ok": True}
 
 
