@@ -55,11 +55,17 @@ body {
 .sidebar-foot { font-size: 10.5px; color: #475569; padding: 10px 12px 0; }
 .main { flex: 1; overflow-y: auto; min-width: 0; }
 .page {
-  width: 100%; max-width: 920px; margin: 0 auto;
-  padding: clamp(20px, 3.5vh, 40px) clamp(16px, 3vw, 36px) clamp(40px, 6vh, 72px);
+  width: 100%; max-width: min(1280px, 94%);
+  margin: 0 auto;
+  padding: clamp(20px, 3.5vh, 40px) clamp(16px, 3vw, 44px) clamp(40px, 6vh, 72px);
 }
 .page h1 { font-size: clamp(20px, 1.1vw + 14px, 27px); margin: 0 0 clamp(14px, 2.5vh, 24px); letter-spacing: -.4px; }
 .page > p { color: var(--ink-2); }
+
+/* wide screens: let tables/forms breathe */
+@media (min-width: 1400px) {
+  .page { max-width: min(1360px, 92%); }
+}
 
 /* ---------------- controls ---------------- */
 button {
@@ -149,6 +155,73 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .test-result.ok { display: block; background: #dcfce7; color: #166534; }
 .test-result.fail { display: block; background: #fee2e2; color: #991b1b; }
 .section-title { font-size: 14.5px; font-weight: 600; margin: clamp(16px, 2.5vh, 24px) 0 10px; color: var(--ink-2); }
+
+/* settings cards */
+.cfg-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: clamp(14px, 2vw, 22px); margin-bottom: 16px; box-shadow: var(--shadow);
+}
+.cfg-card-head {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;
+}
+.cfg-card-title { font-size: 15px; font-weight: 600; }
+.prov-card {
+  border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+  margin-bottom: 10px; background: var(--bg);
+}
+.prov-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+@media (max-width: 620px) { .prov-grid { grid-template-columns: 1fr; } }
+
+.role-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 12px; margin-bottom: 16px;
+}
+.role-block {
+  border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--bg);
+}
+.role-name { font-size: 13.5px; font-weight: 600; margin-bottom: 10px; }
+.role-name i {
+  font-style: normal; font-size: 10.5px; color: var(--accent-ink); background: var(--accent-soft);
+  border-radius: 4px; padding: 1px 6px; margin-left: 6px; vertical-align: 1px;
+}
+
+/* auto-switch toggle */
+.auto-switch-box {
+  border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--bg);
+}
+.switch-row { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; margin: 0; }
+.switch-row input { position: absolute; opacity: 0; pointer-events: none; }
+.switch-ui {
+  flex-shrink: 0; width: 40px; height: 22px; border-radius: 999px; background: #c7cdd6;
+  position: relative; transition: background .2s; margin-top: 2px;
+}
+.switch-ui::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+  border-radius: 50%; background: #fff; transition: left .2s; box-shadow: 0 1px 3px rgba(0,0,0,.25);
+}
+.switch-row input:checked + .switch-ui { background: var(--accent); }
+.switch-row input:checked + .switch-ui::after { left: 20px; }
+.switch-text b { font-size: 13.5px; display: block; }
+.switch-text small { color: var(--ink-3); font-size: 12px; line-height: 1.5; display: block; margin-top: 2px; }
+
+/* model priority list */
+.prio-list { display: flex; flex-direction: column; gap: 6px; }
+.prio-item {
+  display: flex; align-items: center; gap: 10px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
+  cursor: grab; font-size: 13.5px; transition: box-shadow .15s;
+}
+.prio-item:hover { box-shadow: var(--shadow); }
+.prio-item.dragging { opacity: .5; }
+.prio-idx {
+  width: 20px; height: 20px; border-radius: 50%; background: var(--accent-soft);
+  color: var(--accent-ink); font-size: 11px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.prio-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; font-size: 12.5px; }
+.prio-up, .prio-del { border: none; background: none; color: var(--ink-3); padding: 2px 6px; font-size: 12px; }
+.prio-up:hover { color: var(--accent); }
+.prio-del:hover { color: var(--red); }
 
 /* ---------------- course study page ---------------- */
 .course-page { display: flex; height: 100vh; height: 100dvh; flex-direction: column; }
@@ -266,9 +339,11 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 
 /* tables */
 .bk-table { width: 100%; border-collapse: collapse; font-size: clamp(12.5px, 0.2vw + 12px, 14px); }
-.bk-table th { text-align: left; color: var(--ink-3); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-.bk-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-.bk-table a { color: var(--accent); text-decoration: none; margin-right: 10px; }
+.bk-table th { text-align: left; color: var(--ink-3); font-weight: 500; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.bk-table td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: nowrap; }
+.bk-table td.mat-title-cell { white-space: normal; min-width: 260px; }
+.bk-table a { color: var(--accent); text-decoration: none; margin-right: 10px; white-space: nowrap; }
+.bk-table button { white-space: nowrap; }
 .mat-title { font-weight: 500; margin-right: 6px; word-break: break-all; }
 .mat-rename { border: none; background: none; color: var(--ink-3); padding: 1px 4px; font-size: 12px; }
 .mat-rename:hover { color: var(--accent); }
@@ -412,4 +487,6 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
   input, select, textarea { background: #1d222b; color: var(--ink); }
   .vmark .vpop { background: #0c0e12; }
   .toast { background: #e6eaf0; color: #14171c; }
+  .prov-card, .role-block, .auto-switch-box { background: #171b22; }
+  .switch-ui { background: #3a434f; }
 }

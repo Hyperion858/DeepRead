@@ -142,9 +142,9 @@ async function renderLibrary() {
         <input type="file" id="file-input" hidden accept="video/*,audio/*">
       </div>
       <div class="section-title">或粘贴视频链接（抖音 / B站 / YouTube 等yt-dlp支持的站点）</div>
-      <div style="display:flex;gap:8px">
-        <input id="url-input" type="text" placeholder="https://v.douyin.com/...">
-        <button class="primary" id="url-go">下载素材</button>
+      <div style="display:flex;gap:8px;max-width:640px">
+        <input id="url-input" type="text" placeholder="https://v.douyin.com/..." style="flex:1;min-width:0">
+        <button class="primary" id="url-go" style="white-space:nowrap;flex-shrink:0">下载素材</button>
       </div>
       <div class="cal-hint" style="margin-top:8px">
         素材是原始视频/音频。生成课程时会自动 OCR 识别画面硬字幕并与语音转写交叉校对。
@@ -187,7 +187,7 @@ async function refreshMaterials() {
         const downloading = m.status === "downloading";
         return `
       <tr data-mid="${esc(m.id)}">
-        <td>
+        <td class="mat-title-cell">
           <span class="mat-title">${esc(m.title)}</span>
           <button class="mat-rename" data-rename="${esc(m.id)}" title="重命名">✎</button>
           ${m.course_id ? `<a class="badge ready" style="text-decoration:none" href="#/course/${esc(m.course_id)}">已有课程 →</a>` : ""}
@@ -980,39 +980,66 @@ function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApp
 function renderSettings() {
   document.title = "模型配置 · DeepRead";
   $app.innerHTML = shell("settings", `
-    <div class="page" style="max-width:680px">
+    <div class="page" style="max-width:760px">
       <h1>模型配置</h1>
-      <p style="color:var(--ink-2);font-size:13.5px">
-        添加多个中转 API（OpenAI 兼容），随时切换。转写和 Chat 可使用不同的 API。Key 保存在服务器本地。
+      <p style="color:var(--ink-2);font-size:13.5px;margin-top:-8px">
+        添加多个中转 API（OpenAI 兼容），随时切换。转写 / Chat / OCR 可使用不同的 API。Key 保存在服务器本地。
       </p>
 
-      <div class="section-title">API 提供商</div>
-      <div id="prov-list"></div>
-      <button id="prov-add">+ 添加 API</button>
-
-      <div class="section-title">角色分配</div>
-      <div class="form-row"><label>转写 API（需要 /v1/audio/transcriptions 或 omni 音频模型）</label>
-        <select id="role-asr"></select></div>
-      <div class="form-row"><label>转写模型</label>
-        <div style="display:flex;gap:8px">
-          <select id="cfg-asr" style="flex:1"></select>
-          <button id="cfg-refresh-asr" type="button">↻ 获取模型</button>
+      <div class="cfg-card">
+        <div class="cfg-card-head">
+          <span class="cfg-card-title">🔌 API 提供商</span>
+          <button id="prov-add" class="primary" style="padding:6px 14px">+ 添加</button>
         </div>
-        <input id="cfg-asr-custom" type="text" placeholder="或手动输入模型名" style="margin-top:6px"></div>
-      <div class="form-row"><label>Chat API（翻译 + 精讲生成）</label>
-        <select id="role-chat"></select></div>
-      <div class="form-row"><label>Chat 模型</label>
-        <div style="display:flex;gap:8px">
-          <select id="cfg-chat" style="flex:1"></select>
-          <button id="cfg-refresh-chat" type="button">↻ 获取模型</button>
-        </div></div>
-      <div class="form-row"><label>OCR API（识别画面硬字幕，需支持图片输入；留空则用 Chat API）</label>
-        <select id="role-vision"></select></div>
-      <div class="form-row"><label>OCR 视觉模型</label>
-        <input id="cfg-vision" type="text" placeholder="如 qwen3.5-ocr / qwen-vl-plus（留空用 Chat 模型）"></div>
+        <div id="prov-list"></div>
+      </div>
+
+      <div class="cfg-card">
+        <div class="cfg-card-head"><span class="cfg-card-title">🎯 角色分配</span></div>
+
+        <div class="role-grid">
+          <div class="role-block">
+            <div class="role-name">📝 翻译与精讲 <i>Chat</i></div>
+            <div class="form-row"><select id="role-chat"></select></div>
+            <div class="form-row" style="display:flex;gap:8px">
+              <select id="cfg-chat" style="flex:1;min-width:0"></select>
+              <button id="cfg-refresh-chat" style="flex-shrink:0" title="获取模型列表">↻</button>
+            </div>
+          </div>
+          <div class="role-block">
+            <div class="role-name">🎙 语音转写 <i>ASR</i></div>
+            <div class="form-row"><select id="role-asr"></select></div>
+            <div class="form-row" style="display:flex;gap:8px">
+              <select id="cfg-asr" style="flex:1;min-width:0"></select>
+              <button id="cfg-refresh-asr" style="flex-shrink:0" title="获取模型列表">↻</button>
+            </div>
+            <input id="cfg-asr-custom" type="text" placeholder="手动输入模型名（覆盖上面的选择）">
+          </div>
+          <div class="role-block">
+            <div class="role-name">🖼 画面字幕 OCR <i>Vision</i></div>
+            <div class="form-row"><select id="role-vision"></select></div>
+            <div class="form-row" style="display:flex;gap:8px">
+              <input id="cfg-vision" type="text" placeholder="如 qwen3.5-ocr（留空用 Chat 模型）" style="flex:1;min-width:0">
+              <button id="cfg-refresh-vision" style="flex-shrink:0" title="获取模型列表">↻</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="auto-switch-box">
+          <label class="switch-row">
+            <input type="checkbox" id="cfg-autoswitch">
+            <span class="switch-ui"></span>
+            <div class="switch-text">
+              <b>自动切换可用模型</b>
+              <small>模型报错（免费额度用尽、下线等）时，自动按下面列表的顺序尝试下一个。关闭则只用选定模型。</small>
+            </div>
+          </label>
+          <div id="model-priority" style="display:none;margin-top:12px"></div>
+        </div>
+      </div>
 
       <div class="form-actions">
-        <button class="primary" id="cfg-save">保存</button>
+        <button class="primary" id="cfg-save" style="padding:9px 26px">保存配置</button>
         <button id="cfg-test">测试连接</button>
       </div>
       <div class="test-result" id="test-result"></div>
@@ -1020,7 +1047,8 @@ function renderSettings() {
 
   let providers = [];
   let cfgCache = null;
-  let modelCache = {};
+  let modelCache = {};          // provider_id -> {models, asr_models}
+  let priorityModels = [];      // failover priority list (working copy)
 
   async function init() {
     cfgCache = await api("/api/config");
@@ -1036,6 +1064,78 @@ function renderSettings() {
       document.getElementById("cfg-asr-custom").value = "";
     }
     if (cfgCache.chat_model) fillChatSelect([cfgCache.chat_model], cfgCache.chat_model);
+    // auto-switch state + priority list
+    priorityModels = (cfgCache.chat_models || []).slice();
+    if (cfgCache.chat_model && !priorityModels.includes(cfgCache.chat_model)) {
+      priorityModels.unshift(cfgCache.chat_model);
+    }
+    const asw = document.getElementById("cfg-autoswitch");
+    asw.checked = !!cfgCache.auto_model_switch;
+    drawPriority();
+    asw.onchange = drawPriority;
+  }
+
+  function drawPriority() {
+    const wrap = document.getElementById("model-priority");
+    const on = document.getElementById("cfg-autoswitch").checked;
+    wrap.style.display = on ? "block" : "none";
+    if (!on) return;
+    wrap.innerHTML = `
+      <div class="cal-hint" style="margin:0 0 8px">模型优先级（从上到下依次尝试）。▲ 上移，✕ 移除：</div>
+      <div class="prio-list" id="prio-list"></div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <select id="prio-add-sel" style="flex:1;min-width:0"></select>
+        <button id="prio-add-btn" style="flex-shrink:0">+ 加入列表</button>
+      </div>`;
+    const list = document.getElementById("prio-list");
+    const sel = document.getElementById("prio-add-sel");
+    const pid = document.getElementById("role-chat").value;
+    const known = [...(modelCache[pid]?.models || [])];
+    const cur = document.getElementById("cfg-chat").value;
+    if (cur && !known.includes(cur)) known.unshift(cur);
+    for (const m of priorityModels) {
+      if (!known.includes(m)) known.push(m);
+    }
+    sel.innerHTML = known.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("") ||
+      `<option value="">（先点 ↻ 获取模型）</option>`;
+    list.innerHTML = priorityModels.map((m, i) => `
+      <div class="prio-item" draggable="true" data-i="${i}">
+        <span class="prio-idx">${i + 1}</span>
+        <span class="prio-name">${esc(m)}</span>
+        <button class="prio-up" data-up="${i}" title="上移">▲</button>
+        <button class="prio-del" data-del="${i}" title="移除">✕</button>
+      </div>`).join("") || `<div class="panel-empty" style="padding:12px">列表为空：从下面选择加入</div>`;
+
+    list.querySelectorAll("[data-del]").forEach((b) => {
+      b.onclick = () => { priorityModels.splice(+b.dataset.del, 1); drawPriority(); };
+    });
+    list.querySelectorAll("[data-up]").forEach((b) => {
+      b.onclick = () => {
+        const i = +b.dataset.up;
+        if (i > 0) {
+          [priorityModels[i - 1], priorityModels[i]] = [priorityModels[i], priorityModels[i - 1]];
+          drawPriority();
+        }
+      };
+    });
+    let dragIdx = null;
+    list.querySelectorAll(".prio-item").forEach((el) => {
+      el.ondragstart = () => { dragIdx = +el.dataset.i; el.classList.add("dragging"); };
+      el.ondragend = () => { el.classList.remove("dragging"); };
+      el.ondragover = (e) => {
+        e.preventDefault();
+        const i = +el.dataset.i;
+        if (dragIdx === null || dragIdx === i) return;
+        const [m] = priorityModels.splice(dragIdx, 1);
+        priorityModels.splice(i, 0, m);
+        dragIdx = i;
+        drawPriority();
+      };
+    });
+    document.getElementById("prio-add-btn").onclick = () => {
+      const v = sel.value;
+      if (v && !priorityModels.includes(v)) { priorityModels.push(v); drawPriority(); }
+    };
   }
 
   function drawProviders() {
@@ -1044,7 +1144,7 @@ function renderSettings() {
       wrap.innerHTML = `<div class="panel-empty" style="padding:16px">还没有 API，点击下方添加</div>`;
     } else {
       wrap.innerHTML = providers.map((p, i) => `
-        <div class="hs-card" data-pi="${i}">
+        <div class="prov-card" data-pi="${i}">
           <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
             <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 beichenapi）" style="flex:1">
             <button class="danger p-del" title="删除">✕</button>
@@ -1166,6 +1266,8 @@ function renderSettings() {
           asr_model: asrVal === "__custom__" ? "" : asrVal,
           chat_model: document.getElementById("cfg-chat").value,
           vision_model: document.getElementById("cfg-vision").value.trim(),
+          auto_model_switch: document.getElementById("cfg-autoswitch").checked,
+          chat_models: priorityModels,
         }),
       });
       cfgCache = await api("/api/config");

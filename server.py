@@ -52,6 +52,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "chat_model": "",
     "vision_provider": "",
     "vision_model": "",
+    "auto_model_switch": False,   # walk model priority list when a model is dead/over quota
+    "chat_models": [],            # chat model priority order (used when auto_model_switch)
+    "vision_models": [],          # OCR model priority order
     "segment_minutes": 5,
     # backup settings
     "backup_enabled": True,
@@ -306,6 +309,7 @@ async def put_config(request: Request):
         if cfg.get("chat_provider") not in live_ids:
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
     for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model", "segment_minutes",
+              "auto_model_switch", "chat_models", "vision_models",
               "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):
         if k in body:
             cfg[k] = body[k]

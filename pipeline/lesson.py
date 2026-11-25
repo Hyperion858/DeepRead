@@ -33,13 +33,108 @@ def _chat_provider(cfg: dict[str, Any]) -> tuple[str, str, str]:
             cfg.get("chat_model") or "gpt-4o-mini")
 
 
+# ---- model failover -------------------------------------------------------
+
+# error signatures that mean "this model is dead/over quota" -> try next model
+_MODEL_DEAD_MARKERS = (
+    "quota", "insufficient", "exceeded", "额度", "余额", "欠费", "免费额度",
+    "model_not_found", "not found", "不存在", "not available",
+    "no permission", "无权限", "deprecated", "decommissioned", "下线",
+    "429", "403", "402", "404",
+)
+
+
+def _is_model_dead(err_text: str) -> bool:
+    low = (err_text or "").lower()
+    return any(m in low for m in _MODEL_DEAD_MARKERS)
+
+
+def chat_with_failover(
+    cfg: dict[str, Any],
+    messages: list[dict[str, Any]],
+    max_tokens: int = 8000,
+    temperature: float = 0.3,
+    model_list_key: str = "chat_models",   # or "vision_models"
+    provider_key: str = "chat_provider",
+    model_key: str = "chat_model",
+) -> tuple[str, str]:
+    """Call chat completions trying each configured model in priority order.
+
+    Returns (content, model_used). Raises when every model fails.
+    """
+    import httpx as _httpx
+
+    providers = cfg.get("providers") or []
+    pid = cfg.get(provider_key)
+    prov = next((p for p in providers if p.get("id") == pid), None)
+    if prov is None and providers:
+        prov = providers[0]
+    if not prov:
+        raise RuntimeError("chat provider 未配置")
+
+    # model priority list: configured list first, then the single model, then other models
+    models: list[str] = []
+    for m in (cfg.get(model_list_key) or []):
+        if m and m not in models:
+            models.append(m)
+    primary = cfg.get(model_key)
+    if primary and primary not in models:
+        models.append(primary)
+    if not models:
+        models = ["gpt-4o-mini"]
+
+    base = prov.get("base_url", "").rstrip("/")
+    key = prov.get("api_key", "")
+    errors: list[str] = []
+    with _httpx.Client() as client:
+        for model in models:
+            try:
+                r = client.post(
+                    f"{base}/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={
+                        "model": model,
+                        "messages": messages,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                    timeout=600,
+                )
+                if r.status_code == 200:
+                    return r.json()["choices"][0]["message"]["content"], model
+                err = f"chat API {model} -> {r.status_code}: {r.text[:200]}"
+                errors.append(err)
+                if not _is_model_dead(r.text):
+                    # auth/network errors won't be fixed by another model; bail fast
+                    if r.status_code in (401, 403) and "quota" not in r.text.lower():
+                        raise RuntimeError(err)
+                    if r.status_code >= 500:
+                        continue  # relay hiccup — next model may work
+                    continue
+                # model dead -> next candidate
+            except RuntimeError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{model}: {exc}")
+    raise RuntimeError("所有模型均失败: " + " | ".join(errors[-3:]))
+
+
 def _chat(
     client: httpx.Client,
     cfg: dict[str, Any],
     messages: list[dict[str, str]],
     max_tokens: int = 8000,
     temperature: float = 0.3,
+    model_list_key: str = "chat_models",
 ) -> str:
+    """Single chat call. With auto_model_switch on, walks the model priority
+    list on dead-model errors (quota exhausted etc.); otherwise one shot."""
+    if cfg.get("auto_model_switch"):
+        content, _ = chat_with_failover(
+            cfg, messages, max_tokens=max_tokens, temperature=temperature,
+            model_list_key=model_list_key,
+        )
+        return content
     base_url, api_key, model = _chat_provider(cfg)
     r = client.post(
         f"{base_url}/chat/completions",
