@@ -250,14 +250,18 @@ def transcribe(
     if progress_cb:
         progress_cb(0.05, f"音频 {duration:.0f}s，分段中…")
 
-    parts = split_audio(wav, audio_dir / "parts", max(seg_minutes * 60, 60))
+    # chat-mode omni models have no native timestamps: smaller segments mean
+    # tighter time accuracy (each segment's lines are spread across its window).
+    # API mode (whisper-style) returns real timestamps, so long segments are fine.
+    seg_secs = max(seg_minutes * 60, 60) if mode == "api" else 60
+    parts = split_audio(wav, audio_dir / "parts", seg_secs)
 
     all_segments: list[dict[str, Any]] = []
     with httpx.Client() as client:
         for i, part in enumerate(parts):
             if should_cancel and should_cancel():
                 raise PipelineCancelled()
-            offset = i * seg_minutes * 60
+            offset = i * seg_secs
             if progress_cb:
                 progress_cb(i / len(parts), f"转写分段 {i + 1}/{len(parts)}…")
             all_segments.extend(

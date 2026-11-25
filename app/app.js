@@ -473,7 +473,8 @@ function drawCoursePage() {
         <div class="cp-controls">
           <button id="ctl-prev" title="上一句">⏮</button>
           <button id="ctl-ab" title="A-B 循环">A-B</button>
-          <button id="ctl-follow" class="on" title="字幕跟随">跟随</button>
+          <button id="ctl-follow" title="字幕跟随开关">不跟随</button>
+          <button id="ctl-goto" title="跳到当前播放的句子">⤓ 当前句</button>
           <div class="speed-group">
             ${["0.75", "1", "1.25", "1.5"].map((v) =>
               `<button data-speed="${v}" class="${v === "1" ? "on" : ""}">${v}x</button>`).join("")}
@@ -516,6 +517,7 @@ function drawCoursePage() {
 
   // ---- playback sync ----
   let activeId = -1;
+  let follow = false; // off by default: don't yank the scroll position while reading
   player.addEventListener("timeupdate", () => {
     handleAbLoop(player);
     const t = player.currentTime;
@@ -523,7 +525,7 @@ function drawCoursePage() {
     if (idx !== null && idx !== activeId) {
       activeId = idx;
       highlightSentence(idx);
-      if (document.getElementById("ctl-follow").classList.contains("on")) {
+      if (follow && state.tab === "read") {
         const el = document.querySelector(`.sent[data-idx="${idx}"]`);
         if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
       }
@@ -540,7 +542,29 @@ function drawCoursePage() {
     player.play();
   };
 
-  document.getElementById("ctl-follow").onclick = (e) => e.target.classList.toggle("on");
+  const followBtn = document.getElementById("ctl-follow");
+  followBtn.onclick = () => {
+    follow = !follow;
+    followBtn.textContent = follow ? "跟随中" : "不跟随";
+    followBtn.classList.toggle("on", follow);
+    if (follow && activeId >= 0) {
+      const el = document.querySelector(`.sent[data-idx="${activeId}"]`);
+      if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  };
+
+  document.getElementById("ctl-goto").onclick = () => {
+    if (activeId >= 0) {
+      const el = document.querySelector(`.sent[data-idx="${activeId}"]`);
+      if (el) {
+        el.scrollIntoView({ block: "center", behavior: "smooth" });
+        el.classList.add("flash");
+        setTimeout(() => el.classList.remove("flash"), 1200);
+      }
+    } else {
+      toast("请先播放视频");
+    }
+  };
 
   const abBtn = document.getElementById("ctl-ab");
   abBtn.onclick = () => {

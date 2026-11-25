@@ -129,6 +129,11 @@ input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent)
 .sent { padding: 10px 12px; border-radius: 10px; margin-bottom: 6px; cursor: pointer; position: relative; }
 .sent:hover { background: var(--panel); }
 .sent.active { background: var(--panel); box-shadow: var(--shadow); border-left: 3px solid var(--accent); }
+.sent.flash { animation: sentflash 1.2s ease; }
+@keyframes sentflash {
+  0%, 100% { background: transparent; }
+  25%, 60% { background: var(--accent-soft); }
+}
 .sent .s-time { font-size: 11px; color: var(--ink-3); font-family: ui-monospace, monospace; }
 .sent .s-text { font-size: 16px; margin-top: 2px; }
 .sent.zh .s-text { color: var(--ink-2); font-size: 15px; }
