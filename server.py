@@ -797,14 +797,17 @@ def material_generate(mid: str, request: Request = None):
     # lock: one generating course per material — course exists OR a stale
     # course_id points at a course currently in a working stage
     if mat.get("course_id"):
-        cstatus = read_json(COURSES_DIR / mat["course_id"] / "status.json", {}) or {}
-        if (COURSES_DIR / mat["course_id"]).exists():
+        exists = (COURSES_DIR / mat["course_id"]).exists()
+        if exists:
+            cstatus = read_json(COURSES_DIR / mat["course_id"] / "status.json", {}) or {}
             if cstatus.get("stage") in ("uploaded", "downloading", "transcribing", "subtitles", "ocr", "channels", "aligning", "generating"):
                 raise HTTPException(409, "该素材已有课程正在生成中，请等待完成或先删除课程")
-        # stale link to a deleted course — clean it
-        if not (COURSES_DIR / mat["course_id"]).exists():
-            mat["course_id"] = ""
-    if any(j.stage_lock == mid for j in JOBS.values() if hasattr(j, "stage_lock")):
+            # a finished course exists — relinking a finished course to the
+            # material happens below; a NEW generate over it is not allowed
+            # unless the user deleted that course first (kept as guard)
+        else:
+            mat["course_id"] = ""  # stale link to a deleted course — clean it
+    if any(getattr(j, "stage_lock", "") == mid for j in JOBS.values()):
         raise HTTPException(409, "该素材已有课程正在生成中")
     cfg = load_config()
     if not cfg.get("providers"):
@@ -1021,12 +1024,14 @@ def delete_course(cid: str):
         raise HTTPException(404, "课程不存在")
     meta = read_json(cdir / "meta.json", {}) or {}
     shutil.rmtree(cdir, ignore_errors=True)
-    # unlink the material's course reference (materials are NOT deleted)
+    # unlink the material's course reference — ONLY if the material still
+    # points at THIS course (deleting an old duplicate must not clear the
+    # link to the material's current course)
     mid = meta.get("material_id", "")
     if mid:
         mat_path = material_dir(mid) / "material.json"
         mat = read_json(mat_path)
-        if mat is not None:
+        if mat is not None and mat.get("course_id") == cid:
             mat["course_id"] = ""
             write_json(mat_path, mat)
     # legacy courses (no material): the media file in MEDIA_DIR belongs to no one now — remove it
