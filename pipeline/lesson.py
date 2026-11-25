@@ -119,6 +119,185 @@ def chat_with_failover(
     raise RuntimeError("所有模型均失败: " + " | ".join(errors[-3:]))
 
 
+def _resolve_provider(cfg: dict[str, Any], provider_key: str) -> dict[str, Any]:
+    providers = cfg.get("providers") or []
+    pid = cfg.get(provider_key)
+    prov = next((p for p in providers if p.get("id") == pid), None)
+    if prov is None and providers:
+        prov = providers[0]
+    return prov or {}
+
+
+def ordered_models(cfg: dict[str, Any], provider_key: str, model_key: str, list_key: str) -> list[str]:
+    """Model candidates in priority order: configured list, then primary, then default."""
+    models: list[str] = []
+    for m in (cfg.get(list_key) or []):
+        if m and m not in models:
+            models.append(m)
+    primary = cfg.get(model_key)
+    if primary and primary not in models:
+        models.append(primary)
+    defaults = {"chat_model": "gpt-4o-mini", "asr_model": "whisper-1", "vision_model": "qwen3.5-ocr"}
+    if not models:
+        d = defaults.get(model_key)
+        if d:
+            models.append(d)
+    return models
+
+
+def audio_transcribe_with_failover(
+    cfg: dict[str, Any],
+    part_path,
+    prompt: str | None = None,
+    response_format: str = "verbose_json",
+) -> tuple[list[dict[str, Any]], str]:
+    """Transcribe one audio segment, walking ASR model candidates on dead-model errors.
+
+    Tries chat-mode (input_audio) and transcriptions endpoint per model
+    depending on the model name. Returns (segments, model_used).
+    """
+    import base64 as _base64
+    import httpx as _httpx
+
+    prov = _resolve_provider(cfg, "asr_provider")
+    base = prov.get("base_url", "").rstrip("/")
+    key = prov.get("api_key", "")
+    if not base:
+        raise RuntimeError("转写 provider 未配置")
+
+    from pipeline.transcribe import detect_lang, probe_duration
+    import re as _re
+
+    data = part_path.read_bytes()
+    fmt = "mp3" if part_path.suffix.lower() == ".mp3" else "wav"
+    b64 = _base64.b64encode(data).decode()
+    offset = 0.0  # caller passes offset via part metadata; kept 0 and caller re-offsets
+
+    errors: list[str] = []
+    for model in ordered_models(cfg, "asr_provider", "asr_model", "asr_models"):
+        low = model.lower()
+        try:
+            if any(k in low for k in ("omni", "qwen-audio", "gemini", "gpt-4o-audio")):
+                # chat-mode transcription
+                r = _httpx.post(
+                    f"{base}/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": [
+                            {"type": "text", "text": prompt or (
+                                "逐字转写这段音频。要求：按说话顺序输出，每句话单独一行；"
+                                "保留原始语言（中文说中文，英文说英文）；不要添加任何解释、总结或标注。"
+                            )},
+                            {"type": "input_audio", "input_audio": {"data": f"data:audio/{fmt};base64,{b64}", "format": fmt}},
+                        ]}],
+                        "max_tokens": 8000,
+                        "temperature": 0,
+                    },
+                    timeout=httpx.Timeout(connect=15, read=300, write=120, pool=15),
+                )
+                if r.status_code != 200:
+                    errors.append(f"{model}: {r.status_code} {r.text[:120]}")
+                    if not _is_model_dead(r.text):
+                        raise RuntimeError(errors[-1])
+                    continue
+                content = r.json()["choices"][0]["message"]["content"].strip()
+                if not content:
+                    return [], model
+                lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+                lines = [_re.sub(r"^[-*\d.、)\s]+", "", ln) or ln for ln in lines]
+                part_dur = probe_duration(part_path)
+                dur_per = part_dur / max(len(lines), 1)
+                segs = []
+                t = 0.0
+                for ln in lines:
+                    segs.append({"start": t, "end": t + dur_per, "text": ln,
+                                 "lang": detect_lang(ln), "source": "asr"})
+                    t += dur_per
+                return segs, model
+            else:
+                # whisper-style endpoint
+                with part_path.open("rb") as fh:
+                    r = _httpx.post(
+                        f"{base}/audio/transcriptions",
+                        headers={"Authorization": f"Bearer {key}"},
+                        files={"file": (part_path.name, fh, "audio/wav")},
+                        data={"model": model, "response_format": response_format},
+                        timeout=httpx.Timeout(connect=15, read=300, write=120, pool=15),
+                    )
+                if r.status_code != 200:
+                    errors.append(f"{model}: {r.status_code} {r.text[:120]}")
+                    if not _is_model_dead(r.text):
+                        raise RuntimeError(errors[-1])
+                    continue
+                try:
+                    payload = r.json()
+                except ValueError:
+                    payload = None
+                segs = []
+                if isinstance(payload, dict) and isinstance(payload.get("segments"), list):
+                    for seg in payload["segments"]:
+                        text = (seg.get("text") or "").strip()
+                        if text:
+                            segs.append({"start": float(seg.get("start", 0)), "end": float(seg.get("end", 0)),
+                                         "text": text, "lang": detect_lang(text), "source": "asr"})
+                else:
+                    text = (r.text or "").strip()
+                    if text:
+                        part_dur = probe_duration(part_path)
+                        segs = [{"start": 0.0, "end": part_dur, "text": text,
+                                 "lang": detect_lang(text), "source": "asr"}]
+                return segs, model
+        except RuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{model}: {exc}")
+    raise RuntimeError("所有转写模型均失败: " + " | ".join(errors[-3:]))
+
+
+def ocr_with_failover(
+    cfg: dict[str, Any],
+    img_path,
+) -> str:
+    """OCR one image, walking vision model candidates on dead-model errors."""
+    import base64 as _base64
+    import httpx as _httpx
+
+    prov = _resolve_provider(cfg, "vision_provider") or _resolve_provider(cfg, "chat_provider")
+    base = prov.get("base_url", "").rstrip("/")
+    key = prov.get("api_key", "")
+    if not base:
+        raise RuntimeError("OCR provider 未配置")
+    b64 = _base64.b64encode(img_path.read_bytes()).decode()
+    errors: list[str] = []
+    for model in ordered_models(cfg, "vision_provider", "vision_model", "vision_models"):
+        try:
+            r = _httpx.post(
+                f"{base}/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "text", "text": "识别图中字幕文字。只输出字幕原文，没有字幕则输出空字符串，不要解释、不要标点修正。"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    ]}],
+                    "max_tokens": 200,
+                    "temperature": 0,
+                },
+                timeout=httpx.Timeout(connect=15, read=90, write=30, pool=15),
+            )
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"].strip()
+            errors.append(f"{model}: {r.status_code} {r.text[:120]}")
+            if not _is_model_dead(r.text):
+                raise RuntimeError(errors[-1])
+        except RuntimeError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{model}: {exc}")
+    raise RuntimeError("所有 OCR 模型均失败: " + " | ".join(errors[-3:]))
+
+
 def _chat(
     client: httpx.Client,
     cfg: dict[str, Any],
@@ -196,20 +375,28 @@ def translate_segments(
     cfg: dict[str, Any],
     progress_cb: Callable[[float, str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    workers: int = 3,
 ) -> list[str]:
-    """Return one translation per segment. zh sentences -> en; en -> zh."""
-    translations: list[dict[int, str]] = {}
+    """Return one translation per segment. zh sentences -> en; en -> zh.
+
+    Chunks run concurrently (3 workers) — translation batches are independent
+    and the relay handles parallel requests fine.
+    """
+    translations: dict[int, str] = {}
     chunks = _chunk(segments)
-    with httpx.Client() as client:
-        for ci, chunk in enumerate(chunks):
-            if should_cancel and should_cancel():
-                raise PipelineCancelled()
-            lines = [f"[{i}] {s['text']}" for i, s in enumerate(chunk)]
-            prompt = (
-                "你是专业字幕翻译。下面是视频逐句文本（中英混合）。逐句翻译成另一种语言："
-                "英文句子翻译成简体中文，中文句子翻译成英文。保留编号，输出 JSON 数组，"
-                '形如 [{"i": 编号, "t": "译文"}]，不要输出其他内容。\n\n' + "\n".join(lines)
-            )
+    import concurrent.futures as _futures
+
+    def _translate_chunk(ci: int) -> None:
+        if should_cancel and should_cancel():
+            raise PipelineCancelled()
+        chunk = chunks[ci]
+        lines = [f"[{i}] {s['text']}" for i, s in enumerate(chunk)]
+        prompt = (
+            "你是专业字幕翻译。下面是视频逐句文本（中英混合）。逐句翻译成另一种语言："
+            "英文句子翻译成简体中文，中文句子翻译成英文。保留编号，输出 JSON 数组，"
+            '形如 [{"i": 编号, "t": "译文"}]，不要输出其他内容。\n\n' + "\n".join(lines)
+        )
+        with httpx.Client() as client:
             for attempt in range(3):
                 try:
                     reply = _chat(client, cfg, [{"role": "user", "content": prompt}], temperature=0.2)
@@ -220,27 +407,43 @@ def translate_segments(
                         if isinstance(item, dict) and "i" in item:
                             translations[ci * 40 + int(item["i"])] = str(item.get("t", "")).strip()
                         elif isinstance(item, str):
-                            # "[12] translation text" or "12. translation"
                             m = re.match(r"^\[?(\d+)\]?\s*[.、:：]?\s*(.*)$", item.strip())
                             if m:
                                 translations[ci * 40 + int(m.group(1))] = m.group(2).strip()
                         elif isinstance(item, dict):
-                            # tolerant key variants like {"id":1,"translation":"..."}
                             idx = item.get("id", item.get("index", item.get("n")))
                             if idx is not None:
                                 translations[ci * 40 + int(idx)] = str(
                                     item.get("t", item.get("translation", item.get("text", "")))
                                 ).strip()
                     break
+                except PipelineCancelled:
+                    raise
                 except (ValueError, KeyError, RuntimeError, httpx.HTTPError) as exc:
                     if attempt == 2:
-                        # degrade gracefully: leave untranslated rather than fail the whole course
                         for i in range(len(chunk)):
                             translations.setdefault(ci * 40 + i, "")
                     else:
                         time.sleep(2 * (attempt + 1))
+
+    done = 0
+    errors: list[Exception] = []
+    with _futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = {pool.submit(_translate_chunk, ci): ci for ci in range(len(chunks))}
+        for fut in _futures.as_completed(futures):
+            ci = futures[fut]
+            try:
+                fut.result()
+            except PipelineCancelled:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+            done += 1
             if progress_cb:
-                progress_cb((ci + 1) / len(chunks), f"翻译 {ci + 1}/{len(chunks)} 批…")
+                progress_cb(done / len(chunks), f"翻译 {done}/{len(chunks)} 批…")
+    if len(errors) >= len(chunks):
+        raise RuntimeError(f"翻译全部批次失败: {errors[-1]}")
     return [translations.get(i, "") for i in range(len(segments))]
 
 
@@ -265,7 +468,8 @@ def generate_lesson(
         raise PipelineCancelled()
     if progress_cb:
         progress_cb(0.0, "逐句翻译中…")
-    translations = translate_segments(segments, cfg, progress_cb, should_cancel)
+    translations = translate_segments(segments, cfg, progress_cb, should_cancel,
+                                      workers=max(1, int(cfg.get("translate_workers") or 3)))
 
     # build numbered transcript with translations for the lesson layer
     lines = []

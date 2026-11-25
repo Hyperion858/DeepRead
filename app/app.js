@@ -56,7 +56,7 @@ const NAV = [
   { hash: "#/library",  key: "library",  icon: "📥", label: "素材库" },
   { hash: "#/courses",  key: "courses",  icon: "📚", label: "课程库" },
   { hash: "#/settings", key: "settings", icon: "🧠", label: "模型配置" },
-  { hash: "#/backup",   key: "backup",   icon: "💾", label: "备份与恢复" },
+  { hash: "#/backup",   key: "backup",   icon: "💾", label: "备份恢复" },
   { hash: "#/logs",     key: "logs",     icon: "📋", label: "日志" },
 ];
 
@@ -415,15 +415,18 @@ function saveProgress() {
 
 function calibratedSentences() {
   const lesson = state.course?.lesson;
-  const cal = state.course?.calibration || { global_offset: 0, overrides: {} };
+  const cal = state.course?.calibration || { global_offset: 0, overrides: {}, text_edits: {} };
   const off = parseFloat(cal.global_offset) || 0;
   const ovr = cal.overrides || {};
+  const edits = cal.text_edits || {};
   return (lesson?.sentences || []).map((s) => {
     const o = ovr[String(s.id)];
     return {
       ...s,
+      text: edits[String(s.id)] ?? s.text,          // manual text correction
       start: o ? o.start : s.start + off,
       end: o ? o.end : s.end + off,
+      edited: edits[String(s.id)] !== undefined,
     };
   });
 }
@@ -432,7 +435,11 @@ async function saveCalibration() {
   const cal = state.course.calibration;
   await api(`/api/courses/${state.course.meta.id}/calibration`, {
     method: "POST",
-    body: JSON.stringify({ global_offset: cal.global_offset, overrides: cal.overrides }),
+    body: JSON.stringify({
+      global_offset: cal.global_offset,
+      overrides: cal.overrides,
+      text_edits: cal.text_edits || {},
+    }),
   });
 }
 
@@ -712,6 +719,7 @@ function drawCoursePage() {
     panel.innerHTML = calToolbarHtml() + sentences.map((s) => {
       const read = state.progress.read.includes(s.id);
       const flags = [];
+      if (s.edited) flags.push(`<span class="s-flags flag-embedded" title="已手动修正">✎ 已修正</span>`);
       if (s.uncertain) flags.push(`<span class="s-flags flag-uncertain" title="字幕轨与转写不一致，建议对照原声确认">⚠ 不确定</span>`);
       if (s.source === "embedded" && !s.uncertain) flags.push(`<span class="s-flags flag-embedded" title="取自内嵌字幕轨">内嵌字幕</span>`);
       if (s.source === "OCR" && !s.uncertain) flags.push(`<span class="s-flags flag-embedded" title="取自画面 OCR 字幕">OCR 字幕</span>`);
@@ -721,7 +729,17 @@ function drawCoursePage() {
         <div class="s-text">${markVocab(s.text, s.lang, vocabIndex)}</div>
         ${s.translation ? `<div class="s-trans">${esc(s.translation)}</div>` : ""}
         ${s.grammar ? `<div class="s-grammar">语法: ${esc(s.grammar)}</div>` : ""}
-        <button class="s-cal" data-cal="${s.id}" title="把这句对齐到当前播放位置">⏱ 校准此句</button>
+        <div class="s-tools">
+          <button class="s-cal" data-cal="${s.id}" title="把这句对齐到当前播放位置">⏱ 校准此句</button>
+          <button class="s-edit" data-edit="${s.id}" title="手动修正这句的文字">✎ 修正文字</button>
+        </div>
+        <div class="s-editbox" id="editbox-${s.id}" style="display:none">
+          <textarea rows="2" placeholder="修正这句话的文本（合并拆错的句子、改错别字）">${esc(s.text)}</textarea>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <button class="primary edit-save" data-save="${s.id}">保存</button>
+            <button class="edit-cancel" data-canceledit="${s.id}">取消</button>
+          </div>
+        </div>
       </div>`;
     }).join("");
 
@@ -754,6 +772,38 @@ function drawCoursePage() {
         sentences.splice(0, sentences.length, ...list);
         panels[state.tab]();
         toast(`第 ${sid + 1} 句已对齐到 ${fmtTime(t)} ✓`);
+      };
+    });
+    // per-sentence manual text correction
+    panel.querySelectorAll(".s-edit").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const box = document.getElementById(`editbox-${btn.dataset.edit}`);
+        if (box) box.style.display = box.style.display === "none" ? "block" : "none";
+      };
+    });
+    panel.querySelectorAll(".edit-cancel").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        document.getElementById(`editbox-${btn.dataset.canceledit}`).style.display = "none";
+      };
+    });
+    panel.querySelectorAll(".edit-save").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const sid = +btn.dataset.save;
+        const box = document.getElementById(`editbox-${sid}`);
+        const ta = box.querySelector("textarea");
+        const cal = state.course.calibration;
+        if (!cal.text_edits) cal.text_edits = {};
+        const val = ta.value.trim();
+        if (val) cal.text_edits[String(sid)] = val;
+        else delete cal.text_edits[String(sid)];  // empty -> revert
+        saveCalibration().catch((er) => toast("保存失败: " + er.message));
+        const list = calibratedSentences();
+        sentences.splice(0, sentences.length, ...list);
+        panels[state.tab]();
+        toast(val ? `第 ${sid + 1} 句文本已修正 ✓` : `第 ${sid + 1} 句已还原 ✓`);
       };
     });
     wireCalToolbar();
@@ -1173,9 +1223,10 @@ function renderSettings() {
             <div class="role-name">🖼 画面字幕 OCR <i>Vision</i></div>
             <div class="form-row"><select id="role-vision"></select></div>
             <div class="form-row" style="display:flex;gap:8px">
-              <input id="cfg-vision" type="text" placeholder="如 qwen3.5-ocr（留空用 Chat 模型）" style="flex:1;min-width:0">
+              <select id="cfg-vision" style="flex:1;min-width:0"></select>
               <button id="cfg-refresh-vision" style="flex-shrink:0" title="获取模型列表">↻</button>
             </div>
+            <input id="cfg-vision-custom" type="text" placeholder="手动输入模型名（覆盖上面的选择）">
           </div>
         </div>
 
@@ -1192,6 +1243,20 @@ function renderSettings() {
         </div>
       </div>
 
+      <div class="cfg-card">
+        <div class="cfg-card-head"><span class="cfg-card-title">🎛 生成参数</span></div>
+        <div class="tune-grid">
+          <div class="bk-field"><label>转写分段时长（分钟）<small>越短时间越准，请求越多</small></label>
+            <input type="number" id="cfg-seg-min" min="1" max="15"></div>
+          <div class="bk-field"><label>OCR 并发数<small>每帧图片识别并发（3-8）</small></label>
+            <input type="number" id="cfg-ocr-workers" min="1" max="12"></div>
+          <div class="bk-field"><label>转写并发数<small>音频分段转写并发（2-6）</small></label>
+            <input type="number" id="cfg-asr-workers" min="1" max="8"></div>
+          <div class="bk-field"><label>翻译并发数<small>翻译批次并发（1-6）</small></label>
+            <input type="number" id="cfg-tr-workers" min="1" max="8"></div>
+        </div>
+      </div>
+
       <div class="form-actions">
         <button class="primary" id="cfg-save" style="padding:9px 26px">保存配置</button>
         <button id="cfg-test">测试连接</button>
@@ -1202,7 +1267,10 @@ function renderSettings() {
   let providers = [];
   let cfgCache = null;
   let modelCache = {};          // provider_id -> {models, asr_models}
-  let priorityModels = [];      // failover priority list (working copy)
+  let priorityModels = [];      // chat failover priority list
+  let priorityAsrModels = [];   // ASR failover priority list
+  let priorityVisionModels = []; // OCR failover priority list
+  let priorityRole = "chat";    // which role's list is being edited
 
   async function init() {
     cfgCache = await api("/api/config");
@@ -1212,21 +1280,37 @@ function renderSettings() {
     document.getElementById("role-asr").value = cfgCache.asr_provider || "";
     document.getElementById("role-chat").value = cfgCache.chat_provider || "";
     document.getElementById("role-vision").value = cfgCache.vision_provider || "";
-    document.getElementById("cfg-vision").value = cfgCache.vision_model || "";
+    if (cfgCache.vision_model) {
+      fillVisionSelect([cfgCache.vision_model], cfgCache.vision_model);
+      document.getElementById("cfg-vision-custom").value = "";
+    }
     if (cfgCache.asr_model) {
       fillAsrSelect([cfgCache.asr_model], cfgCache.asr_model);
       document.getElementById("cfg-asr-custom").value = "";
     }
     if (cfgCache.chat_model) fillChatSelect([cfgCache.chat_model], cfgCache.chat_model);
-    // auto-switch state + priority list
+    // auto-switch state + priority lists (per role)
     priorityModels = (cfgCache.chat_models || []).slice();
     if (cfgCache.chat_model && !priorityModels.includes(cfgCache.chat_model)) {
       priorityModels.unshift(cfgCache.chat_model);
+    }
+    priorityAsrModels = (cfgCache.asr_models || []).slice();
+    if (cfgCache.asr_model && !priorityAsrModels.includes(cfgCache.asr_model)) {
+      priorityAsrModels.unshift(cfgCache.asr_model);
+    }
+    priorityVisionModels = (cfgCache.vision_models || []).slice();
+    if (cfgCache.vision_model && !priorityVisionModels.includes(cfgCache.vision_model)) {
+      priorityVisionModels.unshift(cfgCache.vision_model);
     }
     const asw = document.getElementById("cfg-autoswitch");
     asw.checked = !!cfgCache.auto_model_switch;
     drawPriority();
     asw.onchange = drawPriority;
+    // pipeline tuning
+    document.getElementById("cfg-seg-min").value = cfgCache.segment_minutes || 5;
+    document.getElementById("cfg-ocr-workers").value = cfgCache.ocr_workers || 6;
+    document.getElementById("cfg-asr-workers").value = cfgCache.asr_workers || 4;
+    document.getElementById("cfg-tr-workers").value = cfgCache.translate_workers || 3;
   }
 
   function drawPriority() {
@@ -1234,8 +1318,16 @@ function renderSettings() {
     const on = document.getElementById("cfg-autoswitch").checked;
     wrap.style.display = on ? "block" : "none";
     if (!on) return;
+    const lists = { chat: priorityModels, asr: priorityAsrModels, vision: priorityVisionModels };
+    const roleNames = { chat: "📝 翻译与精讲", asr: "🎙 语音转写", vision: "🖼 OCR" };
+    if (!lists[priorityRole]) priorityRole = "chat";
+    const active = lists[priorityRole];
     wrap.innerHTML = `
-      <div class="cal-hint" style="margin:0 0 8px">模型优先级（从上到下依次尝试）。▲ 上移，✕ 移除：</div>
+      <div class="prio-roles">
+        ${Object.keys(lists).map((r) => `
+          <button class="prio-role-btn ${r === priorityRole ? "on" : ""}" data-role="${r}">${roleNames[r]}</button>`).join("")}
+      </div>
+      <div class="cal-hint" style="margin:8px 0">模型优先级（从上到下依次尝试）。▲ 上移，✕ 移除，可拖拽排序：</div>
       <div class="prio-list" id="prio-list"></div>
       <div style="display:flex;gap:8px;margin-top:8px">
         <select id="prio-add-sel" style="flex:1;min-width:0"></select>
@@ -1243,16 +1335,21 @@ function renderSettings() {
       </div>`;
     const list = document.getElementById("prio-list");
     const sel = document.getElementById("prio-add-sel");
-    const pid = document.getElementById("role-chat").value;
-    const known = [...(modelCache[pid]?.models || [])];
-    const cur = document.getElementById("cfg-chat").value;
-    if (cur && !known.includes(cur)) known.unshift(cur);
-    for (const m of priorityModels) {
+    const pid = document.getElementById(priorityRole === "chat" ? "role-chat" : priorityRole === "asr" ? "role-asr" : "role-vision").value
+      || document.getElementById("role-chat").value;
+    const cached = modelCache[pid] || {};
+    const known = [...(cached.models || []), ...(cached.asr_models || [])]
+      .filter((v, i, a) => a.indexOf(v) === i);
+    const curSel = { chat: () => document.getElementById("cfg-chat").value,
+                     asr: () => document.getElementById("cfg-asr").value,
+                     vision: () => document.getElementById("cfg-vision").value }[priorityRole]();
+    if (curSel && !known.includes(curSel)) known.unshift(curSel);
+    for (const m of active) {
       if (!known.includes(m)) known.push(m);
     }
     sel.innerHTML = known.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("") ||
-      `<option value="">（先点 ↻ 获取模型）</option>`;
-    list.innerHTML = priorityModels.map((m, i) => `
+      `<option value="">（先点对应角色的 ↻ 获取模型）</option>`;
+    list.innerHTML = active.map((m, i) => `
       <div class="prio-item" draggable="true" data-i="${i}">
         <span class="prio-idx">${i + 1}</span>
         <span class="prio-name">${esc(m)}</span>
@@ -1260,14 +1357,17 @@ function renderSettings() {
         <button class="prio-del" data-del="${i}" title="移除">✕</button>
       </div>`).join("") || `<div class="panel-empty" style="padding:12px">列表为空：从下面选择加入</div>`;
 
+    wrap.querySelectorAll("[data-role]").forEach((b) => {
+      b.onclick = () => { priorityRole = b.dataset.role; drawPriority(); };
+    });
     list.querySelectorAll("[data-del]").forEach((b) => {
-      b.onclick = () => { priorityModels.splice(+b.dataset.del, 1); drawPriority(); };
+      b.onclick = () => { active.splice(+b.dataset.del, 1); drawPriority(); };
     });
     list.querySelectorAll("[data-up]").forEach((b) => {
       b.onclick = () => {
         const i = +b.dataset.up;
         if (i > 0) {
-          [priorityModels[i - 1], priorityModels[i]] = [priorityModels[i], priorityModels[i - 1]];
+          [active[i - 1], active[i]] = [active[i], active[i - 1]];
           drawPriority();
         }
       };
@@ -1280,15 +1380,15 @@ function renderSettings() {
         e.preventDefault();
         const i = +el.dataset.i;
         if (dragIdx === null || dragIdx === i) return;
-        const [m] = priorityModels.splice(dragIdx, 1);
-        priorityModels.splice(i, 0, m);
+        const [m] = active.splice(dragIdx, 1);
+        active.splice(i, 0, m);
         dragIdx = i;
         drawPriority();
       };
     });
     document.getElementById("prio-add-btn").onclick = () => {
       const v = sel.value;
-      if (v && !priorityModels.includes(v)) { priorityModels.push(v); drawPriority(); }
+      if (v && !active.includes(v)) { active.push(v); drawPriority(); }
     };
   }
 
@@ -1370,6 +1470,19 @@ function renderSettings() {
     sel.value = selected || sel.value || "";
   }
 
+  function fillVisionSelect(models, selected) {
+    const sel = document.getElementById("cfg-vision");
+    const keepCustom = document.getElementById("cfg-vision-custom").value.trim();
+    sel.innerHTML = models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+    if (selected && ![...sel.options].some((o) => o.value === selected)) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(selected)}">${esc(selected)}</option>`);
+    }
+    if (keepCustom && ![...sel.options].some((o) => o.value === keepCustom)) {
+      sel.insertAdjacentHTML("beforeend", `<option value="${esc(keepCustom)}">${esc(keepCustom)}</option>`);
+    }
+    sel.value = selected || keepCustom || sel.value || "";
+  }
+
   async function fetchModels(providerId) {
     if (modelCache[providerId]) return modelCache[providerId];
     const res = await api(`/api/config/models?provider_id=${encodeURIComponent(providerId)}`);
@@ -1403,7 +1516,23 @@ function renderSettings() {
     try {
       const res = await fetchModels(pid);
       fillChatSelect(res.models || [], "");
+      drawPriority();
       toast(`获取到 ${(res.models || []).length} 个模型`);
+    } catch (err) { toast("获取失败: " + err.message); }
+  };
+
+  document.getElementById("cfg-refresh-vision").onclick = async () => {
+    await saveConfigQuiet();
+    const pid = document.getElementById("role-vision").value || document.getElementById("role-chat").value;
+    if (!pid) { toast("请先添加并保存 API"); return; }
+    toast("获取模型列表中…");
+    try {
+      const res = await fetchModels(pid);
+      // vision-capable models: OCR models first, then omni/vl/chat as fallbacks
+      const vis = [...(res.asr_models || []), ...(res.models || [])]
+        .filter((v, i, a) => a.indexOf(v) === i);
+      fillVisionSelect(vis, "");
+      toast(`获取到 ${vis.length} 个模型`);
     } catch (err) { toast("获取失败: " + err.message); }
   };
 
@@ -1411,6 +1540,8 @@ function renderSettings() {
     collectProviders();
     const custom = document.getElementById("cfg-asr-custom").value.trim();
     const asrVal = custom || document.getElementById("cfg-asr").value;
+    const visCustom = document.getElementById("cfg-vision-custom").value.trim();
+    const visVal = visCustom || document.getElementById("cfg-vision").value;
     try {
       await api("/api/config", {
         method: "PUT",
@@ -1421,9 +1552,15 @@ function renderSettings() {
           vision_provider: document.getElementById("role-vision").value,
           asr_model: asrVal === "__custom__" ? "" : asrVal,
           chat_model: document.getElementById("cfg-chat").value,
-          vision_model: document.getElementById("cfg-vision").value.trim(),
+          vision_model: visVal === "__custom__" ? "" : visVal,
           auto_model_switch: document.getElementById("cfg-autoswitch").checked,
           chat_models: priorityModels,
+          asr_models: priorityAsrModels,
+          vision_models: priorityVisionModels,
+          segment_minutes: parseInt(document.getElementById("cfg-seg-min").value, 10) || 5,
+          ocr_workers: parseInt(document.getElementById("cfg-ocr-workers").value, 10) || 6,
+          asr_workers: parseInt(document.getElementById("cfg-asr-workers").value, 10) || 4,
+          translate_workers: parseInt(document.getElementById("cfg-tr-workers").value, 10) || 3,
         }),
       });
       cfgCache = await api("/api/config");
@@ -1464,10 +1601,10 @@ function renderSettings() {
 
 /* ================= Backup ================= */
 function renderBackup() {
-  document.title = "备份与恢复 · DeepRead";
+  document.title = "备份恢复 · DeepRead";
   $app.innerHTML = shell("backup", `
     <div class="page page-narrow">
-      <h1>备份与恢复</h1>
+      <h1>备份恢复</h1>
 
       <div class="cfg-card">
         <div class="cfg-card-head"><span class="cfg-card-title">⏰ 自动备份</span>

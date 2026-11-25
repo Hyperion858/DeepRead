@@ -173,6 +173,7 @@ def extract_ocr_subtitles(
     cfg: dict[str, Any],
     progress_cb: Callable[[float, str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    workers: int = 6,
 ) -> list[dict[str, Any]]:
     """Full OCR subtitle channel. Returns [{start,end,text,lang,source='ocr'}]."""
     prov = _vision_provider(cfg)
@@ -196,6 +197,20 @@ def extract_ocr_subtitles(
     def _ocr_one(i: int) -> tuple[int, str]:
         frame = frames[i]
         t = (i + 0.5) * interval
+        # auto_model_switch: walk the vision model priority list per frame
+        if cfg.get("auto_model_switch"):
+            from pipeline.lesson import ocr_with_failover
+            for attempt in range(3):
+                try:
+                    return (i, ocr_with_failover(cfg, frame))
+                except RuntimeError as exc:
+                    if attempt == 2:
+                        return (i, "")
+                    _time_module.sleep(1.0)
+                except Exception:
+                    if attempt == 2:
+                        return (i, "")
+                    _time_module.sleep(1.0 * (attempt + 1))
         text = ""
         for attempt in range(3):
             try:
@@ -209,7 +224,7 @@ def extract_ocr_subtitles(
         return (i, text)
 
     done_count = 0
-    with _futures.ThreadPoolExecutor(max_workers=6) as pool:
+    with _futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futures = {pool.submit(_ocr_one, i): i for i in range(n_frames)}
         for fut in _futures.as_completed(futures):
             i, text = fut.result()

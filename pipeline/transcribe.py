@@ -230,6 +230,7 @@ def transcribe(
     workdir: Path,
     progress_cb: Callable[[float, str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    workers: int = 4,
 ) -> list[dict[str, Any]]:
     prov = _provider(cfg)
     base_url = prov["base_url"]
@@ -276,11 +277,20 @@ def transcribe(
         if should_cancel and should_cancel():
             raise PipelineCancelled()
         offset = i * seg_secs
+        # auto_model_switch: walk the ASR model priority list per segment
+        if cfg.get("auto_model_switch"):
+            from pipeline.lesson import audio_transcribe_with_failover
+            segs, _used = audio_transcribe_with_failover(cfg, parts[i])
+            # re-offset: failover helper returns segment-local times
+            for s in segs:
+                s["start"] += offset
+                s["end"] += offset
+            return segs
         with httpx.Client(timeout=httpx.Timeout(connect=15, read=300, write=120, pool=15)) as client:
             return _transcribe_segment(client, base_url, api_key, model, parts[i], offset, None, mode)
 
     done = 0
-    with _futures.ThreadPoolExecutor(max_workers=4) as pool:
+    with _futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futures = {pool.submit(_transcribe_one, i): i for i in range(len(parts))}
         for fut in _futures.as_completed(futures):
             i = futures[fut]

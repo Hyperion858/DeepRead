@@ -60,7 +60,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "vision_model": "",
     "auto_model_switch": False,   # walk model priority list when a model is dead/over quota
     "chat_models": [],            # chat model priority order (used when auto_model_switch)
+    "asr_models": [],             # ASR model priority order
     "vision_models": [],          # OCR model priority order
+    # pipeline tuning
+    "ocr_workers": 6,             # concurrent OCR frame recognitions
+    "asr_workers": 4,             # concurrent ASR segment transcriptions
+    "translate_workers": 3,       # concurrent translation batches
     "segment_minutes": 5,
     # backup settings
     "backup_enabled": True,
@@ -266,6 +271,7 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
                         media_path, cdir, cfg,
                         progress_cb=lambda p, msg: set_stage(cid, "ocr", msg, 0.08 + 0.62 * p),
                         should_cancel=lambda: bool(job and job.cancelled),
+                        workers=max(1, int(cfg.get("ocr_workers") or 6)),
                     )
                 except Exception as ocr_exc:  # noqa: BLE001 — OCR is best-effort
                     set_stage(cid, "ocr", f"OCR 失败: {ocr_exc}", 0.7)
@@ -281,6 +287,7 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
                     workdir=cdir,
                     progress_cb=lambda p, msg: set_stage(cid, "transcribing", msg, 0.15 + 0.7 * p),
                     should_cancel=lambda: bool(job and job.cancelled),
+                    workers=max(1, int(cfg.get("asr_workers") or 4)),
                 )
 
             # 4. fusion
@@ -358,7 +365,8 @@ async def put_config(request: Request):
         if cfg.get("chat_provider") not in live_ids:
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
     for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model", "segment_minutes",
-              "auto_model_switch", "chat_models", "vision_models",
+              "auto_model_switch", "chat_models", "asr_models", "vision_models",
+              "ocr_workers", "asr_workers", "translate_workers",
               "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):
         if k in body:
             cfg[k] = body[k]
@@ -1001,6 +1009,7 @@ def get_course(cid: str):
         "calibration": {
             "global_offset": cal.get("global_offset", 0.0),
             "overrides": cal.get("overrides", {}),
+            "text_edits": cal.get("text_edits", {}),
         },
     }
 
@@ -1037,7 +1046,8 @@ def get_calibration(cid: str):
     cal = read_json(course_dir(cid) / "calibration.json", {}) or {}
     return {
         "global_offset": cal.get("global_offset", 0.0),
-        "overrides": cal.get("overrides", {}),  # sentenceId(str) -> {start, end}
+        "overrides": cal.get("overrides", {}),      # sentenceId(str) -> {start, end}
+        "text_edits": cal.get("text_edits", {}),    # sentenceId(str) -> corrected text
     }
 
 
@@ -1049,6 +1059,7 @@ async def post_calibration(cid: str, request: Request):
     cal = {
         "global_offset": float(body.get("global_offset", 0.0)),
         "overrides": body.get("overrides", {}),
+        "text_edits": body.get("text_edits", {}),   # manual sentence text corrections
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     write_json(course_dir(cid) / "calibration.json", cal)
