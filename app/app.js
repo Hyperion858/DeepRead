@@ -180,7 +180,7 @@ async function refreshMaterials() {
       wrap.innerHTML = `<div class="panel-empty">还没有素材，上传文件或粘贴链接添加</div>`;
       return;
     }
-    wrap.innerHTML = `<table class="bk-table">
+    wrap.innerHTML = `<div class="table-scroll"><table class="bk-table">
       <tr><th>标题</th><th>类型</th><th>大小</th><th>来源</th><th>状态</th><th style="width:220px"></th></tr>` +
       list.map((m) => {
         const statusLabel = { ready: "就绪", downloading: "下载中", error: "下载失败" }[m.status || "ready"] || "就绪";
@@ -202,7 +202,7 @@ async function refreshMaterials() {
           <button class="danger" data-del="${esc(m.id)}">删除</button>
         </td>
       </tr>`;
-      }).join("") + `</table>`;
+      }).join("") + `</table></div>`;
 
     wrap.querySelectorAll("[data-genc]").forEach((btn) => {
       btn.onclick = async () => {
@@ -1256,7 +1256,7 @@ function renderBackup() {
         listEl.innerHTML = `<div class="panel-empty" style="padding:14px">暂无备份</div>`;
         return;
       }
-      listEl.innerHTML = `<table class="bk-table"><tr><th>时间</th><th>类型</th><th>大小</th><th></th></tr>` +
+      listEl.innerHTML = `<div class="table-scroll"><table class="bk-table"><tr><th>时间</th><th>类型</th><th>大小</th><th></th></tr>` +
         items.map((b) => `
         <tr>
           <td>${esc((b.created_at || "").replace("T", " ").slice(0, 19))}</td>
@@ -1266,7 +1266,7 @@ function renderBackup() {
             <a href="/api/backups/${esc(b.file)}/download" download>下载</a>
             <button class="danger bk-del" data-f="${esc(b.file)}" style="padding:2px 8px;font-size:12px">删除</button>
           </td>
-        </tr>`).join("") + `</table>`;
+        </tr>`).join("") + `</table></div>`;
       listEl.querySelectorAll(".bk-del").forEach((btn) => {
         btn.onclick = async () => {
           if (!confirm("删除这个备份？")) return;
