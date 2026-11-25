@@ -224,6 +224,9 @@ function renderSettings() {
           <input type="time" id="bk-time" style="width:110px"></label>
         <label style="margin:0;display:flex;gap:6px;align-items:center">保留数量
           <input type="number" id="bk-keep" min="1" max="90" style="width:70px"></label>
+        <label style="display:flex;gap:6px;align-items:center;margin:0">
+          <input type="checkbox" id="bk-media" style="width:auto"> 包含媒体文件（体积大，含视频的备份会有几百 MB）
+        </label>
         <button id="bk-save-settings">保存备份设置</button>
         <button id="bk-now">立即备份</button>
       </div>
@@ -425,7 +428,8 @@ function renderSettings() {
     const cfg = cfgCache || (cfgCache = await api("/api/config"));
     document.getElementById("bk-enabled").checked = !!cfg.backup_enabled;
     document.getElementById("bk-time").value = cfg.backup_time || "04:00";
-    document.getElementById("bk-keep").value = cfg.backup_keep || 14;
+    document.getElementById("bk-keep").value = cfg.backup_keep || 3;
+    document.getElementById("bk-media").checked = cfg.backup_include_media !== false;
   }
 
   async function refreshBackups() {
@@ -440,7 +444,7 @@ function renderSettings() {
         items.map((b) => `
         <tr>
           <td>${esc((b.created_at || "").replace("T", " ").slice(0, 19))}</td>
-          <td>${b.auto ? "自动" : "手动"}${b.note && b.note !== "auto" && b.note !== "manual" ? " · " + esc(b.note) : ""}</td>
+          <td>${b.auto ? "自动" : "手动"}${b.note && b.note !== "auto" && b.note !== "manual" ? " · " + esc(b.note) : ""}${b.has_media ? ' <span class="badge">含媒体</span>' : ""}</td>
           <td>${b.size_mb} MB</td>
           <td>
             <a href="/api/backups/${esc(b.file)}/download" download>下载</a>
@@ -466,7 +470,8 @@ function renderSettings() {
         body: JSON.stringify({
           backup_enabled: document.getElementById("bk-enabled").checked,
           backup_time: document.getElementById("bk-time").value || "04:00",
-          backup_keep: parseInt(document.getElementById("bk-keep").value, 10) || 14,
+          backup_keep: parseInt(document.getElementById("bk-keep").value, 10) || 3,
+          backup_include_media: document.getElementById("bk-media").checked,
         }),
       });
       toast("备份设置已保存");

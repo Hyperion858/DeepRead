@@ -15,8 +15,9 @@ COURSE_FILES = ("meta.json", "source.json", "lesson.json", "progress.json",
 MEDIA_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 
 
-def create_backup(data_dir: Path, backups_dir: Path, note: str = "") -> Path:
-    """Zip config + all course data into backups_dir. Returns archive path."""
+def create_backup(data_dir: Path, backups_dir: Path, note: str = "",
+                  include_media: bool = True) -> Path:
+    """Zip config + course data (+ optionally media files) into backups_dir."""
     backups_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     out = backups_dir / f"deepread-backup-{ts}.zip"
@@ -44,13 +45,17 @@ def create_backup(data_dir: Path, backups_dir: Path, note: str = "") -> Path:
                         "media_file": mp.name if mp else "",
                         "media_size": mp.stat().st_size if mp.exists() else 0,
                         "kind": meta.get("kind", ""),
+                        "in_archive": bool(include_media and mp.exists()),
                     })
+                    if include_media and mp.exists():
+                        zf.write(mp, f"media/{mp.name}")
                 except Exception:
                     pass
         zf.writestr("media_manifest.json", json.dumps(media_manifest, ensure_ascii=False, indent=2))
         info = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "note": note,
+            "include_media": bool(include_media),
             "app": "DeepRead",
             "version": 1,
         }
@@ -72,9 +77,11 @@ def list_backups(backups_dir: Path) -> list[dict[str, Any]]:
                 "note": info.get("note", ""),
                 "size_mb": round(size_mb, 1),
                 "auto": bool(info.get("note") == "auto"),
+                "has_media": bool(info.get("include_media")),
             })
         except Exception:
-            items.append({"file": f.name, "created_at": "", "note": "(损坏的备份)", "size_mb": 0, "auto": False})
+            items.append({"file": f.name, "created_at": "", "note": "(损坏的备份)",
+                          "size_mb": 0, "auto": False, "has_media": False})
     return items
 
 
@@ -108,8 +115,18 @@ def restore_backup(data_dir: Path, archive: Path) -> dict[str, Any]:
                 if arc in names:
                     (cdir / name).write_bytes(zf.read(arc))
             result["courses"] += 1
-            # check media presence
-            meta_path = cdir / "meta.json"
+        # media files (present when the archive was created with media included)
+        media_files = [n for n in names if n.startswith("media/") and len(n) > len("media/")]
+        for mf in media_files:
+            dest = data_dir / "media" / Path(mf).name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_suffix(dest.suffix + ".tmp")
+            tmp.write_bytes(zf.read(mf))
+            tmp.replace(dest)
+            result["media_restored"] = result.get("media_restored", 0) + 1
+        # check media presence for every course
+        for cid in course_dirs:
+            meta_path = data_dir / "courses" / cid / "meta.json"
             if meta_path.exists():
                 try:
                     meta = json.loads(meta_path.read_text(encoding="utf-8"))

@@ -53,7 +53,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # backup settings
     "backup_enabled": True,
     "backup_time": "04:00",   # local time HH:MM
-    "backup_keep": 14,        # max archives to retain
+    "backup_keep": 3,         # max archives to retain
+    "backup_include_media": True,  # include media files in backup archives
 }
 
 
@@ -265,7 +266,8 @@ async def put_config(request: Request):
             cfg["asr_provider"] = incoming[0]["id"] if incoming else ""
         if cfg.get("chat_provider") not in live_ids:
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
-    for k in ("asr_provider", "chat_provider", "asr_model", "chat_model", "segment_minutes"):
+    for k in ("asr_provider", "chat_provider", "asr_model", "chat_model", "segment_minutes",
+              "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):
         if k in body:
             cfg[k] = body[k]
     save_config(cfg)
@@ -362,14 +364,18 @@ BACKUPS_DIR = DATA_DIR / "backups"
 
 def run_auto_backup() -> None:
     try:
-        backup_mod.create_backup(DATA_DIR, BACKUPS_DIR, note="auto")
-        # retention
-        keep = max(1, int(load_config().get("backup_keep") or 14))
-        archives = sorted(BACKUPS_DIR.glob("deepread-backup-*.zip"), reverse=True)
-        for old in archives[keep:]:
-            old.unlink(missing_ok=True)
+        backup_mod.create_backup(DATA_DIR, BACKUPS_DIR, note="auto",
+                                 include_media=bool(load_config().get("backup_include_media", True)))
+        run_retention()
     except Exception:  # noqa: BLE001 — backups must never crash the app
         pass
+
+
+def run_retention() -> None:
+    keep = max(1, int(load_config().get("backup_keep") or 3))
+    archives = sorted(BACKUPS_DIR.glob("deepread-backup-*.zip"), reverse=True)
+    for old in archives[keep:]:
+        old.unlink(missing_ok=True)
 
 
 def _backup_scheduler() -> None:
@@ -399,16 +405,10 @@ def list_backups():
 
 @app.post("/api/backups/create")
 def create_backup_now():
-    path = backup_mod.create_backup(DATA_DIR, BACKUPS_DIR, note="manual")
+    path = backup_mod.create_backup(DATA_DIR, BACKUPS_DIR, note="manual",
+                                    include_media=bool(load_config().get("backup_include_media", True)))
     run_retention()
     return {"ok": True, "file": path.name}
-
-
-def run_retention() -> None:
-    keep = max(1, int(load_config().get("backup_keep") or 14))
-    archives = sorted(BACKUPS_DIR.glob("deepread-backup-*.zip"), reverse=True)
-    for old in archives[keep:]:
-        old.unlink(missing_ok=True)
 
 
 @app.get("/api/backups/{name}/download")
