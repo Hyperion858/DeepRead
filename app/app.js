@@ -1208,84 +1208,90 @@ function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApp
 function renderSettings() {
   document.title = "模型配置 · DeepRead";
   $app.innerHTML = shell("settings", `
-    <div class="page page-narrow">
+    <div class="page settings-split">
       <h1>模型配置</h1>
-      <p style="color:var(--ink-2);font-size:13.5px;margin-top:-8px">
-        添加多个中转 API（OpenAI 兼容），随时切换。转写 / Chat / OCR 可使用不同的 API。Key 保存在服务器本地。
-      </p>
+      <div class="set-layout">
+        <aside class="set-side">
+          <div class="set-side-head">
+            <span>API 提供商</span>
+            <button id="prov-add" class="primary" title="添加 API">+</button>
+          </div>
+          <div id="prov-nav"></div>
+        </aside>
+        <section class="set-main">
+          <div class="set-tabs">
+            <button data-stab="provider" class="active">提供商配置</button>
+            <button data-stab="roles">角色分配</button>
+            <button data-stab="tuning">生成参数</button>
+          </div>
+          <div id="stab-provider" class="stab"></div>
+          <div id="stab-roles" class="stab" style="display:none">
+            <div class="cfg-card">
+              <div class="cfg-card-head"><span class="cfg-card-title">🎯 角色分配</span></div>
+              <div class="role-grid">
+                <div class="role-block">
+                  <div class="role-name">📝 翻译与精讲 <i>Chat</i></div>
+                  <div class="form-row"><select id="role-chat"></select></div>
+                  <div class="form-row" style="display:flex;gap:8px">
+                    <select id="cfg-chat" style="flex:1;min-width:0"></select>
+                    <button id="cfg-refresh-chat" style="flex-shrink:0" title="获取模型列表">↻</button>
+                  </div>
+                </div>
+                <div class="role-block">
+                  <div class="role-name">🎙 语音转写 <i>ASR</i></div>
+                  <div class="form-row"><select id="role-asr"></select></div>
+                  <div class="form-row" style="display:flex;gap:8px">
+                    <select id="cfg-asr" style="flex:1;min-width:0"></select>
+                    <button id="cfg-refresh-asr" style="flex-shrink:0" title="获取模型列表">↻</button>
+                  </div>
+                  <input id="cfg-asr-custom" type="text" placeholder="手动输入模型名（覆盖上面的选择）">
+                </div>
+                <div class="role-block">
+                  <div class="role-name">🖼 画面字幕 OCR <i>Vision</i></div>
+                  <div class="form-row"><select id="role-vision"></select></div>
+                  <div class="form-row" style="display:flex;gap:8px">
+                    <select id="cfg-vision" style="flex:1;min-width:0"></select>
+                    <button id="cfg-refresh-vision" style="flex-shrink:0" title="获取模型列表">↻</button>
+                  </div>
+                  <input id="cfg-vision-custom" type="text" placeholder="手动输入模型名（覆盖上面的选择）">
+                </div>
+              </div>
 
-      <div class="cfg-card">
-        <div class="cfg-card-head">
-          <span class="cfg-card-title">🔌 API 提供商</span>
-          <button id="prov-add" class="primary" style="padding:6px 14px">+ 添加</button>
-        </div>
-        <div id="prov-list"></div>
-      </div>
-
-      <div class="cfg-card">
-        <div class="cfg-card-head"><span class="cfg-card-title">🎯 角色分配</span></div>
-
-        <div class="role-grid">
-          <div class="role-block">
-            <div class="role-name">📝 翻译与精讲 <i>Chat</i></div>
-            <div class="form-row"><select id="role-chat"></select></div>
-            <div class="form-row" style="display:flex;gap:8px">
-              <select id="cfg-chat" style="flex:1;min-width:0"></select>
-              <button id="cfg-refresh-chat" style="flex-shrink:0" title="获取模型列表">↻</button>
+              <div class="auto-switch-box">
+                <label class="switch-row">
+                  <input type="checkbox" id="cfg-autoswitch">
+                  <span class="switch-ui"></span>
+                  <div class="switch-text">
+                    <b>自动切换可用模型</b>
+                    <small>模型报错（免费额度用尽、下线等）时，自动按下面列表的顺序尝试下一个。关闭则只用选定模型。</small>
+                  </div>
+                </label>
+                <div id="model-priority" style="display:none;margin-top:12px"></div>
+              </div>
             </div>
           </div>
-          <div class="role-block">
-            <div class="role-name">🎙 语音转写 <i>ASR</i></div>
-            <div class="form-row"><select id="role-asr"></select></div>
-            <div class="form-row" style="display:flex;gap:8px">
-              <select id="cfg-asr" style="flex:1;min-width:0"></select>
-              <button id="cfg-refresh-asr" style="flex-shrink:0" title="获取模型列表">↻</button>
+          <div id="stab-tuning" class="stab" style="display:none">
+            <div class="cfg-card">
+              <div class="cfg-card-head"><span class="cfg-card-title">🎛 生成参数</span></div>
+              <div class="tune-grid">
+                <div class="bk-field"><label>转写分段时长（分钟）<small>越短时间越准，请求越多</small></label>
+                  <input type="number" id="cfg-seg-min" min="1" max="15"></div>
+                <div class="bk-field"><label>OCR 并发数<small>每帧图片识别并发（3-8）</small></label>
+                  <input type="number" id="cfg-ocr-workers" min="1" max="12"></div>
+                <div class="bk-field"><label>转写并发数<small>音频分段转写并发（2-6）</small></label>
+                  <input type="number" id="cfg-asr-workers" min="1" max="8"></div>
+                <div class="bk-field"><label>翻译并发数<small>翻译批次并发（1-6）</small></label>
+                  <input type="number" id="cfg-tr-workers" min="1" max="8"></div>
+              </div>
             </div>
-            <input id="cfg-asr-custom" type="text" placeholder="手动输入模型名（覆盖上面的选择）">
           </div>
-          <div class="role-block">
-            <div class="role-name">🖼 画面字幕 OCR <i>Vision</i></div>
-            <div class="form-row"><select id="role-vision"></select></div>
-            <div class="form-row" style="display:flex;gap:8px">
-              <select id="cfg-vision" style="flex:1;min-width:0"></select>
-              <button id="cfg-refresh-vision" style="flex-shrink:0" title="获取模型列表">↻</button>
-            </div>
-            <input id="cfg-vision-custom" type="text" placeholder="手动输入模型名（覆盖上面的选择）">
+          <div class="form-actions">
+            <button class="primary" id="cfg-save" style="padding:9px 26px">保存配置</button>
+            <button id="cfg-test">测试连接</button>
           </div>
-        </div>
-
-        <div class="auto-switch-box">
-          <label class="switch-row">
-            <input type="checkbox" id="cfg-autoswitch">
-            <span class="switch-ui"></span>
-            <div class="switch-text">
-              <b>自动切换可用模型</b>
-              <small>模型报错（免费额度用尽、下线等）时，自动按下面列表的顺序尝试下一个。关闭则只用选定模型。</small>
-            </div>
-          </label>
-          <div id="model-priority" style="display:none;margin-top:12px"></div>
-        </div>
+          <div class="test-result" id="test-result"></div>
+        </section>
       </div>
-
-      <div class="cfg-card">
-        <div class="cfg-card-head"><span class="cfg-card-title">🎛 生成参数</span></div>
-        <div class="tune-grid">
-          <div class="bk-field"><label>转写分段时长（分钟）<small>越短时间越准，请求越多</small></label>
-            <input type="number" id="cfg-seg-min" min="1" max="15"></div>
-          <div class="bk-field"><label>OCR 并发数<small>每帧图片识别并发（3-8）</small></label>
-            <input type="number" id="cfg-ocr-workers" min="1" max="12"></div>
-          <div class="bk-field"><label>转写并发数<small>音频分段转写并发（2-6）</small></label>
-            <input type="number" id="cfg-asr-workers" min="1" max="8"></div>
-          <div class="bk-field"><label>翻译并发数<small>翻译批次并发（1-6）</small></label>
-            <input type="number" id="cfg-tr-workers" min="1" max="8"></div>
-        </div>
-      </div>
-
-      <div class="form-actions">
-        <button class="primary" id="cfg-save" style="padding:9px 26px">保存配置</button>
-        <button id="cfg-test">测试连接</button>
-      </div>
-      <div class="test-result" id="test-result"></div>
     </div>`);
 
   let providers = [];
@@ -1416,42 +1422,72 @@ function renderSettings() {
     };
   }
 
+  let selProvider = 0;  // which provider is being edited (index)
+
   function drawProviders() {
-    const wrap = document.getElementById("prov-list");
+    // left nav list
+    const nav = document.getElementById("prov-nav");
+    if (!nav) return;
     if (!providers.length) {
-      wrap.innerHTML = `<div class="panel-empty" style="padding:16px">还没有 API，点击下方添加</div>`;
+      nav.innerHTML = `<div class="panel-empty" style="padding:16px">还没有 API<br>点右上 + 添加</div>`;
     } else {
-      wrap.innerHTML = providers.map((p, i) => `
-        <div class="prov-card" data-pi="${i}">
-          <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
-            <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 beichenapi）" style="flex:1">
-            <button class="danger p-del" title="删除">✕</button>
+      nav.innerHTML = providers.map((p, i) => `
+        <div class="prov-nav-item ${i === selProvider ? "on" : ""}" data-pi="${i}">
+          <div class="pnav-main">
+            <span class="pnav-name">${esc(p.name || `API ${i + 1}`)}</span>
+            <span class="pnav-url">${esc(p.base_url.replace(/^https?:\/\//, "").slice(0, 26))}</span>
           </div>
-          <div class="form-row" style="margin-bottom:8px"><input class="p-url" value="${esc(p.base_url)}" placeholder="Base URL（https://.../v1）"></div>
-          <div class="form-row" style="margin-bottom:0"><input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="API Key（sk-...）"></div>
+          <button class="danger p-del" title="删除">✕</button>
         </div>`).join("");
     }
-    wrap.querySelectorAll(".p-del").forEach((btn) => {
-      btn.onclick = () => {
-        const i = +btn.closest("[data-pi]").dataset.pi;
-        if (!confirm(`删除 API「${providers[i].name}」？`)) return;
-        providers.splice(i, 1);
+    nav.querySelectorAll(".prov-nav-item").forEach((el) => {
+      el.onclick = (e) => {
+        if (e.target.closest(".p-del")) return;
+        collectProviders();
+        selProvider = +el.dataset.pi;
         drawProviders();
       };
     });
+    nav.querySelectorAll(".p-del").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const i = +btn.closest("[data-pi]").dataset.pi;
+        if (!confirm(`删除 API「${providers[i].name}」？`)) return;
+        collectProviders();
+        providers.splice(i, 1);
+        if (selProvider >= providers.length) selProvider = Math.max(0, providers.length - 1);
+        drawProviders();
+      };
+    });
+    // right-side editor for the selected provider
+    const wrap = document.getElementById("stab-provider");
+    if (!providers.length) {
+      wrap.innerHTML = `<div class="panel-empty" style="padding:40px 0">还没有 API<br>点击左侧「+」添加一个中转 API</div>`;
+    } else if (providers[selProvider]) {
+      const p = providers[selProvider];
+      wrap.innerHTML = `
+        <div class="cfg-card">
+          <div class="cfg-card-head"><span class="cfg-card-title">🔌 ${esc(p.name || `API ${selProvider + 1}`)}</span></div>
+          <div class="form-row"><label>名称</label>
+            <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 阿里云百炼）"></div>
+          <div class="form-row"><label>Base URL</label>
+            <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
+          <div class="form-row"><label>API Key</label>
+            <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
+          <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见「角色分配」标签）。</div>
+        </div>`;
+    }
     // keep role dropdowns in sync when providers are added/renamed/removed
     drawRoles();
   }
 
   function collectProviders() {
-    document.querySelectorAll("#prov-list [data-pi]").forEach((card) => {
-      const i = +card.dataset.pi;
-      if (providers[i]) {
-        providers[i].name = card.querySelector(".p-name").value.trim() || `API ${i + 1}`;
-        providers[i].base_url = card.querySelector(".p-url").value.trim();
-        providers[i].api_key = card.querySelector(".p-key").value.trim();
-      }
-    });
+    const card = document.getElementById("stab-provider")?.querySelector(".cfg-card");
+    if (card && providers[selProvider]) {
+      providers[selProvider].name = card.querySelector(".p-name").value.trim() || `API ${selProvider + 1}`;
+      providers[selProvider].base_url = card.querySelector(".p-url").value.trim();
+      providers[selProvider].api_key = card.querySelector(".p-key").value.trim();
+    }
   }
 
   function drawRoles() {
@@ -1517,8 +1553,23 @@ function renderSettings() {
   document.getElementById("prov-add").onclick = async () => {
     collectProviders();
     providers.push({ id: "", name: "", base_url: "", api_key: "" });
+    selProvider = providers.length - 1;
     drawProviders(); // drawProviders now refreshes role dropdowns too
+    // switch to the provider tab so the new API's form is visible
+    document.querySelector('.set-tabs button[data-stab="provider"]')?.click();
   };
+
+  // settings right-panel tabs
+  document.querySelectorAll(".set-tabs button").forEach((btn) => {
+    btn.onclick = () => {
+      document.querySelectorAll(".set-tabs button").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      const t = btn.dataset.stab;
+      document.querySelectorAll(".stab").forEach((el) => (el.style.display = "none"));
+      document.getElementById(`stab-${t}`).style.display = "block";
+      if (t === "provider") drawProviders();
+    };
+  });
 
   document.getElementById("cfg-refresh-asr").onclick = async () => {
     await saveConfigQuiet();

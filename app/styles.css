@@ -267,6 +267,39 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .tune-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 12px; }
 .tune-grid small { display: block; color: var(--ink-3); font-size: 11px; margin-top: 2px; }
 
+/* settings split layout: provider list left, config right */
+.settings-split { max-width: min(1280px, 94%) !important; }
+.set-layout { display: grid; grid-template-columns: 250px 1fr; gap: 18px; align-items: start; }
+@media (max-width: 860px) { .set-layout { grid-template-columns: 1fr; } }
+.set-side {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px; box-shadow: var(--shadow); position: sticky; top: 12px;
+}
+.set-side-head {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 13.5px; font-weight: 600; color: var(--ink-2); margin-bottom: 10px;
+}
+.set-side-head button { padding: 2px 12px; font-size: 15px; line-height: 1.4; }
+.prov-nav-item {
+  display: flex; align-items: center; gap: 8px; padding: 9px 10px;
+  border-radius: 8px; cursor: pointer; transition: background .15s; margin-bottom: 2px;
+}
+.prov-nav-item:hover { background: var(--bg); }
+.prov-nav-item.on { background: var(--accent-soft); }
+.prov-nav-item.on .pnav-name { color: var(--accent-ink); }
+.pnav-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.pnav-name { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pnav-url { font-size: 11px; color: var(--ink-3); font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pnav-item .p-del, .prov-nav-item .p-del { border: none; background: none; color: var(--ink-3); padding: 2px 6px; font-size: 12px; }
+.prov-nav-item .p-del:hover { color: var(--red); }
+.set-tabs {
+  display: flex; gap: 4px; margin-bottom: 14px; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 10px; padding: 4px; box-shadow: var(--shadow);
+}
+.set-tabs button { flex: 1; border: none; background: none; padding: 8px; border-radius: 7px; font-size: 13.5px; color: var(--ink-2); }
+.set-tabs button.active { background: var(--accent); color: #fff; }
+.stab > .cfg-card { margin-bottom: 0; }
+
 /* logs page */
 .log-filter-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .log-tabs { display: flex; gap: 2px; background: var(--bg); border-radius: 8px; padding: 3px; }
