@@ -1221,10 +1221,6 @@ function renderSettings() {
   let providers = [];
   let cfgCache = null;
   let modelCache = {};            // provider_id -> {models, asr_models}
-  let priorityModels = [];        // chat failover priority list
-  let priorityAsrModels = [];     // ASR failover priority list
-  let priorityVisionModels = [];  // OCR failover priority list
-  let priorityRole = "chat";      // which role's list is being edited
   $app.innerHTML = shell("settings", `
     <div class="page settings-split">
       <h1>模型配置</h1>
@@ -1253,6 +1249,14 @@ function renderSettings() {
                     <select id="cfg-chat" style="flex:1;min-width:0"></select>
                     <button id="cfg-refresh-chat" style="flex-shrink:0" title="获取模型列表">↻</button>
                   </div>
+                  <label class="switch-row role-switch">
+                    <input type="checkbox" id="auto-chat">
+                    <span class="switch-ui"></span>
+                    <div class="switch-text">
+                      <b>自动切换可用模型</b>
+                      <small>模型报错（额度用尽、下线等）时，自动换用该 API 下其他可用模型</small>
+                    </div>
+                  </label>
                 </div>
                 <div class="role-block">
                   <div class="role-name">🎙 语音转写 <i>ASR</i></div>
@@ -1261,7 +1265,14 @@ function renderSettings() {
                     <select id="cfg-asr" style="flex:1;min-width:0"></select>
                     <button id="cfg-refresh-asr" style="flex-shrink:0" title="获取模型列表">↻</button>
                   </div>
-                  <input id="cfg-asr-custom" type="text" placeholder="手动输入模型名（覆盖上面的选择）">
+                  <label class="switch-row role-switch">
+                    <input type="checkbox" id="auto-asr">
+                    <span class="switch-ui"></span>
+                    <div class="switch-text">
+                      <b>自动切换可用模型</b>
+                      <small>转写模型报错时，自动换用该 API 下其他转写模型</small>
+                    </div>
+                  </label>
                 </div>
                 <div class="role-block">
                   <div class="role-name">🖼 画面字幕 OCR <i>Vision</i></div>
@@ -1270,20 +1281,15 @@ function renderSettings() {
                     <select id="cfg-vision" style="flex:1;min-width:0"></select>
                     <button id="cfg-refresh-vision" style="flex-shrink:0" title="获取模型列表">↻</button>
                   </div>
-                  <input id="cfg-vision-custom" type="text" placeholder="手动输入模型名（覆盖上面的选择）">
+                  <label class="switch-row role-switch">
+                    <input type="checkbox" id="auto-vision">
+                    <span class="switch-ui"></span>
+                    <div class="switch-text">
+                      <b>自动切换可用模型</b>
+                      <small>OCR 模型报错时，自动换用该 API 下其他视觉模型</small>
+                    </div>
+                  </label>
                 </div>
-              </div>
-
-              <div class="auto-switch-box">
-                <label class="switch-row">
-                  <input type="checkbox" id="cfg-autoswitch">
-                  <span class="switch-ui"></span>
-                  <div class="switch-text">
-                    <b>自动切换可用模型</b>
-                    <small>模型报错（免费额度用尽、下线等）时，自动按下面列表的顺序尝试下一个。关闭则只用选定模型。</small>
-                  </div>
-                </label>
-                <div id="model-priority" style="display:none;margin-top:12px"></div>
               </div>
             </div>
           </div>
@@ -1321,30 +1327,16 @@ function renderSettings() {
     document.getElementById("role-vision").value = cfgCache.vision_provider || "";
     if (cfgCache.vision_model) {
       fillVisionSelect([cfgCache.vision_model], cfgCache.vision_model);
-      document.getElementById("cfg-vision-custom").value = "";
     }
     if (cfgCache.asr_model) {
       fillAsrSelect([cfgCache.asr_model], cfgCache.asr_model);
-      document.getElementById("cfg-asr-custom").value = "";
     }
     if (cfgCache.chat_model) fillChatSelect([cfgCache.chat_model], cfgCache.chat_model);
-    // auto-switch state + priority lists (per role)
-    priorityModels = (cfgCache.chat_models || []).slice();
-    if (cfgCache.chat_model && !priorityModels.includes(cfgCache.chat_model)) {
-      priorityModels.unshift(cfgCache.chat_model);
-    }
-    priorityAsrModels = (cfgCache.asr_models || []).slice();
-    if (cfgCache.asr_model && !priorityAsrModels.includes(cfgCache.asr_model)) {
-      priorityAsrModels.unshift(cfgCache.asr_model);
-    }
-    priorityVisionModels = (cfgCache.vision_models || []).slice();
-    if (cfgCache.vision_model && !priorityVisionModels.includes(cfgCache.vision_model)) {
-      priorityVisionModels.unshift(cfgCache.vision_model);
-    }
-    const asw = document.getElementById("cfg-autoswitch");
-    asw.checked = !!cfgCache.auto_model_switch;
-    drawPriority();
-    asw.onchange = drawPriority;
+    // per-role auto-switch toggles (default off)
+    const legacySwitch = !!cfgCache.auto_model_switch;
+    document.getElementById("auto-chat").checked = cfgCache.auto_switch_chat ?? legacySwitch;
+    document.getElementById("auto-asr").checked = cfgCache.auto_switch_asr ?? legacySwitch;
+    document.getElementById("auto-vision").checked = cfgCache.auto_switch_vision ?? legacySwitch;
     // pipeline tuning
     document.getElementById("cfg-seg-min").value = cfgCache.segment_minutes || 5;
     document.getElementById("cfg-ocr-workers").value = cfgCache.ocr_workers || 6;
@@ -1354,85 +1346,6 @@ function renderSettings() {
     expandedProvider = -1;
     drawProviders();
     drawSection();
-  }
-
-  function drawPriority() {
-    const wrap = document.getElementById("model-priority");
-    const on = document.getElementById("cfg-autoswitch").checked;
-    wrap.style.display = on ? "block" : "none";
-    if (!on) return;
-    const lists = { chat: priorityModels, asr: priorityAsrModels, vision: priorityVisionModels };
-    const roleNames = { chat: "📝 翻译与精讲", asr: "🎙 语音转写", vision: "🖼 OCR" };
-    if (!lists[priorityRole]) priorityRole = "chat";
-    const active = lists[priorityRole];
-    wrap.innerHTML = `
-      <div class="prio-roles">
-        ${Object.keys(lists).map((r) => `
-          <button class="prio-role-btn ${r === priorityRole ? "on" : ""}" data-role="${r}">${roleNames[r]}</button>`).join("")}
-      </div>
-      <div class="cal-hint" style="margin:8px 0">模型优先级（从上到下依次尝试）。▲ 上移，✕ 移除，可拖拽排序：</div>
-      <div class="prio-list" id="prio-list"></div>
-      <div style="display:flex;gap:8px;margin-top:8px">
-        <select id="prio-add-sel" style="flex:1;min-width:0"></select>
-        <button id="prio-add-btn" style="flex-shrink:0">+ 加入列表</button>
-      </div>`;
-    const list = document.getElementById("prio-list");
-    const sel = document.getElementById("prio-add-sel");
-    const pid = document.getElementById(priorityRole === "chat" ? "role-chat" : priorityRole === "asr" ? "role-asr" : "role-vision").value
-      || document.getElementById("role-chat").value;
-    const cached = modelCache[pid] || {};
-    const known = [...(cached.models || []), ...(cached.asr_models || [])]
-      .filter((v, i, a) => a.indexOf(v) === i);
-    const curSel = { chat: () => document.getElementById("cfg-chat").value,
-                     asr: () => document.getElementById("cfg-asr").value,
-                     vision: () => document.getElementById("cfg-vision").value }[priorityRole]();
-    if (curSel && !known.includes(curSel)) known.unshift(curSel);
-    for (const m of active) {
-      if (!known.includes(m)) known.push(m);
-    }
-    sel.innerHTML = known.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("") ||
-      `<option value="">（先点对应角色的 ↻ 获取模型）</option>`;
-    list.innerHTML = active.map((m, i) => `
-      <div class="prio-item" draggable="true" data-i="${i}">
-        <span class="prio-idx">${i + 1}</span>
-        <span class="prio-name">${esc(m)}</span>
-        <button class="prio-up" data-up="${i}" title="上移">▲</button>
-        <button class="prio-del" data-del="${i}" title="移除">✕</button>
-      </div>`).join("") || `<div class="panel-empty" style="padding:12px">列表为空：从下面选择加入</div>`;
-
-    wrap.querySelectorAll("[data-role]").forEach((b) => {
-      b.onclick = () => { priorityRole = b.dataset.role; drawPriority(); };
-    });
-    list.querySelectorAll("[data-del]").forEach((b) => {
-      b.onclick = () => { active.splice(+b.dataset.del, 1); drawPriority(); };
-    });
-    list.querySelectorAll("[data-up]").forEach((b) => {
-      b.onclick = () => {
-        const i = +b.dataset.up;
-        if (i > 0) {
-          [active[i - 1], active[i]] = [active[i], active[i - 1]];
-          drawPriority();
-        }
-      };
-    });
-    let dragIdx = null;
-    list.querySelectorAll(".prio-item").forEach((el) => {
-      el.ondragstart = () => { dragIdx = +el.dataset.i; el.classList.add("dragging"); };
-      el.ondragend = () => { el.classList.remove("dragging"); };
-      el.ondragover = (e) => {
-        e.preventDefault();
-        const i = +el.dataset.i;
-        if (dragIdx === null || dragIdx === i) return;
-        const [m] = active.splice(dragIdx, 1);
-        active.splice(i, 0, m);
-        dragIdx = i;
-        drawPriority();
-      };
-    });
-    document.getElementById("prio-add-btn").onclick = () => {
-      const v = sel.value;
-      if (v && !active.includes(v)) { active.push(v); drawPriority(); }
-    };
   }
 
   function drawSection() {
@@ -1478,6 +1391,8 @@ function renderSettings() {
             <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见左侧「模型分配」）。</div>
             <div class="form-actions">
               <button class="primary prov-done" data-done="${i}" style="padding:8px 22px">确定</button>
+              <button class="prov-test" data-test="${i}">测试连接</button>
+              <span class="prov-test-result" data-testres="${i}"></span>
             </div>
           </div>
         </div>`).join("")
@@ -1513,6 +1428,32 @@ function renderSettings() {
         expandedProvider = -1;
         drawProviders();
         toast("已保存");
+      };
+    });
+    // per-provider connectivity check (uses the values currently in the fields)
+    wrap.querySelectorAll("[data-test]").forEach((btn) => {
+      btn.onclick = async () => {
+        collectProviders();
+        const i = +btn.dataset.test;
+        const p = providers[i];
+        const out = wrap.querySelector(`[data-testres="${i}"]`);
+        if (!p || !p.base_url) { toast("请填写 Base URL"); return; }
+        btn.disabled = true;
+        if (out) { out.textContent = "测试中…"; out.className = "prov-test-result"; }
+        try {
+          const res = await api("/api/config/test_provider", {
+            method: "POST",
+            body: JSON.stringify({ provider_id: p.id, base_url: p.base_url, api_key: p.api_key }),
+          });
+          if (out) {
+            out.textContent = res.ok ? `✓ 连接成功 · ${res.count} 个模型` : `✗ ${res.detail || "连接失败"}`;
+            out.className = "prov-test-result " + (res.ok ? "ok" : "fail");
+          }
+        } catch (err) {
+          if (out) { out.textContent = "✗ " + err.message; out.className = "prov-test-result fail"; }
+        } finally {
+          btn.disabled = false;
+        }
       };
     });
     const addBtn = wrap.querySelector("#prov-add");
@@ -1569,15 +1510,11 @@ function renderSettings() {
 
   function fillAsrSelect(models, selected) {
     const sel = document.getElementById("cfg-asr");
-    const keepCustom = document.getElementById("cfg-asr-custom").value.trim();
     sel.innerHTML = models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
     if (selected && ![...sel.options].some((o) => o.value === selected)) {
       sel.insertAdjacentHTML("beforeend", `<option value="${esc(selected)}">${esc(selected)}</option>`);
     }
-    if (keepCustom && ![...sel.options].some((o) => o.value === keepCustom)) {
-      sel.insertAdjacentHTML("beforeend", `<option value="${esc(keepCustom)}">${esc(keepCustom)}</option>`);
-    }
-    sel.value = selected || keepCustom || sel.value || "";
+    sel.value = selected || sel.value || "";
   }
 
   function fillChatSelect(models, selected) {
@@ -1591,15 +1528,11 @@ function renderSettings() {
 
   function fillVisionSelect(models, selected) {
     const sel = document.getElementById("cfg-vision");
-    const keepCustom = document.getElementById("cfg-vision-custom").value.trim();
     sel.innerHTML = models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
     if (selected && ![...sel.options].some((o) => o.value === selected)) {
       sel.insertAdjacentHTML("beforeend", `<option value="${esc(selected)}">${esc(selected)}</option>`);
     }
-    if (keepCustom && ![...sel.options].some((o) => o.value === keepCustom)) {
-      sel.insertAdjacentHTML("beforeend", `<option value="${esc(keepCustom)}">${esc(keepCustom)}</option>`);
-    }
-    sel.value = selected || keepCustom || sel.value || "";
+    sel.value = selected || sel.value || "";
   }
 
   async function fetchModels(providerId) {
@@ -1640,7 +1573,6 @@ function renderSettings() {
     try {
       const res = await fetchModels(pid);
       fillChatSelect(res.models || [], "");
-      drawPriority();
       toast(`获取到 ${(res.models || []).length} 个模型`);
     } catch (err) { toast("获取失败: " + err.message); }
   };
@@ -1662,10 +1594,6 @@ function renderSettings() {
 
   async function saveConfigQuiet() {
     collectProviders();
-    const custom = document.getElementById("cfg-asr-custom").value.trim();
-    const asrVal = custom || document.getElementById("cfg-asr").value;
-    const visCustom = document.getElementById("cfg-vision-custom").value.trim();
-    const visVal = visCustom || document.getElementById("cfg-vision").value;
     try {
       await api("/api/config", {
         method: "PUT",
@@ -1674,13 +1602,12 @@ function renderSettings() {
           asr_provider: document.getElementById("role-asr").value,
           chat_provider: document.getElementById("role-chat").value,
           vision_provider: document.getElementById("role-vision").value,
-          asr_model: asrVal === "__custom__" ? "" : asrVal,
+          asr_model: document.getElementById("cfg-asr").value,
           chat_model: document.getElementById("cfg-chat").value,
-          vision_model: visVal === "__custom__" ? "" : visVal,
-          auto_model_switch: document.getElementById("cfg-autoswitch").checked,
-          chat_models: priorityModels,
-          asr_models: priorityAsrModels,
-          vision_models: priorityVisionModels,
+          vision_model: document.getElementById("cfg-vision").value,
+          auto_switch_chat: document.getElementById("auto-chat").checked,
+          auto_switch_asr: document.getElementById("auto-asr").checked,
+          auto_switch_vision: document.getElementById("auto-vision").checked,
           segment_minutes: parseInt(document.getElementById("cfg-seg-min").value, 10) || 5,
           ocr_workers: parseInt(document.getElementById("cfg-ocr-workers").value, 10) || 6,
           asr_workers: parseInt(document.getElementById("cfg-asr-workers").value, 10) || 4,
@@ -1694,10 +1621,8 @@ function renderSettings() {
 
   document.getElementById("cfg-save").onclick = async () => {
     await saveConfigQuiet();
-    const custom = document.getElementById("cfg-asr-custom").value.trim();
-    const asrVal = custom || document.getElementById("cfg-asr").value;
     if (!providers.length) { toast("请至少添加一个 API"); return; }
-    if (!asrVal) { toast("请选择转写模型"); return; }
+    if (!document.getElementById("cfg-asr").value) { toast("请选择转写模型"); return; }
     if (!document.getElementById("cfg-chat").value) { toast("请选择 Chat 模型"); return; }
     await saveConfigQuiet();
     toast("已保存");

@@ -320,8 +320,8 @@ def transcribe(
         if should_cancel and should_cancel():
             raise PipelineCancelled()
         offset = part_starts[i] if i < len(part_starts) else i * seg_secs
-        # auto_model_switch: walk the ASR model priority list per segment
-        if cfg.get("auto_model_switch"):
+        # auto_switch_asr: retry the segment with other ASR-capable models
+        if cfg.get("auto_switch_asr"):
             from pipeline.lesson import audio_transcribe_with_failover
             segs, _used = audio_transcribe_with_failover(cfg, parts[i])
             # re-offset: failover helper returns segment-local times

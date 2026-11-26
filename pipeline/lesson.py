@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from typing import Any, Callable
 
@@ -54,34 +55,19 @@ def chat_with_failover(
     messages: list[dict[str, Any]],
     max_tokens: int = 8000,
     temperature: float = 0.3,
-    model_list_key: str = "chat_models",   # or "vision_models"
-    provider_key: str = "chat_provider",
-    model_key: str = "chat_model",
 ) -> tuple[str, str]:
-    """Call chat completions trying each configured model in priority order.
+    """Call chat completions, moving to other chat-capable models when the
+    selected one is dead or out of quota (auto_switch_chat).
 
     Returns (content, model_used). Raises when every model fails.
     """
     import httpx as _httpx
 
-    providers = cfg.get("providers") or []
-    pid = cfg.get(provider_key)
-    prov = next((p for p in providers if p.get("id") == pid), None)
-    if prov is None and providers:
-        prov = providers[0]
+    prov = _resolve_provider(cfg, "chat_provider")
     if not prov:
         raise RuntimeError("chat provider 未配置")
 
-    # model priority list: configured list first, then the single model, then other models
-    models: list[str] = []
-    for m in (cfg.get(model_list_key) or []):
-        if m and m not in models:
-            models.append(m)
-    primary = cfg.get(model_key)
-    if primary and primary not in models:
-        models.append(primary)
-    if not models:
-        models = ["gpt-4o-mini"]
+    models = ordered_models(cfg, prov, "chat_model", "auto_switch_chat", "chat")
 
     base = prov.get("base_url", "").rstrip("/")
     key = prov.get("api_key", "")
@@ -128,20 +114,81 @@ def _resolve_provider(cfg: dict[str, Any], provider_key: str) -> dict[str, Any]:
     return prov or {}
 
 
-def ordered_models(cfg: dict[str, Any], provider_key: str, model_key: str, list_key: str) -> list[str]:
-    """Model candidates in priority order: configured list, then primary, then default."""
+# ---- provider model discovery (per-role auto-switch) ----
+_MODEL_LIST_CACHE: dict[str, tuple[float, list[str]]] = {}
+_MODEL_LIST_TTL = 3600.0
+_MODEL_LIST_FAIL_TTL = 300.0
+_MODEL_LIST_LOCK = threading.Lock()
+
+# models that one role can plausibly use
+_ROLE_EXCLUDE = ("embed", "tts", "whisper", "transcri", "asr", "speech", "rerank",
+                 "moderation", "dall-e", "stable-diffusion", "sdxl", "flux", "image", "ocr", "audio")
+_ROLE_MARKERS = {
+    "asr": ("whisper", "transcri", "asr", "audio", "speech", "sensevoice", "paraformer", "funasr", "vox", "omni"),
+    "vision": ("vl", "vision", "ocr", "omni", "gemini", "gpt-4o", "gpt-4.1", "gpt-5", "claude",
+               "pixtral", "llava", "internvl", "glm-4v", "qvq"),
+}
+
+
+def _cache_fresh(hit) -> bool:
+    # successful lists stay for an hour; failures retry after 5 minutes
+    ttl = _MODEL_LIST_TTL if hit and hit[1] else _MODEL_LIST_FAIL_TTL
+    return bool(hit) and time.time() - hit[0] < ttl
+
+
+def provider_model_ids(prov: dict[str, Any]) -> list[str]:
+    """Model ids advertised by a provider (cached; empty list on any failure)."""
+    base = (prov.get("base_url") or "").rstrip("/")
+    if not base:
+        return []
+    key = prov.get("api_key") or ""
+    cache_key = f"{base}|{key[-8:]}"
+    hit = _MODEL_LIST_CACHE.get(cache_key)
+    if _cache_fresh(hit):
+        return hit[1]
+    with _MODEL_LIST_LOCK:
+        hit = _MODEL_LIST_CACHE.get(cache_key)
+        if _cache_fresh(hit):
+            return hit[1]
+        ids: list[str] = []
+        try:
+            r = httpx.get(f"{base}/models", headers={"Authorization": f"Bearer {key}"}, timeout=20)
+            if r.status_code == 200:
+                ids = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
+        except Exception:  # noqa: BLE001 — failover just degrades to the selected model
+            ids = []
+        _MODEL_LIST_CACHE[cache_key] = (time.time(), ids)
+        return ids
+
+
+def models_for_role(prov: dict[str, Any], role: str) -> list[str]:
+    """Provider models that can plausibly serve `role` (chat / asr / vision)."""
+    ids = provider_model_ids(prov)
+    if not ids:
+        return []
+    if role in _ROLE_MARKERS:
+        pool = [m for m in ids if any(k in m.lower() for k in _ROLE_MARKERS[role])]
+    else:
+        pool = [m for m in ids if not any(k in m.lower() for k in _ROLE_EXCLUDE)]
+    return pool or ids
+
+
+def ordered_models(cfg: dict[str, Any], prov: dict[str, Any], model_key: str,
+                   switch_key: str, role: str) -> list[str]:
+    """Candidates for one call: the selected model first, then — only when this
+    role's auto-switch is on — other role-capable models from the provider."""
     models: list[str] = []
-    for m in (cfg.get(list_key) or []):
-        if m and m not in models:
-            models.append(m)
     primary = cfg.get(model_key)
-    if primary and primary not in models:
+    if primary:
         models.append(primary)
-    defaults = {"chat_model": "gpt-4o-mini", "asr_model": "whisper-1", "vision_model": "qwen3.5-ocr"}
+    if cfg.get(switch_key):
+        for m in models_for_role(prov, role):
+            if m not in models:
+                models.append(m)
     if not models:
-        d = defaults.get(model_key)
-        if d:
-            models.append(d)
+        default = {"chat_model": "gpt-4o-mini", "asr_model": "whisper-1", "vision_model": "qwen3.5-ocr"}.get(model_key)
+        if default:
+            models.append(default)
     return models
 
 
@@ -174,7 +221,7 @@ def audio_transcribe_with_failover(
     offset = 0.0  # caller passes offset via part metadata; kept 0 and caller re-offsets
 
     errors: list[str] = []
-    for model in ordered_models(cfg, "asr_provider", "asr_model", "asr_models"):
+    for model in ordered_models(cfg, prov, "asr_model", "auto_switch_asr", "asr"):
         low = model.lower()
         try:
             if any(k in low for k in ("omni", "qwen-audio", "gemini", "gpt-4o-audio")):
@@ -270,7 +317,7 @@ def ocr_with_failover(
         raise RuntimeError("OCR provider 未配置")
     b64 = _base64.b64encode(img_path.read_bytes()).decode()
     errors: list[str] = []
-    for model in ordered_models(cfg, "vision_provider", "vision_model", "vision_models"):
+    for model in ordered_models(cfg, prov, "vision_model", "auto_switch_vision", "vision"):
         try:
             r = _httpx.post(
                 f"{base}/chat/completions",
@@ -304,14 +351,12 @@ def _chat(
     messages: list[dict[str, str]],
     max_tokens: int = 8000,
     temperature: float = 0.3,
-    model_list_key: str = "chat_models",
 ) -> str:
-    """Single chat call. With auto_model_switch on, walks the model priority
-    list on dead-model errors (quota exhausted etc.); otherwise one shot."""
-    if cfg.get("auto_model_switch"):
+    """Single chat call. With auto_switch_chat on, falls back to the provider's
+    other chat-capable models on dead-model errors; otherwise one shot."""
+    if cfg.get("auto_switch_chat"):
         content, _ = chat_with_failover(
             cfg, messages, max_tokens=max_tokens, temperature=temperature,
-            model_list_key=model_list_key,
         )
         return content
     base_url, api_key, model = _chat_provider(cfg)

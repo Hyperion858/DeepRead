@@ -58,10 +58,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "chat_model": "",
     "vision_provider": "",
     "vision_model": "",
-    "auto_model_switch": False,   # walk model priority list when a model is dead/over quota
-    "chat_models": [],            # chat model priority order (used when auto_model_switch)
-    "asr_models": [],             # ASR model priority order
-    "vision_models": [],          # OCR model priority order
+    # per-role failover: when a model is dead/over quota, retry with other
+    # role-capable models the provider advertises (see pipeline.models_for_role)
+    "auto_switch_chat": False,
+    "auto_switch_asr": False,
+    "auto_switch_vision": False,
     # pipeline tuning
     "ocr_workers": 6,             # concurrent OCR frame recognitions
     "asr_workers": 4,             # concurrent ASR segment transcriptions
@@ -84,6 +85,12 @@ def load_config() -> dict[str, Any]:
             stored = {}
         if stored.get("providers"):
             cfg.update({k: v for k, v in stored.items() if k in DEFAULT_CONFIG})
+            # migrate the old single auto-switch flag to per-role switches
+            if "auto_model_switch" in stored and not any(
+                k in stored for k in ("auto_switch_chat", "auto_switch_asr", "auto_switch_vision")
+            ):
+                legacy = bool(stored["auto_model_switch"])
+                cfg["auto_switch_chat"] = cfg["auto_switch_asr"] = cfg["auto_switch_vision"] = legacy
         else:
             # migrate legacy flat configs (single API or two-group) into providers
             legacy_groups = []
@@ -365,7 +372,7 @@ async def put_config(request: Request):
         if cfg.get("chat_provider") not in live_ids:
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
     for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model", "segment_minutes",
-              "auto_model_switch", "chat_models", "asr_models", "vision_models",
+              "auto_switch_chat", "auto_switch_asr", "auto_switch_vision",
               "ocr_workers", "asr_workers", "translate_workers",
               "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):
         if k in body:
@@ -457,6 +464,43 @@ async def test_config(request: Request):
     if not (results["transcribe"] or results["chat"]):
         raise HTTPException(502, results["detail"] or "连接失败")
     return results
+
+
+@app.post("/api/config/test_provider")
+async def test_provider(request: Request):
+    """Probe a single provider with the values currently being edited (unsaved ok).
+
+    Body: {provider_id?, base_url, api_key?}. Checks reachability + auth by
+    listing the provider's models; returns 200 with ok=false on failure.
+    """
+    import httpx
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    base = (body.get("base_url") or "").strip().rstrip("/")
+    key = (body.get("api_key") or "").strip()
+    pid = body.get("provider_id") or ""
+    if not base:
+        return {"ok": False, "detail": "请填写 Base URL"}
+    # masked / empty key -> fall back to the stored key for this provider
+    if "*" in key or not key:
+        stored = next((p for p in load_config().get("providers", []) if p.get("id") == pid), None)
+        if stored:
+            key = stored.get("api_key", "")
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(f"{base}/models", headers={"Authorization": f"Bearer {key}"})
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "detail": f"连接失败: {exc}"}
+    if r.status_code != 200:
+        return {"ok": False, "detail": f"HTTP {r.status_code}: {r.text[:200]}"}
+    try:
+        ids = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "detail": "返回内容不是 OpenAI 兼容的模型列表"}
+    return {"ok": True, "count": len(ids), "models": ids[:20]}
 
 
 # ---------------------------------------------------------------- API: backup

@@ -218,8 +218,8 @@ def extract_ocr_subtitles(
     def _ocr_one(i: int) -> tuple[int, str]:
         frame = frames[i]
         t = (i + 0.5) * interval
-        # auto_model_switch: walk the vision model priority list per frame
-        if cfg.get("auto_model_switch"):
+        # auto_switch_vision: retry the frame with other vision-capable models
+        if cfg.get("auto_switch_vision"):
             from pipeline.lesson import ocr_with_failover
             for attempt in range(3):
                 try:
