@@ -1213,13 +1213,13 @@ function renderSettings() {
       <div class="set-layout">
         <aside class="set-side">
           <div class="prov-nav-item set-fixed ${selSection === "providers" ? "on" : ""}" data-sec="providers">
-            <span class="pnav-name">🔌 API 提供商</span>
+            <span class="pnav-name"><span class="pnav-icon">🔌</span>API 提供商</span>
           </div>
           <div class="prov-nav-item set-fixed ${selSection === "roles" ? "on" : ""}" data-sec="roles">
-            <span class="pnav-name">🎯 角色分配</span>
+            <span class="pnav-name"><span class="pnav-icon">🎯</span>角色分配</span>
           </div>
           <div class="prov-nav-item set-fixed ${selSection === "tuning" ? "on" : ""}" data-sec="tuning">
-            <span class="pnav-name">🎛 生成参数</span>
+            <span class="pnav-name"><span class="pnav-icon">🎛</span>生成参数</span>
           </div>
         </aside>
         <section class="set-main">
@@ -1292,6 +1292,7 @@ function renderSettings() {
         </section>
       </div>
     </div>`);
+  let providers = [];
   let cfgCache = null;
   let modelCache = {};          // provider_id -> {models, asr_models}
   let priorityModels = [];      // chat failover priority list
