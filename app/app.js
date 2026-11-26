@@ -519,7 +519,6 @@ function drawCoursePage() {
           <button id="ctl-ab" title="A-B 循环">A-B</button>
           <button id="ctl-follow" title="字幕跟随开关">不跟随</button>
           <button id="ctl-goto" title="跳到当前播放的句子">⤓ 当前句</button>
-          <button id="ctl-cal" title="时间线校准（全局偏移/单句调整）">⏱ 校准</button>
           <div class="speed-group">
             ${["0.75", "1", "1.25", "1.5"].map((v) =>
               `<button data-speed="${v}" class="${v === "1" ? "on" : ""}">${v}x</button>`).join("")}
@@ -611,18 +610,6 @@ function drawCoursePage() {
     }
   };
 
-  document.getElementById("ctl-cal").onclick = () => {
-    openCalibrationPanel({
-      player,
-      sentences,
-      rawSentences,
-      activeId,
-      onApplied: () => {
-        panels[state.tab]();
-      },
-    });
-  };
-
   const abBtn = document.getElementById("ctl-ab");
   abBtn.onclick = () => {
     if (!state.abLoop) {
@@ -663,16 +650,32 @@ function drawCoursePage() {
     player.play();
     document.querySelector(".cp-left").scrollIntoView({ behavior: "smooth" });
   };
-  window.__playRange = (start, end, rate) => {
-    player.currentTime = start;
-    if (rate) player.playbackRate = rate;
-    player.play();
-    const stopAt = () => {
-      if (player.currentTime >= end) { player.pause(); player.removeEventListener("timeupdate", stopAt); }
-      else requestAnimationFrame(stopAt);
+  window.__playRange = (start, end, rate) => playRange(start, end, rate);
+
+  function playRange(start, end, rate) {
+    if (player.__rangeTick) player.removeEventListener("timeupdate", player.__rangeTick);
+    player.playbackRate = rate || 1;
+    let armed = false;
+    const tick = () => {
+      if (player.__rangeTick !== tick) return;
+      if (!armed || player.currentTime < end) return;
+      player.pause();
+      player.removeEventListener("timeupdate", tick);
+      player.__rangeTick = null;
     };
-    requestAnimationFrame(stopAt);
-  };
+    const arm = () => { armed = true; };
+    player.__rangeTick = tick;
+    player.currentTime = start;
+    const started = player.play();
+    if (started && typeof started.catch === "function") started.catch(() => {});
+    player.addEventListener("timeupdate", tick);
+    // Arm the stop check only once the seek has landed. Reading currentTime
+    // before that can still return the pre-seek position, which made the first
+    // click of a shadowing sentence pause immediately.
+    if (player.seeking) player.addEventListener("seeked", arm, { once: true });
+    else arm();
+    setTimeout(() => { if (player.__rangeTick === tick) arm(); }, 400);
+  }
 
   function highlightSentence(idx) {
     document.querySelectorAll(".sent.active").forEach((el) => el.classList.remove("active"));
@@ -680,62 +683,82 @@ function drawCoursePage() {
     if (el) el.classList.add("active");
   }
 
-  // calibration toolbar shown at the top of every tab
-  function calToolbarHtml() {
+  /* ---- per-sentence calibration / text correction (shared by every tab) ---- */
+  function calibrateSentence(sid) {
+    const raw = rawSentences.find((s) => s.id === sid);
+    if (!raw) { toast("找不到这句的原始数据"); return; }
+    const cal = state.course.calibration;
+    const t = player.currentTime;
+    cal.overrides[String(sid)] = {
+      start: Math.max(0, t),
+      end: Math.max(0, t + (raw.end - raw.start)),
+    };
+    saveCalibration().catch((e) => toast("保存失败: " + e.message));
+    const list = calibratedSentences();
+    sentences.splice(0, sentences.length, ...list);
+    panels[state.tab]();
+    toast(`第 ${sid + 1} 句已对齐到 ${fmtTime(t)} ✓`);
+  }
+
+  function saveSentenceText(sid, value) {
+    const cal = state.course.calibration;
+    if (!cal.text_edits) cal.text_edits = {};
+    const val = (value || "").trim();
+    if (val) cal.text_edits[String(sid)] = val;
+    else delete cal.text_edits[String(sid)];   // empty -> revert
+    saveCalibration().catch((e) => toast("保存失败: " + e.message));
+    const list = calibratedSentences();
+    sentences.splice(0, sentences.length, ...list);
+    panels[state.tab]();
+    toast(val ? `第 ${sid + 1} 句文本已修正 ✓` : `第 ${sid + 1} 句已还原 ✓`);
+  }
+
+  function sentenceActionsHtml(sid) {
     return `
-      <div class="cal-quick" id="cal-quick">
-        <button id="calq-here" class="primary" title="把当前高亮句子对齐到视频当前播放位置">⚡ 对齐当前句到播放位置</button>
-        <button id="calq-open" title="打开完整校准面板（全局偏移/单句调整/文字修正）">⏱ 校准面板</button>
-        <span class="cal-quick-hint" id="calq-hint">先播放视频，高亮的句子就是要校准的对象；拖到这句声音开始的时刻，点「⚡ 对齐」即可修好</span>
+      <div class="s-actions">
+        <div class="s-tools">
+          <button class="s-cal" data-cal="${sid}" title="把这句对齐到当前播放位置">⏱ 校准此句</button>
+          <button class="s-edit" data-edit="${sid}" title="手动修正这句的文字">✎ 修正文字</button>
+        </div>
+        <div class="s-editbox" style="display:none">
+          <textarea rows="2" placeholder="修正这句话的文本（合并拆错的句子、改错别字）">${esc(sentences[sid]?.text || "")}</textarea>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <button class="primary edit-save" data-save="${sid}">保存</button>
+            <button class="edit-cancel">取消</button>
+          </div>
+        </div>
       </div>`;
   }
 
-  function wireCalToolbar() {
-    const here = document.getElementById("calq-here");
-    const open = document.getElementById("calq-open");
-    if (!here || !open) return;
-    // live hint: show which sentence is currently highlighted (the calibration target)
-    const hint = document.getElementById("calq-hint");
-    const updateHint = () => {
-      if (!hint) return;
-      if (activeId >= 0 && sentences[activeId]) {
-        hint.innerHTML = `当前校准目标：第 <b>${activeId + 1}</b> 句「${esc(sentences[activeId].text.slice(0, 30))}…」— 播放到它的声音起点，点 <b>⚡ 对齐</b>`;
-      } else {
-        hint.textContent = "先播放视频，高亮的句子就是要校准的对象";
-      }
-    };
-    updateHint();
-    const oldTimeupdate = player.__calHintUpdater;
-    if (oldTimeupdate) player.removeEventListener("timeupdate", oldTimeupdate);
-    player.__calHintUpdater = updateHint;
-    player.addEventListener("timeupdate", updateHint);
-    here.onclick = () => {
-      if (activeId < 0) { toast("请先播放视频，让要校准的句子处于高亮状态"); return; }
-      const raw = rawSentences.find((s) => s.id === activeId);
-      const cal = state.course.calibration;
-      const t = player.currentTime;
-      cal.overrides[String(activeId)] = {
-        start: Math.max(0, t),
-        end: Math.max(0, t + (raw.end - raw.start)),
+  function wireSentenceActions(root) {
+    root.querySelectorAll("[data-cal]").forEach((btn) => {
+      btn.onclick = (e) => { e.stopPropagation(); calibrateSentence(+btn.dataset.cal); };
+    });
+    root.querySelectorAll("[data-edit]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const box = btn.closest(".s-actions").querySelector(".s-editbox");
+        box.style.display = box.style.display === "none" ? "block" : "none";
       };
-      saveCalibration().catch((e) => toast("保存失败: " + e.message));
-      // live-update the sentences array used by playback sync
-      const list = calibratedSentences();
-      sentences.splice(0, sentences.length, ...list);
-      panels[state.tab]();
-      toast(`已将第 ${activeId + 1} 句对齐到 ${fmtTime(t)} ✓`);
-    };
-    open.onclick = () => {
-      openCalibrationPanel({
-        player, sentences, rawSentences, activeId,
-        onApplied: () => panels[state.tab](),
-      });
-    };
+    });
+    root.querySelectorAll(".s-actions .edit-cancel").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        btn.closest(".s-actions").querySelector(".s-editbox").style.display = "none";
+      };
+    });
+    root.querySelectorAll(".s-actions .edit-save").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const ta = btn.closest(".s-actions").querySelector("textarea");
+        saveSentenceText(+btn.dataset.save, ta.value);
+      };
+    });
   }
 
   function renderReadTab() {
     const panel = document.getElementById("tab-panel");
-    panel.innerHTML = calToolbarHtml() + sentences.map((s) => {
+    panel.innerHTML = sentences.map((s) => {
       const read = state.progress.read.includes(s.id);
       const flags = [];
       if (s.edited) flags.push(`<span class="s-flags flag-embedded" title="已手动修正">✎ 已修正</span>`);
@@ -748,23 +771,13 @@ function drawCoursePage() {
         <div class="s-text">${markVocab(s.text, s.lang, vocabIndex)}</div>
         ${s.translation ? `<div class="s-trans">${esc(s.translation)}</div>` : ""}
         ${s.grammar ? `<div class="s-grammar">语法: ${esc(s.grammar)}</div>` : ""}
-        <div class="s-tools">
-          <button class="s-cal" data-cal="${s.id}" title="把这句对齐到当前播放位置">⏱ 校准此句</button>
-          <button class="s-edit" data-edit="${s.id}" title="手动修正这句的文字">✎ 修正文字</button>
-        </div>
-        <div class="s-editbox" id="editbox-${s.id}" style="display:none">
-          <textarea rows="2" placeholder="修正这句话的文本（合并拆错的句子、改错别字）">${esc(s.text)}</textarea>
-          <div style="display:flex;gap:8px;margin-top:6px">
-            <button class="primary edit-save" data-save="${s.id}">保存</button>
-            <button class="edit-cancel" data-canceledit="${s.id}">取消</button>
-          </div>
-        </div>
+        ${sentenceActionsHtml(s.id)}
       </div>`;
     }).join("");
 
     panel.querySelectorAll(".sent").forEach((el) => {
       el.onclick = (e) => {
-        if (e.target.closest(".vmark") || e.target.closest(".s-cal")) return;
+        if (e.target.closest(".vmark") || e.target.closest(".s-actions")) return;
         const idx = parseInt(el.dataset.idx, 10);
         player.currentTime = sentences[idx].start;
         player.play();
@@ -774,58 +787,7 @@ function drawCoursePage() {
         }
       };
     });
-    // per-sentence quick calibration
-    panel.querySelectorAll(".s-cal").forEach((btn) => {
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        const sid = +btn.dataset.cal;
-        const raw = rawSentences.find((s) => s.id === sid);
-        const cal = state.course.calibration;
-        const t = player.currentTime;
-        cal.overrides[String(sid)] = {
-          start: Math.max(0, t),
-          end: Math.max(0, t + (raw.end - raw.start)),
-        };
-        saveCalibration().catch((er) => toast("保存失败: " + er.message));
-        const list = calibratedSentences();
-        sentences.splice(0, sentences.length, ...list);
-        panels[state.tab]();
-        toast(`第 ${sid + 1} 句已对齐到 ${fmtTime(t)} ✓`);
-      };
-    });
-    // per-sentence manual text correction
-    panel.querySelectorAll(".s-edit").forEach((btn) => {
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        const box = document.getElementById(`editbox-${btn.dataset.edit}`);
-        if (box) box.style.display = box.style.display === "none" ? "block" : "none";
-      };
-    });
-    panel.querySelectorAll(".edit-cancel").forEach((btn) => {
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        document.getElementById(`editbox-${btn.dataset.canceledit}`).style.display = "none";
-      };
-    });
-    panel.querySelectorAll(".edit-save").forEach((btn) => {
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        const sid = +btn.dataset.save;
-        const box = document.getElementById(`editbox-${sid}`);
-        const ta = box.querySelector("textarea");
-        const cal = state.course.calibration;
-        if (!cal.text_edits) cal.text_edits = {};
-        const val = ta.value.trim();
-        if (val) cal.text_edits[String(sid)] = val;
-        else delete cal.text_edits[String(sid)];  // empty -> revert
-        saveCalibration().catch((er) => toast("保存失败: " + er.message));
-        const list = calibratedSentences();
-        sentences.splice(0, sentences.length, ...list);
-        panels[state.tab]();
-        toast(val ? `第 ${sid + 1} 句文本已修正 ✓` : `第 ${sid + 1} 句已还原 ✓`);
-      };
-    });
-    wireCalToolbar();
+    wireSentenceActions(panel);
     // re-apply the highlight after a re-render, otherwise it disappears on
     // tab switches / text edits while playback continues
     if (activeId >= 0) highlightSentence(activeId);
@@ -834,9 +796,9 @@ function drawCoursePage() {
   function renderCardsTab() {
     const panel = document.getElementById("tab-panel");
     const vocab = lesson.vocabulary || [];
-    if (!vocab.length) { panel.innerHTML = calToolbarHtml() + `<div class="panel-empty">本课程暂无生词数据</div>`; wireCalToolbar(); return; }
+    if (!vocab.length) { panel.innerHTML = `<div class="panel-empty">本课程暂无生词数据</div>`; return; }
     const order = shuffle([...vocab.keys()]);
-    panel.innerHTML = calToolbarHtml() + `
+    panel.innerHTML = `
       <div style="margin-bottom:12px;color:var(--ink-2);font-size:13px">
         点击卡片翻面 · 底部按钮标记认识/不认识 · 点击句号跳转原句
       </div>
@@ -844,7 +806,7 @@ function drawCoursePage() {
 
     panel.querySelectorAll(".lcard").forEach((card) => {
       card.onclick = (e) => {
-        if (e.target.closest("a,button")) return;
+        if (e.target.closest("a,button,.s-actions")) return;
         card.classList.toggle("flipped");
       };
     });
@@ -862,7 +824,7 @@ function drawCoursePage() {
     panel.querySelectorAll(".jump").forEach((a) => {
       a.onclick = (e) => { e.preventDefault(); window.__jumpTo(sentences[+a.dataset.sid].start); };
     });
-    wireCalToolbar();
+    wireSentenceActions(panel);
   }
 
   function cardHtml(v, vi) {
@@ -879,7 +841,8 @@ function drawCoursePage() {
         </div>
         ${(v.sentenceIds || []).length && sentences[v.sentenceIds[0]] ? `
           <div class="hs-time">⏱ ${fmtTime(sentences[v.sentenceIds[0]].start)} → ${fmtTime(sentences[v.sentenceIds[0]].end)}</div>
-          <a class="jump jump-btn" data-sid="${v.sentenceIds[0]}" href="#">▶ 播放原句</a>` : ""}
+          <a class="jump jump-btn" data-sid="${v.sentenceIds[0]}" href="#">▶ 播放原句</a>
+          ${sentenceActionsHtml(v.sentenceIds[0])}` : ""}
       </div>
       <div class="face back">
         <div class="def">${esc(v.definition || "")}</div>
@@ -903,10 +866,11 @@ function drawCoursePage() {
         ${x.usage ? `<div class="hs-breakdown">${esc(x.usage)}</div>` : ""}
         ${s ? `<div class="hs-jump hs-time">⏱ ${fmtTime(s.start)} → ${fmtTime(s.end)}
                 <a class="jump jump-btn" data-sid="${sid}" href="#">▶ 播放原句</a>
-                <span class="hs-snip">${esc(s.text.slice(0, 60))}</span></div>` : ""}
+                <span class="hs-snip">${esc(s.text.slice(0, 60))}</span></div>
+              ${sentenceActionsHtml(sid)}` : ""}
       </div>`;
     };
-    panel.innerHTML = calToolbarHtml() + `
+    panel.innerHTML = `
       <div class="section-title">💬 口语表达</div>
       ${expr.length ? expr.map((x) => item(x)).join("") : `<div class="panel-empty">暂无</div>`}
       <div class="section-title">⚖ 行业词汇</div>
@@ -916,14 +880,14 @@ function drawCoursePage() {
     panel.querySelectorAll(".jump").forEach((a) => {
       a.onclick = (e) => { e.preventDefault(); window.__jumpTo(sentences[+a.dataset.sid].start); };
     });
-    wireCalToolbar();
+    wireSentenceActions(panel);
   }
 
   function renderHardTab() {
     const panel = document.getElementById("tab-panel");
     const hs = lesson.hardSentences || [];
-    if (!hs.length) { panel.innerHTML = calToolbarHtml() + `<div class="panel-empty">本课程暂无长难句拆解</div>`; wireCalToolbar(); return; }
-    panel.innerHTML = calToolbarHtml() + hs.map((h) => {
+    if (!hs.length) { panel.innerHTML = `<div class="panel-empty">本课程暂无长难句拆解</div>`; return; }
+    panel.innerHTML = hs.map((h) => {
       const s = sentences[h.sentenceId] || {};
       return `
       <div class="hs-card">
@@ -933,32 +897,39 @@ function drawCoursePage() {
         <div class="hs-structure">结构: ${esc(h.structure || "")}</div>
         <div class="hs-breakdown">${esc(h.breakdown || "")}</div>
         <div class="hs-jump"><a class="jump jump-btn" data-sid="${h.sentenceId}" href="#">▶ 播放原句</a></div>
+        ${sentences[h.sentenceId] ? sentenceActionsHtml(h.sentenceId) : ""}
       </div>`;
     }).join("");
     panel.querySelectorAll(".jump").forEach((a) => {
       a.onclick = (e) => { e.preventDefault(); window.__jumpTo(sentences[+a.dataset.sid].start); };
     });
-    wireCalToolbar();
+    wireSentenceActions(panel);
   }
 
   function renderShadowTab() {
     const panel = document.getElementById("tab-panel");
     const sh = (lesson.shadowing || []).filter((s) => sentences[s.sentenceId]);
-    if (!sh.length) { panel.innerHTML = calToolbarHtml() + `<div class="panel-empty">本课程暂无跟读数据</div>`; wireCalToolbar(); return; }
-    panel.innerHTML = calToolbarHtml() + `
+    if (!sh.length) { panel.innerHTML = `<div class="panel-empty">本课程暂无跟读数据</div>`; return; }
+    panel.innerHTML = `
       <div style="margin-bottom:12px;color:var(--ink-2);font-size:13px">
         🔁 A-B 循环 + 0.75x 慢速播放 → 暂停 → 影子跟读
       </div>` + sh.map((s) => {
         const sent = sentences[s.sentenceId];
         return `
       <div class="sh-row">
-        <div class="sh-text">
-          ${esc(sent.text)}
-          <div class="sh-tip">${esc(s.tip || "")}</div>
+        <div class="sh-main">
+          <div class="sh-text">
+            ${esc(sent.text)}
+            <div class="sh-tip">${esc(s.tip || "")}</div>
+          </div>
+          <div class="hs-time">⏱ ${fmtTime(sent.start)} → ${fmtTime(sent.end)}</div>
+          ${sentenceActionsHtml(s.sentenceId)}
         </div>
-        <button data-play="${s.sentenceId}" title="原速播放">▶</button>
-        <button data-slow="${s.sentenceId}" title="0.75x 慢速播放">🐢</button>
-        <button data-ab="${s.sentenceId}" title="A-B 循环这句">🔁</button>
+        <div class="sh-btns">
+          <button data-play="${s.sentenceId}" title="原速播放">▶</button>
+          <button data-slow="${s.sentenceId}" title="0.75x 慢速播放">🐢</button>
+          <button data-ab="${s.sentenceId}" title="A-B 循环这句">🔁</button>
+        </div>
       </div>`;
       }).join("");
 
@@ -977,7 +948,7 @@ function drawCoursePage() {
         window.__jumpTo(s.start);
       };
     });
-    wireCalToolbar();
+    wireSentenceActions(panel);
   }
 }
 
@@ -1024,191 +995,6 @@ function openChannelDialog({ mid, kind, lastChannels }) {
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay || e.target.closest(".cal-close")) overlay.remove();
   });
-  document.body.appendChild(overlay);
-}
-
-/* ---------------- calibration panel ---------------- */
-function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApplied }) {
-  document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
-  const cal = state.course.calibration;
-  const overlay = document.createElement("div");
-  overlay.className = "cal-overlay";
-  overlay.innerHTML = `
-    <div class="cal-panel">
-      <div class="cal-head">
-        <b>⏱ 时间线校准</b>
-        <button class="cal-close" title="关闭">✕</button>
-      </div>
-
-      <div class="section-title" style="margin-top:8px">全局偏移（所有句子整体平移）</div>
-      <div class="cal-row">
-        <button class="cal-shift" data-d="-0.5">−0.5s</button>
-        <button class="cal-shift" data-d="-0.1">−0.1s</button>
-        <input class="cal-global" type="number" step="0.1" value="${esc(String(cal.global_offset || 0))}" style="width:90px;text-align:center">
-        <button class="cal-shift" data-d="0.1">+0.1s</button>
-        <button class="cal-shift" data-d="0.5">+0.5s</button>
-        <button class="cal-reset" title="清除全局偏移">归零</button>
-      </div>
-      <div class="cal-hint">字幕整体比声音慢 → 加负值；快 → 加正值。改动即时生效并自动保存。</div>
-      <div style="margin:8px 0">
-        <button class="cal-pick-start"> ◀ 取当前播放点为参考</button>
-        <span class="cal-ref" style="font-size:12px;color:var(--ink-2)">未设置</span>
-      </div>
-      <div class="cal-apply-global" style="display:none">
-        <button class="primary cal-align-here">将选中句子对齐到该播放点</button>
-        <span style="font-size:12px;color:var(--ink-2)">（选中下面任一句后可用）</span>
-      </div>
-
-      <div class="section-title">单句调整（点击句子选中，可设起点/终点或微调）</div>
-      <div class="cal-list"></div>
-    </div>`;
-
-  const globalInput = overlay.querySelector(".cal-global");
-  const listEl = overlay.querySelector(".cal-list");
-  const refEl = overlay.querySelector(".cal-ref");
-  const applyWrap = overlay.querySelector(".cal-apply-global");
-  let refPoint = null;
-  let selId = null;
-
-  function renderList() {
-    const items = sentences.map((s) => {
-      const o = cal.overrides[String(s.id)];
-      const isSel = selId === s.id;
-      return `
-      <div class="cal-item ${isSel ? "sel" : ""}" data-sid="${s.id}">
-        <div class="ci-main" data-act="sel">
-          <span class="s-time">${fmtTime(s.start)} → ${fmtTime(s.end)}</span>
-          <span class="ci-text">${esc(s.text.slice(0, 40))}</span>
-          ${o ? '<span class="badge">已调</span>' : ""}
-        </div>
-        ${isSel ? `
-        <div class="ci-edit">
-          <label>起点 <input class="ci-start" type="number" step="0.1" value="${s.start.toFixed(2)}"></label>
-          <label>终点 <input class="ci-end" type="number" step="0.1" value="${s.end.toFixed(2)}"></label>
-          <button class="ci-set-start" data-act="set-start">起点=播放点</button>
-          <button class="ci-set-end" data-act="set-end">终点=播放点</button>
-          <button class="ci-nudge" data-act="nudge-l">◀ 0.5s</button>
-          <button class="ci-nudge" data-act="nudge-r">0.5s ▶</button>
-          <button class="ci-clear" data-act="clear" ${o ? "" : "disabled"}>还原</button>
-          <button class="primary ci-play" data-act="play">▶ 试听</button>
-        </div>` : ""}
-      </div>`;
-    }).join("");
-    listEl.innerHTML = items || `<div class="panel-empty">无句子</div>`;
-  }
-
-  function persist() {
-    globalInput.value = Number(cal.global_offset || 0).toFixed(1);
-    saveCalibration().then(() => {}).catch((e) => toast("保存失败: " + e.message));
-  }
-
-  overlay.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-act],[data-d],.cal-close,.cal-reset,.cal-pick-start,.cal-align-here");
-    if (!btn) {
-      if (e.target === overlay) close();
-      return;
-    }
-    if (btn.classList.contains("cal-close")) return close();
-    if (btn.classList.contains("cal-reset")) { cal.global_offset = 0; persist(); return; }
-    if (btn.classList.contains("cal-pick-start")) {
-      refPoint = player.currentTime;
-      refEl.textContent = `参考点 ${refPoint.toFixed(2)}s`;
-      return;
-    }
-    if (btn.classList.contains("cal-align-here")) {
-      if (refPoint === null || selId === null) { toast("先取参考点并选中句子"); return; }
-      const raw = rawSentences.find((s) => s.id === selId);
-      const dur = (raw.end - raw.start);
-      cal.overrides[String(selId)] = {
-        start: Math.max(0, refPoint),
-        end: Math.max(0, refPoint + dur),
-      };
-      persist();
-      refreshSentences();
-      renderList();
-      return;
-    }
-    if (btn.dataset.d !== undefined) {
-      cal.global_offset = Math.round(((parseFloat(cal.global_offset) || 0) + parseFloat(btn.dataset.d)) * 10) / 10;
-      persist();
-      return;
-    }
-
-    const act = btn.dataset.act;
-    const item = btn.closest(".cal-item");
-    const sid = item ? parseInt(item.dataset.sid, 10) : null;
-    if (act === "sel") {
-      selId = sid;
-      applyWrap.style.display = "block";
-      renderList();
-      return;
-    }
-    if (act === "play") {
-      const s = sentences.find((x) => x.id === sid);
-      player.currentTime = s.start;
-      player.play();
-      return;
-    }
-    if (act === "clear") {
-      delete cal.overrides[String(sid)];
-      persist();
-      refreshSentences();
-      renderList();
-      return;
-    }
-    const raw = rawSentences.find((s) => s.id === sid);
-    const dur = raw.end - raw.start;
-    if (act === "set-start") {
-      const st = player.currentTime;
-      cal.overrides[String(sid)] = { start: Math.max(0, st), end: Math.max(0, st + dur) };
-    } else if (act === "set-end") {
-      const st = cal.overrides[String(sid)]?.start ?? raw.start;
-      cal.overrides[String(sid)] = { start: st, end: Math.max(st + 0.3, player.currentTime) };
-    } else if (act === "nudge-l" || act === "nudge-r") {
-      const cur = cal.overrides[String(sid)] || { start: raw.start, end: raw.end };
-      const d = act === "nudge-l" ? -0.5 : 0.5;
-      cal.overrides[String(sid)] = {
-        start: Math.max(0, cur.start + d),
-        end: Math.max(0.3, cur.end + d),
-      };
-    }
-    persist();
-    refreshSentences();
-    renderList();
-  });
-
-  globalInput.addEventListener("change", () => {
-    cal.global_offset = parseFloat(globalInput.value) || 0;
-    persist();
-    refreshSentences();
-  });
-  listEl.addEventListener("change", (e) => {
-    const inp = e.target;
-    if (!inp.classList.contains("ci-start") && !inp.classList.contains("ci-end")) return;
-    const sid = parseInt(inp.closest(".cal-item").dataset.sid, 10);
-    const raw = rawSentences.find((s) => s.id === sid);
-    const cur = cal.overrides[String(sid)] || { start: raw.start, end: raw.end };
-    let start = cur.start, end = cur.end;
-    if (inp.classList.contains("ci-start")) start = Math.max(0, parseFloat(inp.value) || 0);
-    else end = Math.max(start + 0.3, parseFloat(inp.value) || 0);
-    cal.overrides[String(sid)] = { start, end };
-    persist();
-    refreshSentences();
-    renderList();
-  });
-
-  function refreshSentences() {
-    const list = calibratedSentences();
-    sentences.splice(0, sentences.length, ...list);
-    if (onApplied) onApplied();
-  }
-
-  function close() {
-    overlay.remove();
-    refreshSentences();
-  }
-
-  renderList();
   document.body.appendChild(overlay);
 }
 
