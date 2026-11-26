@@ -26,6 +26,7 @@ from pipeline.lesson import generate_lesson
 from pipeline.transcribe import transcribe, PipelineCancelled
 from pipeline.align import align
 from pipeline import backup as backup_mod
+from pipeline import health as health_mod
 from pipeline import logs as logs_mod
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -46,6 +47,8 @@ ALLOWED_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a", 
 for d in (DATA_DIR, MEDIA_DIR, MATERIALS_DIR, COURSES_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
+health_mod.configure(DATA_DIR / "model_health.json")
+
 app = FastAPI(title="DeepRead")
 
 # ---------------------------------------------------------------- config
@@ -63,6 +66,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "auto_switch_chat": False,
     "auto_switch_asr": False,
     "auto_switch_vision": False,
+    # multi-select model lists, tried in this order (first = primary)
+    "chat_models": [],
+    "asr_models": [],
+    "vision_models": [],
     # results of capability probing, per provider:
     # {pid: {"base_url": str, "vision": {"at": ts, "models": [...]}, "asr": {...}}}
     "probe_cache": {},
@@ -162,6 +169,8 @@ def _masked_config(cfg: dict[str, Any]) -> dict[str, Any]:
         {**p, "api_key": mask_key(p.get("api_key", ""))} for p in cfg.get("providers", [])
     ]
     out["has_key"] = any(p.get("api_key") for p in cfg.get("providers", []))
+    # models that recently failed real calls, so the UI can flag them
+    out["model_health"] = health_mod.snapshot()
     return out
 
 
@@ -380,10 +389,19 @@ async def put_config(request: Request):
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
     for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model", "segment_minutes",
               "auto_switch_chat", "auto_switch_asr", "auto_switch_vision",
+              "chat_models", "asr_models", "vision_models",
               "ocr_workers", "asr_workers", "translate_workers",
               "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):
         if k in body:
             cfg[k] = body[k]
+    # keep "the first selected model" and the single-model field in sync so
+    # every pipeline path (multi or single) sees the same primary
+    for role in ("chat", "asr", "vision"):
+        picks = [m for m in (cfg.get(f"{role}_models") or []) if m]
+        if role in body:
+            picks = [m for m in (body.get(f"{role}_models") or []) if m]
+        if picks:
+            cfg[f"{role}_model"] = picks[0]
     save_config(cfg)
     changed = [k for k in body if k in DEFAULT_CONFIG]
     log_event("action", "修改模型/系统配置", detail="字段: " + ", ".join(changed[:10]))
@@ -705,6 +723,13 @@ async def clear_probe_cache(provider_id: str = "", role: str = ""):
     cfg["probe_cache"] = cache
     save_config(cfg)
     return {"ok": True, "cleared": cleared, "probe_cache": cache}
+
+
+@app.delete("/api/config/model_health")
+async def clear_model_health(model: str = "", provider_id: str = ""):
+    """Forget failed-model marks (one model, one provider, or everything)."""
+    removed = health_mod.clear(model=model, provider_id=provider_id)
+    return {"ok": True, "removed": removed, "model_health": health_mod.snapshot()}
 
 
 @app.post("/api/config/test")

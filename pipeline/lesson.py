@@ -67,7 +67,7 @@ def chat_with_failover(
     if not prov:
         raise RuntimeError("chat provider 未配置")
 
-    models = ordered_models(cfg, prov, "chat_model", "auto_switch_chat", "chat")
+    models = ordered_models(cfg, prov, "chat_model", "auto_switch_chat", "chat", "chat_models")
 
     base = prov.get("base_url", "").rstrip("/")
     key = prov.get("api_key", "")
@@ -87,9 +87,12 @@ def chat_with_failover(
                     timeout=600,
                 )
                 if r.status_code == 200:
+                    note_model_result(prov.get("id", ""), model, True)
                     return r.json()["choices"][0]["message"]["content"], model
                 err = f"chat API {model} -> {r.status_code}: {r.text[:200]}"
                 errors.append(err)
+                # mark, then keep walking the selected order
+                note_model_result(prov.get("id", ""), model, False, f"HTTP {r.status_code}: {r.text[:160]}")
                 if not _is_model_dead(r.text):
                     # auth/network errors won't be fixed by another model; bail fast
                     if r.status_code in (401, 403) and "quota" not in r.text.lower():
@@ -102,6 +105,7 @@ def chat_with_failover(
                 raise
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{model}: {exc}")
+                note_model_result(prov.get("id", ""), model, False, str(exc)[:160])
     raise RuntimeError("所有模型均失败: " + " | ".join(errors[-3:]))
 
 
@@ -192,12 +196,16 @@ def models_for_role(prov: dict[str, Any], role: str,
 
 
 def ordered_models(cfg: dict[str, Any], prov: dict[str, Any], model_key: str,
-                   switch_key: str, role: str) -> list[str]:
-    """Candidates for one call: the selected model first, then — only when this
-    role's auto-switch is on — other role-capable models from the provider."""
+                   switch_key: str, role: str, list_key: str = "") -> list[str]:
+    """Candidates for one call: the selected models in the user's order, then —
+    only when this role's auto-switch is on — other role-capable models."""
     models: list[str] = []
+    if list_key:
+        for m in cfg.get(list_key) or []:
+            if m and m not in models:
+                models.append(m)
     primary = cfg.get(model_key)
-    if primary:
+    if primary and primary not in models:
         models.append(primary)
     if cfg.get(switch_key):
         for m in models_for_role(prov, role, cfg):
@@ -208,6 +216,15 @@ def ordered_models(cfg: dict[str, Any], prov: dict[str, Any], model_key: str,
         if default:
             models.append(default)
     return models[:_MODEL_LIMIT.get(role, 8)]
+
+
+def note_model_result(provider_id: str, model: str, ok: bool, message: str = "") -> None:
+    """Best-effort health mark so the settings page can flag dead models."""
+    try:
+        from pipeline import health
+        health.note(provider_id, model, ok, message)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def audio_transcribe_with_failover(
@@ -239,7 +256,7 @@ def audio_transcribe_with_failover(
     offset = 0.0  # caller passes offset via part metadata; kept 0 and caller re-offsets
 
     errors: list[str] = []
-    for model in ordered_models(cfg, prov, "asr_model", "auto_switch_asr", "asr"):
+    for model in ordered_models(cfg, prov, "asr_model", "auto_switch_asr", "asr", "asr_models"):
         low = model.lower()
         try:
             if any(k in low for k in ("omni", "qwen-audio", "gemini", "gpt-4o-audio")):
@@ -263,10 +280,12 @@ def audio_transcribe_with_failover(
                 )
                 if r.status_code != 200:
                     errors.append(f"{model}: {r.status_code} {r.text[:120]}")
+                    note_model_result(prov.get("id", ""), model, False, f"HTTP {r.status_code}: {r.text[:120]}")
                     if not _is_model_dead(r.text):
                         raise RuntimeError(errors[-1])
                     continue
                 content = r.json()["choices"][0]["message"]["content"].strip()
+                note_model_result(prov.get("id", ""), model, True)
                 if not content:
                     return [], model
                 lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
@@ -292,6 +311,7 @@ def audio_transcribe_with_failover(
                     )
                 if r.status_code != 200:
                     errors.append(f"{model}: {r.status_code} {r.text[:120]}")
+                    note_model_result(prov.get("id", ""), model, False, f"HTTP {r.status_code}: {r.text[:120]}")
                     if not _is_model_dead(r.text):
                         raise RuntimeError(errors[-1])
                     continue
@@ -299,6 +319,7 @@ def audio_transcribe_with_failover(
                     payload = r.json()
                 except ValueError:
                     payload = None
+                note_model_result(prov.get("id", ""), model, True)
                 segs = []
                 if isinstance(payload, dict) and isinstance(payload.get("segments"), list):
                     for seg in payload["segments"]:
@@ -317,6 +338,7 @@ def audio_transcribe_with_failover(
             raise
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{model}: {exc}")
+            note_model_result(prov.get("id", ""), model, False, str(exc)[:120])
     raise RuntimeError("所有转写模型均失败: " + " | ".join(errors[-3:]))
 
 
@@ -335,7 +357,7 @@ def ocr_with_failover(
         raise RuntimeError("OCR provider 未配置")
     b64 = _base64.b64encode(img_path.read_bytes()).decode()
     errors: list[str] = []
-    for model in ordered_models(cfg, prov, "vision_model", "auto_switch_vision", "vision"):
+    for model in ordered_models(cfg, prov, "vision_model", "auto_switch_vision", "vision", "vision_models"):
         try:
             r = _httpx.post(
                 f"{base}/chat/completions",
@@ -352,14 +374,17 @@ def ocr_with_failover(
                 timeout=httpx.Timeout(connect=15, read=90, write=30, pool=15),
             )
             if r.status_code == 200:
+                note_model_result(prov.get("id", ""), model, True)
                 return r.json()["choices"][0]["message"]["content"].strip()
             errors.append(f"{model}: {r.status_code} {r.text[:120]}")
+            note_model_result(prov.get("id", ""), model, False, f"HTTP {r.status_code}: {r.text[:120]}")
             if not _is_model_dead(r.text):
                 raise RuntimeError(errors[-1])
         except RuntimeError:
             raise
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{model}: {exc}")
+            note_model_result(prov.get("id", ""), model, False, str(exc)[:120])
     raise RuntimeError("所有 OCR 模型均失败: " + " | ".join(errors[-3:]))
 
 

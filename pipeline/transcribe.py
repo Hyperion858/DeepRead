@@ -261,6 +261,7 @@ def _provider(cfg: dict[str, Any]) -> dict[str, Any]:
     low = model.lower()
     is_chat_audio = any(k in low for k in ("omni", "qwen-audio", "audio-chat", "gemini", "gpt-4o-audio"))
     return {"base_url": base, "api_key": key, "model": model,
+            "provider_id": (prov or {}).get("id", ""),
             "mode": "chat" if is_chat_audio else "api"}
 
 
@@ -277,6 +278,8 @@ def transcribe(
     api_key = prov["api_key"]
     model = prov["model"]
     mode = prov["mode"]
+    # several ASR models selected: walk them in order, marking failures
+    selected_models = [m for m in (cfg.get("asr_models") or []) if m] or [model]
     if not base_url:
         raise RuntimeError("转写 API base_url 未配置")
     seg_minutes = int(cfg.get("segment_minutes") or 5)
@@ -320,17 +323,25 @@ def transcribe(
         if should_cancel and should_cancel():
             raise PipelineCancelled()
         offset = part_starts[i] if i < len(part_starts) else i * seg_secs
-        # auto_switch_asr: retry the segment with other ASR-capable models
-        if cfg.get("auto_switch_asr"):
+        # several models selected (or auto-switch on): walk them in order and
+        # mark the ones that fail, so the settings page can flag them
+        if len(selected_models) > 1 or cfg.get("auto_switch_asr"):
             from pipeline.lesson import audio_transcribe_with_failover
             segs, _used = audio_transcribe_with_failover(cfg, parts[i])
-            # re-offset: failover helper returns segment-local times
             for s in segs:
                 s["start"] += offset
                 s["end"] += offset
             return segs
         with httpx.Client(timeout=httpx.Timeout(connect=15, read=300, write=120, pool=15)) as client:
-            return _transcribe_segment(client, base_url, api_key, model, parts[i], offset, None, mode)
+            try:
+                segs = _transcribe_segment(client, base_url, api_key, model, parts[i], offset, None, mode)
+            except Exception as exc:  # noqa: BLE001 — record the mark, then fail
+                from pipeline.lesson import note_model_result
+                note_model_result(prov.get("provider_id", ""), model, False, str(exc)[:160])
+                raise
+            from pipeline.lesson import note_model_result
+            note_model_result(prov.get("provider_id", ""), model, True)
+            return segs
 
     done = 0
     with _futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:

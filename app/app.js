@@ -1024,29 +1024,29 @@ function renderSettings() {
                 <div class="role-block">
                   <div class="role-name">📝 翻译与精讲 <i>Chat</i></div>
                   <div class="form-row"><select id="role-chat"></select></div>
-                  <div class="form-row" style="display:flex;gap:8px">
-                    <select id="cfg-chat" style="flex:1;min-width:0"></select>
-                    <button id="cfg-refresh-chat" style="flex-shrink:0" title="获取模型列表">↻</button>
+                  <div class="mp-slot" id="mp-chat"></div>
+                  <div class="probe-row">
+                    <div class="probe-actions">
+                      <button id="cfg-refresh-chat" title="获取这个 API 的模型列表">↻ 获取模型</button>
+                    </div>
                   </div>
                   <label class="switch-row role-switch">
                     <input type="checkbox" id="auto-chat">
                     <span class="switch-ui"></span>
                     <div class="switch-text">
                       <b>自动切换可用模型</b>
-                      <small>模型报错（额度用尽、下线等）时，自动换用该 API 下其他可用模型</small>
+                      <small>已选模型按顺序尝试，报错时换下一个；还会补充该 API 下其他可用模型</small>
                     </div>
                   </label>
                 </div>
                 <div class="role-block">
                   <div class="role-name">🎙 语音转写 <i>ASR</i></div>
                   <div class="form-row"><select id="role-asr"></select></div>
-                  <div class="form-row" style="display:flex;gap:8px">
-                    <select id="cfg-asr" style="flex:1;min-width:0"></select>
-                    <button id="cfg-refresh-asr" style="flex-shrink:0" title="获取模型并检测哪些支持语音转写">↻</button>
-                  </div>
+                  <div class="mp-slot" id="mp-asr"></div>
                   <div class="probe-row">
                     <div class="probe-actions">
-                      <button id="cfg-probe-asr" title="忽略缓存，重新检测哪些模型支持语音转写">🔄 重新检测</button>
+                      <button id="cfg-refresh-asr" title="获取模型并检测哪些支持语音转写">↻ 获取并检测</button>
+                      <button id="cfg-probe-asr" title="忽略缓存，重新检测一遍">🔄 重新检测</button>
                       <button id="cfg-clear-asr" class="probe-clear" title="删除这个 API 的语音转写检测缓存">清除缓存</button>
                     </div>
                     <span class="probe-hint" id="asr-probe-hint"></span>
@@ -1056,20 +1056,18 @@ function renderSettings() {
                     <span class="switch-ui"></span>
                     <div class="switch-text">
                       <b>自动切换可用模型</b>
-                      <small>转写模型报错时，自动换用该 API 下其他转写模型</small>
+                      <small>已选模型按顺序尝试，报错时换下一个；还会补充该 API 下其他转写模型</small>
                     </div>
                   </label>
                 </div>
                 <div class="role-block">
                   <div class="role-name">🖼 画面字幕 OCR <i>Vision</i></div>
                   <div class="form-row"><select id="role-vision"></select></div>
-                  <div class="form-row" style="display:flex;gap:8px">
-                    <select id="cfg-vision" style="flex:1;min-width:0"></select>
-                    <button id="cfg-refresh-vision" style="flex-shrink:0" title="获取模型并检测哪些支持图片输入">↻</button>
-                  </div>
+                  <div class="mp-slot" id="mp-vision"></div>
                   <div class="probe-row">
                     <div class="probe-actions">
-                      <button id="cfg-probe-vision" title="忽略缓存，重新检测哪些模型支持图片输入">🔄 重新检测</button>
+                      <button id="cfg-refresh-vision" title="获取模型并检测哪些支持图片输入">↻ 获取并检测</button>
+                      <button id="cfg-probe-vision" title="忽略缓存，重新检测一遍">🔄 重新检测</button>
                       <button id="cfg-clear-vision" class="probe-clear" title="删除这个 API 的 OCR 检测缓存">清除缓存</button>
                     </div>
                     <span class="probe-hint" id="vision-probe-hint"></span>
@@ -1079,7 +1077,7 @@ function renderSettings() {
                     <span class="switch-ui"></span>
                     <div class="switch-text">
                       <b>自动切换可用模型</b>
-                      <small>OCR 模型报错时，自动换用该 API 下其他视觉模型</small>
+                      <small>已选模型按顺序尝试，报错时换下一个；还会补充该 API 下其他视觉模型</small>
                     </div>
                   </label>
                 </div>
@@ -1167,10 +1165,12 @@ function renderSettings() {
     document.getElementById("role-asr").value = cfgCache.asr_provider || "";
     document.getElementById("role-chat").value = cfgCache.chat_provider || "";
     document.getElementById("role-vision").value = cfgCache.vision_provider || "";
-    // reuse saved probe results so the dropdowns are already narrowed down
+    // restore the saved multi-selection, then reuse saved probe results
+    initPickedFromConfig();
     showSavedOrProbed("asr");
     showSavedOrProbed("vision");
-    if (cfgCache.chat_model) fillChatSelect([cfgCache.chat_model], cfgCache.chat_model);
+    setBrowse("chat", []);
+    drawAllPickers();
     // per-role auto-switch toggles (default off)
     const legacySwitch = !!cfgCache.auto_model_switch;
     document.getElementById("auto-chat").checked = cfgCache.auto_switch_chat ?? legacySwitch;
@@ -1385,7 +1385,7 @@ function renderSettings() {
     if (prevChat && providers.some((p) => p.id === prevChat)) chatSel.value = prevChat;
     if (prevVis && providers.some((p) => p.id === prevVis)) visSel.value = prevVis;
     asrSel.onchange = () => showSavedOrProbed("asr");
-    chatSel.onchange = () => fillChatSelect([], "");
+    chatSel.onchange = () => { setBrowse("chat", []); };
     visSel.onchange = () => showSavedOrProbed("vision");
   }
 
@@ -1401,10 +1401,112 @@ function renderSettings() {
     return r && Array.isArray(r.models) ? r.models : null;
   }
 
-  function roleIds(role) {
-    return role === "asr"
-      ? { prov: "role-asr", model: "cfg-asr", tag: "✓ 支持转写", fill: fillAsrSelect }
-      : { prov: "role-vision", model: "cfg-vision", tag: "✓ 支持看图", fill: fillVisionSelect };
+  /* ---- multi-select model picker (ordered list; first = primary) ---- */
+  const picked = { chat: [], asr: [], vision: [] };   // working selection per role
+  let browse = { chat: [], asr: [], vision: [] };     // models known for the current provider
+
+  function healthKey(pid, model) { return `${pid || ""}||${model || ""}`; }
+
+  function healthFor(pid, model) {
+    return (cfgCache?.model_health || {})[healthKey(pid, model)] || null;
+  }
+
+  function setPicked(role, list) {
+    picked[role] = [...new Set((list || []).filter(Boolean))];
+  }
+
+  function roleTag(role) {
+    return role === "asr" ? "✓ 支持转写" : role === "vision" ? "✓ 支持看图" : "";
+  }
+
+  function drawPicker(role) {
+    const slot = document.getElementById(`mp-${role}`);
+    if (!slot) return;
+    const pid = document.getElementById(role === "chat" ? "role-chat" : role === "asr" ? "role-asr" : "role-vision")?.value || "";
+    const chosen = picked[role];
+    const avail = (browse[role] || []).filter((m) => !chosen.includes(m));
+    const rows = chosen.length ? chosen.map((m, i) => {
+      const bad = healthFor(pid, m);
+      const tag = roleTag(role);
+      return `
+        <div class="mp-item ${bad ? "bad" : ""}" data-role="${role}" data-model="${esc(m)}">
+          <span class="mp-idx">${i + 1}</span>
+          <span class="mp-name" title="${esc(m)}">${esc(m)}</span>
+          ${tag ? `<span class="mp-ok">${tag}</span>` : ""}
+          ${bad ? `<span class="mp-bad" title="${esc(bad.message || "上次调用失败")}">⚠ 报错</span>` : ""}
+          <button class="mp-up" data-up="${i}" title="上移" ${i === 0 ? "disabled" : ""}>▲</button>
+          <button class="mp-del" data-del="${i}" title="移除">✕</button>
+        </div>`;
+    }).join("") : `<div class="mp-empty">还没有选择模型 — 用下面的列表添加</div>`;
+    const badCount = chosen.filter((m) => healthFor(pid, m)).length;
+    slot.innerHTML = `
+      <div class="mp-list">${rows}</div>
+      ${badCount ? `<div class="mp-warn">⚠ 有 ${badCount} 个已选模型上次调用报错，仍按顺序尝试；连续失败会继续换下一个</div>` : ""}
+      ${avail.length ? `
+        <div class="mp-add-row">
+          <select class="mp-add-sel">
+            ${avail.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}
+          </select>
+          <button class="mp-add">＋ 添加</button>
+        </div>` : ""}
+      <div class="mp-hint">可多选，按顺序尝试：第一个是主模型，报错时自动换下一个。</div>`;
+
+    slot.querySelectorAll("[data-up]").forEach((btn) => {
+      btn.onclick = () => {
+        const i = +btn.dataset.up;
+        if (i > 0) {
+          [chosen[i - 1], chosen[i]] = [chosen[i], chosen[i - 1]];
+          drawPicker(role);
+        }
+      };
+    });
+    slot.querySelectorAll("[data-del]").forEach((btn) => {
+      btn.onclick = () => {
+        chosen.splice(+btn.dataset.del, 1);
+        drawPicker(role);
+      };
+    });
+    const addSel = slot.querySelector(".mp-add-sel");
+    const addBtn = slot.querySelector(".mp-add");
+    if (addSel && addBtn) {
+      addBtn.onclick = () => {
+        if (addSel.value && !chosen.includes(addSel.value)) chosen.push(addSel.value);
+        drawPicker(role);
+      };
+    }
+  }
+
+  function drawAllPickers() { ["chat", "asr", "vision"].forEach(drawPicker); }
+
+  // Show whatever was saved before this page load (selection is stored in config).
+  function initPickedFromConfig() {
+    setPicked("chat", (cfgCache?.chat_models || []).length ? cfgCache.chat_models : [cfgCache?.chat_model]);
+    setPicked("asr", (cfgCache?.asr_models || []).length ? cfgCache.asr_models : [cfgCache?.asr_model]);
+    setPicked("vision", (cfgCache?.vision_models || []).length ? cfgCache.vision_models : [cfgCache?.vision_model]);
+  }
+
+  // Fill the "add" list for a role: probe results, else the provider's models.
+  // Models that last failed a real call are dropped so the list stays usable.
+  function setBrowse(role, models) {
+    const provSel = role === "asr" ? "role-asr" : role === "vision" ? "role-vision" : "role-chat";
+    const pid = document.getElementById(provSel)?.value || "";
+    const healthy = (models || []).filter((m) => !healthFor(pid, m) || picked[role].includes(m));
+    browse[role] = [...new Set([...healthy, ...picked[role]])];
+    drawPicker(role);
+  }
+
+  // No probe results yet: keep the saved selection and clear the browse list.
+  function showSavedOrProbed(role) {
+    const provSel = role === "asr" ? "role-asr" : "role-vision";
+    const pid = document.getElementById(provSel)?.value;
+    const models = pid ? probeCacheFor(pid, role) : null;
+    if (models) {
+      setBrowse(role, models);
+      setProbeHint(role, `已使用上次检测结果：${models.length} 个模型（点「↻ 获取并检测」可更新）`);
+    } else {
+      setBrowse(role, []);
+      setProbeHint(role, "");
+    }
   }
 
   function setProbeHint(role, text) {
@@ -1412,22 +1514,6 @@ function renderSettings() {
     if (!el) return;
     el.textContent = text || "";
     el.style.display = text ? "block" : "none";
-  }
-
-  // No probe results yet: show just the saved model so nothing looks lost.
-  function showSavedOrProbed(role) {
-    const ids = roleIds(role);
-    const pid = document.getElementById(ids.prov).value;
-    const saved = role === "asr" ? (cfgCache?.asr_model || "") : (cfgCache?.vision_model || "");
-    const cur = document.getElementById(ids.model).value || saved;
-    const models = pid ? probeCacheFor(pid, role) : null;
-    if (models) {
-      ids.fill(models, cur, ids.tag);
-      setProbeHint(role, `已使用上次检测结果：${models.length} 个模型（点「↻ / 重新检测」可更新）`);
-    } else {
-      ids.fill(saved ? [saved] : [], cur, "");
-      setProbeHint(role, "");
-    }
   }
 
   // Poll a background probe job, streaming its progress into the run log.
@@ -1451,13 +1537,15 @@ function renderSettings() {
   }
 
   async function probeRole(role, force) {
-    const ids = roleIds(role);
-    const pid = document.getElementById(ids.prov).value || document.getElementById("role-chat").value;
+    const pid = document.getElementById(role === "asr" ? "role-asr" : "role-vision").value
+      || document.getElementById("role-chat").value;
     if (!pid) { toast("请先添加并保存 API"); return; }
     const prov = providers.find((p) => p.id === pid);
     const label = role === "asr" ? "语音转写" : "画面字幕 OCR";
-    const btnIds = role === "asr" ? ["cfg-refresh-asr", "cfg-probe-asr"] : ["cfg-refresh-vision", "cfg-probe-vision"];
+    const btnIds = role === "asr" ? ["cfg-refresh-asr", "cfg-clear-asr"] : ["cfg-refresh-vision", "cfg-clear-vision"];
     btnIds.forEach((id) => { const b = document.getElementById(id); if (b) b.disabled = true; });
+    const refreshBtn = document.getElementById(role === "asr" ? "cfg-refresh-asr" : "cfg-refresh-vision");
+    if (refreshBtn) refreshBtn.disabled = true;
     setProbeHint(role, force
       ? "正在重新检测（忽略缓存）… 进度见下方运行日志"
       : "正在获取模型并逐个检测… 进度见下方运行日志");
@@ -1474,40 +1562,21 @@ function renderSettings() {
       entry[role] = { at: r.at, models: found };
       cfgCache.probe_cache[pid] = entry;
 
-      const cur = document.getElementById(ids.model).value;
-      ids.fill(found, cur, ids.tag);
+      setBrowse(role, found);
+      // keep the selection, but say so when something picked no longer passes
+      const dropped = picked[role].filter((m) => found.length && !found.includes(m));
       setProbeHint(role, r.cached
-        ? `已使用上次检测结果：${found.length} 个模型（点「重新检测」可更新）`
-        : `✓ 检出 ${found.length} 个支持模型（检测了 ${r.checked} 个，目录共 ${r.total} 个）`);
+        ? `已使用上次检测结果：${found.length} 个模型（点「↻ 获取并检测」可更新）`
+        : `✓ 检出 ${found.length} 个支持模型（检测了 ${r.checked} 个，目录共 ${r.total} 个）`
+          + (dropped.length ? ` · 已选中有 ${dropped.length} 个未通过检测，仍会保留在列表里` : ""));
       toast(found.length ? `检出 ${found.length} 个可用模型` : "没有检测到支持该功能的模型");
     } catch (err) {
       setProbeHint(role, "✗ 检测失败: " + err.message);
       logLine("fail", "✗ " + err.message);
     } finally {
       btnIds.forEach((id) => { const b = document.getElementById(id); if (b) b.disabled = false; });
+      if (refreshBtn) refreshBtn.disabled = false;
     }
-  }
-
-  function fillModelOptions(sel, models, selected, okTag) {
-    const html = models.map((m) =>
-      `<option value="${esc(m)}">${esc(okTag ? `${okTag} · ${m}` : m)}</option>`);
-    if (selected && !models.includes(selected)) {
-      html.push(`<option value="${esc(selected)}">${esc(okTag ? `⚠ 未通过检测 · ${selected}` : selected)}</option>`);
-    }
-    sel.innerHTML = html.join("");
-    sel.value = selected || (models.length ? models[0] : "");
-  }
-
-  function fillAsrSelect(models, selected, okTag) {
-    fillModelOptions(document.getElementById("cfg-asr"), models, selected, okTag);
-  }
-
-  function fillChatSelect(models, selected) {
-    fillModelOptions(document.getElementById("cfg-chat"), models, selected, "");
-  }
-
-  function fillVisionSelect(models, selected, okTag) {
-    fillModelOptions(document.getElementById("cfg-vision"), models, selected, okTag);
   }
 
   async function fetchModels(providerId) {
@@ -1540,7 +1609,8 @@ function renderSettings() {
     toast("获取模型列表中…");
     try {
       const res = await fetchModels(pid);
-      fillChatSelect(res.models || [], "");
+      setBrowse("chat", res.models || []);
+      setProbeHint("chat", `共 ${(res.models || []).length} 个模型，从下方列表添加要用的`);
       toast(`获取到 ${(res.models || []).length} 个模型`);
     } catch (err) { toast("获取失败: " + err.message); }
   };
@@ -1564,8 +1634,8 @@ function renderSettings() {
   document.getElementById("cfg-clear-vision").onclick = () => clearProbeCache("vision");
 
   async function clearProbeCache(role) {
-    const ids = roleIds(role);
-    const pid = document.getElementById(ids.prov).value || document.getElementById("role-chat").value;
+    const pid = document.getElementById(role === "asr" ? "role-asr" : "role-vision").value
+      || document.getElementById("role-chat").value;
     if (!pid) { toast("请先添加并保存 API"); return; }
     const label = role === "asr" ? "语音转写" : "画面字幕 OCR";
     try {
@@ -1576,10 +1646,10 @@ function renderSettings() {
         delete entry[role];
         if (!entry.vision && !entry.asr) delete cfgCache.probe_cache[pid];
       }
-      // no detection results any more: show only the model that is selected
-      const cur = document.getElementById(ids.model).value;
-      ids.fill(cur ? [cur] : [], cur, "");
-      setProbeHint(role, "检测缓存已清除，下次点 ↻ 会重新检测");
+      // no detection results any more: the picker keeps the selection, the
+      // "add" list empties until the next detection run
+      setBrowse(role, []);
+      setProbeHint(role, "检测缓存已清除，下次点「↻ 获取并检测」会重新检测");
       logLine("warn", `已清除 ${label} 的检测缓存`);
       toast("缓存已清除");
     } catch (err) {
@@ -1598,9 +1668,12 @@ function renderSettings() {
           asr_provider: document.getElementById("role-asr").value,
           chat_provider: document.getElementById("role-chat").value,
           vision_provider: document.getElementById("role-vision").value,
-          asr_model: document.getElementById("cfg-asr").value,
-          chat_model: document.getElementById("cfg-chat").value,
-          vision_model: document.getElementById("cfg-vision").value,
+          chat_models: picked.chat,
+          asr_models: picked.asr,
+          vision_models: picked.vision,
+          asr_model: picked.asr[0] || "",
+          chat_model: picked.chat[0] || "",
+          vision_model: picked.vision[0] || "",
           auto_switch_chat: document.getElementById("auto-chat").checked,
           auto_switch_asr: document.getElementById("auto-asr").checked,
           auto_switch_vision: document.getElementById("auto-vision").checked,
@@ -1616,11 +1689,11 @@ function renderSettings() {
   }
 
   document.getElementById("cfg-save").onclick = async () => {
-    await saveConfigQuiet();
     if (!providers.length) { toast("请至少添加一个 API"); return; }
-    if (!document.getElementById("cfg-asr").value) { toast("请选择转写模型"); return; }
-    if (!document.getElementById("cfg-chat").value) { toast("请选择 Chat 模型"); return; }
+    if (!picked.asr.length) { toast("请选择转写模型"); return; }
+    if (!picked.chat.length) { toast("请选择 Chat 模型"); return; }
     await saveConfigQuiet();
+    drawAllPickers();
     toast("已保存");
   };
 

@@ -231,8 +231,8 @@ def extract_ocr_subtitles(
     def _ocr_one(i: int) -> tuple[int, str]:
         frame = frames[i]
         t = (i + 0.5) * interval
-        # auto_switch_vision: retry the frame with other vision-capable models
-        if cfg.get("auto_switch_vision"):
+        # several OCR models selected (or auto-switch on): walk them in order
+        if len([m for m in (cfg.get("vision_models") or []) if m]) > 1 or cfg.get("auto_switch_vision"):
             from pipeline.lesson import ocr_with_failover
             for attempt in range(3):
                 try:
@@ -250,9 +250,13 @@ def extract_ocr_subtitles(
             try:
                 with httpx.Client(timeout=httpx.Timeout(connect=15, read=90, write=30, pool=15)) as client:
                     text = ocr_frame(client, prov, frame)
+                from pipeline.lesson import note_model_result
+                note_model_result(prov.get("id", ""), prov.get("model", ""), True)
                 break
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 if attempt == 2:
+                    from pipeline.lesson import note_model_result
+                    note_model_result(prov.get("id", ""), prov.get("model", ""), False, str(exc)[:160])
                     return (i, "")
                 _time_module.sleep(1.0 * (attempt + 1))
         return (i, text)
