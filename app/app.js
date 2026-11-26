@@ -544,6 +544,12 @@ function drawCoursePage() {
 
   const vocabIndex = buildVocabIndex(lesson);
 
+  // Playback state must exist before any tab body renders: the calibration
+  // toolbar inside each tab reads activeId, and a TDZ ReferenceError there
+  // aborts drawCoursePage (no highlight, no controls wired).
+  let activeId = -1;
+  let follow = false;
+
   // ---- tabs ----
   const panels = { read: renderReadTab, cards: renderCardsTab, express: renderExpressTab, hard: renderHardTab, shadow: renderShadowTab };
   document.querySelectorAll(".tabs button").forEach((btn) => {
@@ -557,8 +563,6 @@ function drawCoursePage() {
   renderReadTab();
 
   // ---- playback sync ----
-  let activeId = -1;
-  let follow = false;
   player.addEventListener("timeupdate", () => {
     handleAbLoop(player);
     const t = player.currentTime;
@@ -822,6 +826,9 @@ function drawCoursePage() {
       };
     });
     wireCalToolbar();
+    // re-apply the highlight after a re-render, otherwise it disappears on
+    // tab switches / text edits while playback continues
+    if (activeId >= 0) highlightSentence(activeId);
   }
 
   function renderCardsTab() {
@@ -855,6 +862,7 @@ function drawCoursePage() {
     panel.querySelectorAll(".jump").forEach((a) => {
       a.onclick = (e) => { e.preventDefault(); window.__jumpTo(sentences[+a.dataset.sid].start); };
     });
+    wireCalToolbar();
   }
 
   function cardHtml(v, vi) {
@@ -1209,7 +1217,7 @@ function renderSettings() {
   document.title = "模型配置 · DeepRead";
   // state declared BEFORE the template — the template interpolates these
   let selSection = "providers";   // "providers" | "roles" | "tuning"
-  let editProvider = -1;          // -1 = providers list view; >=0 = editing that provider
+  let expandedProvider = -1;      // index of the provider row expanded inline; -1 = all collapsed
   let providers = [];
   let cfgCache = null;
   let modelCache = {};            // provider_id -> {models, asr_models}
@@ -1343,7 +1351,7 @@ function renderSettings() {
     document.getElementById("cfg-asr-workers").value = cfgCache.asr_workers || 4;
     document.getElementById("cfg-tr-workers").value = cfgCache.translate_workers || 3;
     selSection = "providers";
-    editProvider = -1;
+    expandedProvider = -1;
     drawProviders();
     drawSection();
   }
@@ -1442,80 +1450,103 @@ function renderSettings() {
     const wrap = document.getElementById("stab-providers");
     if (!wrap) return;
 
-    // ---- list view ----
-    if (editProvider < 0) {
-      wrap.innerHTML = `
-        <div class="cfg-card">
-          <div class="cfg-card-head">
-            <span class="cfg-card-title">🔌 API 提供商</span>
-            <button id="prov-add" class="primary" style="padding:6px 16px">＋ 添加</button>
-          </div>
-          ${providers.length ? providers.map((p, i) => `
-          <div class="prov-row" data-pi="${i}">
+    // ---- accordion list (all collapsed by default) ----
+    if (!providers.length) expandedProvider = -1;
+    wrap.innerHTML = `
+      <div class="cfg-card">
+        <div class="cfg-card-head">
+          <span class="cfg-card-title">🔌 API 提供商</span>
+          <button id="prov-add" class="primary" style="padding:6px 16px">＋ 添加</button>
+        </div>
+        ${providers.length ? providers.map((p, i) => `
+        <div class="prov-item ${expandedProvider === i ? "open" : ""}" data-pi="${i}">
+          <div class="prov-row prov-head" data-toggle="${i}">
+            <span class="prov-caret">▸</span>
             <div class="pnav-main">
               <span class="pnav-name">${esc(p.name || `API ${i + 1}`)}</span>
               <span class="pnav-url">${esc((p.base_url || "").replace(/^https?:\/\//, ""))}</span>
             </div>
-            <button class="prov-edit" data-edit="${i}">✎ 编辑</button>
             <button class="danger p-del" data-del="${i}" title="删除">✕</button>
-          </div>`).join("")
-          : `<div class="panel-empty" style="padding:24px">还没有 API，点击右上「＋ 添加」</div>`}
-        </div>`;
-      wrap.querySelectorAll("[data-edit]").forEach((btn) => {
-        btn.onclick = () => { editProvider = +btn.dataset.edit; drawProviders(); };
-      });
-      wrap.querySelectorAll(".p-del").forEach((btn) => {
-        btn.onclick = () => {
-          const i = +btn.dataset.del;
-          if (!confirm(`删除 API「${providers[i].name}」？`)) return;
-          providers.splice(i, 1);
-          drawProviders(); drawRoles();
-        };
-      });
-      const addBtn = wrap.querySelector("#prov-add");
-      if (addBtn) addBtn.onclick = () => {
-        providers.push({ id: "", name: "", base_url: "", api_key: "" });
-        editProvider = providers.length - 1;
+          </div>
+          <div class="prov-body" data-body="${i}">
+            <div class="form-row"><label>名称</label>
+              <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 阿里云百炼）"></div>
+            <div class="form-row"><label>Base URL</label>
+              <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
+            <div class="form-row"><label>API Key</label>
+              <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
+            <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见左侧「模型分配」）。</div>
+            <div class="form-actions">
+              <button class="primary prov-done" data-done="${i}" style="padding:8px 22px">确定</button>
+            </div>
+          </div>
+        </div>`).join("")
+        : `<div class="panel-empty" style="padding:24px">还没有 API，点击右上「＋ 添加」</div>`}
+      </div>`;
+
+    wrap.querySelectorAll("[data-toggle]").forEach((el) => {
+      el.onclick = () => {
+        const i = +el.dataset.toggle;
+        collectProviders();
+        expandedProvider = expandedProvider === i ? -1 : i;
+        drawProviders();
+      };
+    });
+    wrap.querySelectorAll(".p-del").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const i = +btn.dataset.del;
+        if (!confirm(`删除 API「${providers[i].name}」？`)) return;
+        providers.splice(i, 1);
+        if (expandedProvider === i) expandedProvider = -1;
+        else if (expandedProvider > i) expandedProvider -= 1;
         drawProviders(); drawRoles();
       };
-      drawRoles();
-      return;
-    }
-
-    // ---- edit view ----
-    const p = providers[editProvider];
-    if (!p) { editProvider = -1; drawProviders(); return; }
-    wrap.innerHTML = `
-      <div class="cfg-card">
-        <div class="cfg-card-head">
-          <button class="prov-back" id="prov-back">← 返回列表</button>
-          <span class="cfg-card-title">🔌 编辑提供商</span>
-          <span></span>
-        </div>
-        <div class="form-row"><label>名称</label>
-          <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 阿里云百炼）"></div>
-        <div class="form-row"><label>Base URL</label>
-          <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
-        <div class="form-row"><label>API Key</label>
-          <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
-        <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见左侧「模型分配」）。</div>
-        <div class="form-actions">
-          <button class="primary prov-done" style="padding:8px 22px">完成</button>
-        </div>
-      </div>`;
-    wrap.querySelector("#prov-back").onclick = () => { collectProviders(); editProvider = -1; drawProviders(); };
-    wrap.querySelector(".prov-done").onclick = () => { collectProviders(); editProvider = -1; drawProviders(); toast("已暂存，记得点「保存配置」写入服务器"); };
+    });
+    wrap.querySelectorAll("[data-done]").forEach((btn) => {
+      btn.onclick = async () => {
+        collectProviders();
+        const p = providers[expandedProvider];
+        if (p && !p.base_url) { toast("请填写 Base URL"); return; }
+        const ok = await saveProviders();
+        if (!ok) return;
+        expandedProvider = -1;
+        drawProviders();
+        toast("已保存");
+      };
+    });
+    const addBtn = wrap.querySelector("#prov-add");
+    if (addBtn) addBtn.onclick = () => {
+      collectProviders();
+      providers.push({ id: "", name: "", base_url: "", api_key: "" });
+      expandedProvider = providers.length - 1;
+      drawProviders(); drawRoles();
+      const nameInput = wrap.querySelector(`.prov-body[data-body="${expandedProvider}"] .p-name`);
+      if (nameInput) nameInput.focus();
+    };
     drawRoles();
   }
 
-  function collectProviders() {
-    const wrap = document.getElementById("stab-providers");
-    const card = wrap?.querySelector(".cfg-card");
-    if (card && editProvider >= 0 && providers[editProvider]) {
-      providers[editProvider].name = card.querySelector(".p-name").value.trim() || `API ${editProvider + 1}`;
-      providers[editProvider].base_url = card.querySelector(".p-url").value.trim();
-      providers[editProvider].api_key = card.querySelector(".p-key").value.trim();
+  // Persist just the provider list (ids for new entries come back from the server).
+  async function saveProviders() {
+    try {
+      await api("/api/config", { method: "PUT", body: JSON.stringify({ providers }) });
+      cfgCache = await api("/api/config");
+      providers = (cfgCache.providers || []).map((p) => ({ ...p }));
+      return true;
+    } catch (err) {
+      toast("保存失败: " + err.message);
+      return false;
     }
+  }
+
+  function collectProviders() {
+    if (expandedProvider < 0 || !providers[expandedProvider]) return;
+    const body = document.querySelector(`#stab-providers .prov-body[data-body="${expandedProvider}"]`);
+    if (!body) return;
+    providers[expandedProvider].name = body.querySelector(".p-name").value.trim() || `API ${expandedProvider + 1}`;
+    providers[expandedProvider].base_url = body.querySelector(".p-url").value.trim();
+    providers[expandedProvider].api_key = body.querySelector(".p-key").value.trim();
   }
 
   function drawRoles() {
@@ -1583,7 +1614,7 @@ function renderSettings() {
     el.onclick = () => {
       collectProviders();
       selSection = el.dataset.sec;
-      editProvider = -1;
+      expandedProvider = -1;
       drawProviders();
       drawSection();
     };
@@ -1946,11 +1977,21 @@ function renderLogs() {
 
 /* ---------------- helpers ---------------- */
 function findSentenceAt(t, sentences) {
+  // Sentences are contiguous (end_i === start_i+1), so a "+0.5s tail" must not
+  // win over a sentence that has already started — otherwise the highlight
+  // lags one sentence behind for the first half second of every line.
+  let last = null;
   for (let i = 0; i < sentences.length; i++) {
-    if (t >= sentences[i].start && t < sentences[i].end + 0.5) return i;
+    const s = sentences[i];
+    if (s.start > t) break;
+    last = i;
+    if (t < s.end) return i;
   }
-  if (sentences.length && t >= sentences[sentences.length - 1].end) return sentences.length - 1;
-  return null;
+  if (last === null) return null;
+  // Inside a short pause after a sentence: keep the highlight there.
+  if (t - sentences[last].end <= 0.5) return last;
+  const lastIdx = sentences.length - 1;
+  return lastIdx >= 0 && t >= sentences[lastIdx].end ? lastIdx : null;
 }
 
 function shuffle(arr) {
