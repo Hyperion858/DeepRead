@@ -468,8 +468,12 @@ def _probe_wav() -> bytes:
     return buf.getvalue()
 
 
-async def _probe_role(client, base, headers, models, role):
-    """Return the subset of `models` that accepted a sample for `role`."""
+async def _probe_role(client, base, headers, models, role, on_result=None):
+    """Return the subset of `models` that accepted a sample for `role`.
+
+    `on_result(role, model, ok, status)` fires as each model finishes so callers
+    can stream progress (status is an HTTP code or the string "ERR").
+    """
     import asyncio
     import base64
 
@@ -490,9 +494,9 @@ async def _probe_role(client, base, headers, models, role):
                             {"type": "image_url", "image_url": {"url": img}},
                         ]}],
                     })
-                    return model if resp.status_code == 200 else None
+                    return model, resp.status_code == 200, resp.status_code
                 except Exception:  # noqa: BLE001 — one bad model must not abort the scan
-                    return None
+                    return model, False, "ERR"
     else:
         wav = _probe_wav()
         wav_b64 = base64.b64encode(wav).decode()
@@ -516,73 +520,163 @@ async def _probe_role(client, base, headers, models, role):
                             files={"file": ("probe.wav", wav, "audio/wav")},
                             data={"model": model},
                         )
-                    return model if resp.status_code == 200 else None
+                    return model, resp.status_code == 200, resp.status_code
                 except Exception:  # noqa: BLE001
-                    return None
+                    return model, False, "ERR"
 
-    results = await asyncio.gather(*(probe(m) for m in models))
-    return [m for m in results if m]
+    tasks = [asyncio.create_task(probe(m)) for m in models]
+    ok_models: set[str] = set()
+    for fut in asyncio.as_completed(tasks):
+        model, ok, status = await fut
+        if ok:
+            ok_models.add(model)
+        if on_result:
+            on_result(role, model, ok, status)
+    return [m for m in models if m in ok_models]
 
 
-@app.post("/api/config/probe")
-async def probe_capabilities(request: Request):
-    """Probe which models of a provider can serve a role (vision / asr).
-
-    Results are cached in config.probe_cache (7 days, invalidated when the
-    provider's base_url changes) so later calls and page loads don't resend
-    samples. Body: {provider_id?, roles?: ["vision", "asr"], force?}.
-    """
-    import time
-
-    import httpx
-
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    cfg = load_config()
+def _probe_target(cfg: dict[str, Any], body: dict[str, Any]):
     pid = body.get("provider_id") or cfg.get("vision_provider") or cfg.get("chat_provider")
     prov = next((p for p in cfg.get("providers", []) if p.get("id") == pid), None)
     if prov is None:
         raise HTTPException(400, "provider 不存在")
+    roles = [r for r in (body.get("roles") or ["vision"]) if r in ("vision", "asr")] or ["vision"]
+    return prov, roles, bool(body.get("force"))
+
+
+async def _run_probe(cfg, prov, roles, force, on_event=None, on_result=None):
+    """Probe the requested roles and persist the results in cfg.probe_cache."""
+    import time
+
+    import httpx
+
+    pid = prov.get("id") or ""
     base = (prov.get("base_url") or "").rstrip("/")
     headers = {"Authorization": f"Bearer {prov.get('api_key', '')}"}
-    roles = [r for r in (body.get("roles") or ["vision"]) if r in ("vision", "asr")] or ["vision"]
-    force = bool(body.get("force"))
-
     probe_cache = {k: dict(v) for k, v in (cfg.get("probe_cache") or {}).items()}
     entry = dict(probe_cache.get(pid) or {})
     if entry.get("base_url") != base:
         entry = {"base_url": base}   # provider moved — old results are stale
     out: dict[str, Any] = {}
 
+    def emit(level: str, text: str) -> None:
+        if on_event:
+            on_event(level, text)
+
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             r = await client.get(f"{base}/models", headers=headers)
         except httpx.HTTPError as exc:
-            raise HTTPException(502, f"连接失败: {exc}")
+            raise RuntimeError(f"连接失败: {exc}")
         if r.status_code != 200:
-            raise HTTPException(502, f"获取模型列表失败 HTTP {r.status_code}")
+            raise RuntimeError(f"获取模型列表失败 HTTP {r.status_code}")
         ids = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
+        emit("info", f"获取到 {len(ids)} 个模型")
 
         for role in roles:
+            label = "语音转写" if role == "asr" else "画面字幕 OCR"
             cached = entry.get(role) or {}
             if (cached.get("models") is not None and not force
                     and time.time() - float(cached.get("at") or 0) < _PROBE_TTL):
+                emit("ok", f"{label}：使用 7 天内的检测缓存（{len(cached['models'])} 个）")
                 out[role] = {"models": cached["models"], "checked": cached.get("checked", 0),
                              "total": len(ids), "cached": True, "at": cached.get("at")}
                 continue
             skip = _PROBE_SKIP_ASR if role == "asr" else _PROBE_SKIP
             candidates = [m for m in ids if not any(k in m.lower() for k in skip)]
-            found = await _probe_role(client, base, headers, candidates, role)
+            emit("info", f"{label}：开始逐个检测 {len(candidates)} 个模型…")
+            found = await _probe_role(client, base, headers, candidates, role, on_result=on_result)
             entry[role] = {"at": time.time(), "models": found, "checked": len(candidates)}
             out[role] = {"models": found, "checked": len(candidates), "total": len(ids),
                          "cached": False, "at": entry[role]["at"]}
+            emit("ok" if found else "warn", f"{label}：检出 {len(found)} 个支持模型")
 
     probe_cache[pid] = entry
     cfg["probe_cache"] = probe_cache
     save_config(cfg)
     return out
+
+
+@app.post("/api/config/probe")
+async def probe_capabilities(request: Request):
+    """Synchronous capability probe (scripts/tests). UI uses probe_start/status."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    cfg = load_config()
+    prov, roles, force = _probe_target(cfg, body)
+    try:
+        return await _run_probe(cfg, prov, roles, force)
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc))
+
+
+# background probe jobs so the UI can print progress while the scan runs
+_PROBE_JOBS: dict[str, dict[str, Any]] = {}
+_PROBE_JOB_TTL = 900
+
+
+def _job_event(job: dict[str, Any], level: str, text: str) -> None:
+    import time
+
+    job["seq"] += 1
+    job["events"].append({"seq": job["seq"], "level": level, "text": text, "at": time.time()})
+    if len(job["events"]) > 1500:
+        del job["events"][:500]
+
+
+@app.post("/api/config/probe_start")
+async def probe_start(request: Request):
+    """Start a probe job; poll /api/config/probe_status for live progress."""
+    import asyncio
+    import time
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    cfg = load_config()
+    prov, roles, force = _probe_target(cfg, body)
+
+    now = time.time()
+    for jid in [k for k, v in _PROBE_JOBS.items() if now - v.get("created", 0) > _PROBE_JOB_TTL]:
+        _PROBE_JOBS.pop(jid, None)
+    job_id = uuid.uuid4().hex[:12]
+    job: dict[str, Any] = {"state": "running", "events": [], "seq": 0,
+                           "created": now, "result": None, "error": ""}
+    _PROBE_JOBS[job_id] = job
+
+    def on_event(level: str, text: str) -> None:
+        _job_event(job, level, text)
+
+    def on_result(role: str, model: str, ok: bool, status) -> None:
+        mark = "✓" if ok else "✗"
+        why = "" if ok else (f" · HTTP {status}" if isinstance(status, int) else " · 连接失败")
+        _job_event(job, "ok" if ok else "fail", f"{mark} {model}{why}")
+
+    async def runner() -> None:
+        try:
+            job["result"] = await _run_probe(cfg, prov, roles, force,
+                                             on_event=on_event, on_result=on_result)
+            job["state"] = "done"
+        except Exception as exc:  # noqa: BLE001
+            job["error"] = str(exc)
+            _job_event(job, "fail", f"检测失败: {exc}")
+            job["state"] = "error"
+
+    job["task"] = asyncio.create_task(runner())   # keep a ref so it isn't GC'd
+    return {"job_id": job_id}
+
+
+@app.get("/api/config/probe_status")
+async def probe_status(job_id: str = "", since: int = 0):
+    job = _PROBE_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "任务不存在或已过期")
+    return {"state": job["state"], "seq": job["seq"],
+            "events": [e for e in job["events"] if e["seq"] > since],
+            "result": job["result"], "error": job.get("error", "")}
 
 
 @app.post("/api/config/test")

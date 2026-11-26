@@ -1109,7 +1109,57 @@ function renderSettings() {
           <div class="test-result" id="test-result"></div>
         </section>
       </div>
+      <section class="run-log">
+        <div class="run-log-head">
+          <span>运行日志</span>
+          <button id="run-log-clear" title="清空日志">清空</button>
+        </div>
+        <div class="run-log-body" id="run-log">
+          <div class="run-log-empty">测试连接 / 获取并检测模型时，这里会打印过程日志。</div>
+        </div>
+      </section>
     </div>`);
+
+  /* ---- run log (bottom panel) ---- */
+  function logLine(level, text) {
+    const el = document.getElementById("run-log");
+    if (!el) return;
+    const empty = el.querySelector(".run-log-empty");
+    if (empty) empty.remove();
+    const row = document.createElement("div");
+    row.className = "run-log-row " + (level || "info");
+    const t = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    row.textContent = `[${t}] ${text}`;
+    el.appendChild(row);
+    while (el.children.length > 400) el.removeChild(el.firstChild);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  const runLogClearBtn = document.getElementById("run-log-clear");
+  if (runLogClearBtn) {
+    runLogClearBtn.onclick = () => {
+      document.getElementById("run-log").innerHTML = `<div class="run-log-empty">日志已清空</div>`;
+    };
+  }
+
+  /* ---- last connection-test result per provider (keyed by base url) ---- */
+  function loadProvStatuses() {
+    try { return JSON.parse(localStorage.getItem("dr.provStatus") || "{}"); } catch { return {}; }
+  }
+  let provStatuses = loadProvStatuses();
+
+  function provStatus(p) {
+    const st = provStatuses[normBase(p.base_url)];
+    if (!st) return { cls: "", text: "未测试" };
+    return st.ok
+      ? { cls: "ok", text: `✓ 已连通 · ${st.count} 个模型` }
+      : { cls: "fail", text: "✗ 连接失败" };
+  }
+
+  function setProvStatus(p, val) {
+    provStatuses[normBase(p.base_url)] = { ...val, at: Date.now() };
+    try { localStorage.setItem("dr.provStatus", JSON.stringify(provStatuses)); } catch {}
+  }
 
   async function init() {
     cfgCache = await api("/api/config");
@@ -1154,39 +1204,59 @@ function renderSettings() {
     const wrap = document.getElementById("stab-providers");
     if (!wrap) return;
 
-    // ---- accordion list (all collapsed by default) ----
+    // ---- provider cards (collapsed by default; click to expand) ----
     if (!providers.length) expandedProvider = -1;
+    const rolesFor = (i) => {
+      const pid = providers[i].id;
+      const assigned = [];
+      if (pid) {
+        if (document.getElementById("role-chat")?.value === pid) assigned.push("精讲");
+        if (document.getElementById("role-asr")?.value === pid) assigned.push("转写");
+        if (document.getElementById("role-vision")?.value === pid) assigned.push("OCR");
+      }
+      return assigned;
+    };
     wrap.innerHTML = `
-      <div class="cfg-card">
+      <div class="cfg-card" style="margin-bottom:0">
         <div class="cfg-card-head">
           <span class="cfg-card-title">🔌 API 提供商</span>
           <button id="prov-add" class="primary" style="padding:6px 16px">＋ 添加</button>
         </div>
-        ${providers.length ? providers.map((p, i) => `
-        <div class="prov-item ${expandedProvider === i ? "open" : ""}" data-pi="${i}">
-          <div class="prov-row prov-head" data-toggle="${i}">
-            <span class="prov-caret">▸</span>
-            <div class="pnav-main">
-              <span class="pnav-name">${esc(p.name || `API ${i + 1}`)}</span>
-              <span class="pnav-url">${esc((p.base_url || "").replace(/^https?:\/\//, ""))}</span>
+        ${providers.length ? providers.map((p, i) => {
+          const st = provStatus(p);
+          const roles = rolesFor(i);
+          const open = expandedProvider === i;
+          return `
+          <div class="prov-card ${open ? "open" : ""}" data-pi="${i}">
+            <div class="prov-card-head" data-toggle="${i}">
+              <span class="prov-dot ${st.cls}" title="${st.cls === "ok" ? "上次测试通过" : st.cls === "fail" ? "上次测试失败" : "未测试"}"></span>
+              <div class="prov-card-main">
+                <span class="prov-card-name">${esc(p.name || `API ${i + 1}`)}</span>
+                <span class="prov-card-url">${esc((p.base_url || "").replace(/^https?:\/\//, ""))}</span>
+                <span class="prov-card-roles">用于：${roles.length ? roles.join(" · ") : "未分配"}</span>
+              </div>
+              <div class="prov-card-side">
+                <span class="prov-status ${st.cls}">${st.text}</span>
+                <button class="prov-test" data-test="${i}" title="测试这个 API 的连接">测试</button>
+                <button data-edit="${i}" title="编辑这个 API">编辑</button>
+                <button class="danger p-del" data-del="${i}" title="删除">✕</button>
+              </div>
             </div>
-            <button class="danger p-del" data-del="${i}" title="删除">✕</button>
-          </div>
-          <div class="prov-body" data-body="${i}">
-            <div class="form-row"><label>名称</label>
-              <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 阿里云百炼）"></div>
-            <div class="form-row"><label>Base URL</label>
-              <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
-            <div class="form-row"><label>API Key</label>
-              <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
-            <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见左侧「模型分配」）。</div>
-            <div class="form-actions">
-              <button class="primary prov-done" data-done="${i}" style="padding:8px 22px">确定</button>
-              <button class="prov-test" data-test="${i}">测试连接</button>
-              <span class="prov-test-result" data-testres="${i}"></span>
+            <div class="prov-body" data-body="${i}">
+              <div class="form-row"><label>名称</label>
+                <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 阿里云百炼）"></div>
+              <div class="form-row"><label>Base URL</label>
+                <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
+              <div class="form-row"><label>API Key</label>
+                <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
+              <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见左侧「模型分配」）。</div>
+              <div class="form-actions">
+                <button class="primary prov-done" data-done="${i}" style="padding:8px 22px">确定</button>
+                <button class="prov-test" data-test="${i}">测试连接</button>
+              </div>
             </div>
-          </div>
-        </div>`).join("")
+          </div>`;
+        }).join("")
         : `<div class="panel-empty" style="padding:24px">还没有 API，点击右上「＋ 添加」</div>`}
       </div>`;
 
@@ -1196,6 +1266,16 @@ function renderSettings() {
         collectProviders();
         expandedProvider = expandedProvider === i ? -1 : i;
         drawProviders();
+      };
+    });
+    wrap.querySelectorAll("[data-edit]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        collectProviders();
+        expandedProvider = +btn.dataset.edit;
+        drawProviders();
+        const nameInput = wrap.querySelector(`.prov-body[data-body="${expandedProvider}"] .p-name`);
+        if (nameInput) nameInput.focus();
       };
     });
     wrap.querySelectorAll(".p-del").forEach((btn) => {
@@ -1218,30 +1298,43 @@ function renderSettings() {
         if (!ok) return;
         expandedProvider = -1;
         drawProviders();
+        logLine("ok", "✓ 已保存 API 配置");
         toast("已保存");
       };
     });
     // per-provider connectivity check (uses the values currently in the fields)
     wrap.querySelectorAll("[data-test]").forEach((btn) => {
-      btn.onclick = async () => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
         collectProviders();
         const i = +btn.dataset.test;
         const p = providers[i];
-        const out = wrap.querySelector(`[data-testres="${i}"]`);
         if (!p || !p.base_url) { toast("请填写 Base URL"); return; }
+        const label = p.name || `API ${i + 1}`;
+        const card = btn.closest(".prov-card");
+        const statusEl = card ? card.querySelector(".prov-status") : null;
+        const dotEl = card ? card.querySelector(".prov-dot") : null;
         btn.disabled = true;
-        if (out) { out.textContent = "测试中…"; out.className = "prov-test-result"; }
+        if (statusEl) { statusEl.textContent = "测试中…"; statusEl.className = "prov-status"; }
+        logLine("info", `测试连接「${label}」 ${p.base_url}`);
         try {
           const res = await api("/api/config/test_provider", {
             method: "POST",
             body: JSON.stringify({ provider_id: p.id, base_url: p.base_url, api_key: p.api_key }),
           });
-          if (out) {
-            out.textContent = res.ok ? `✓ 连接成功 · ${res.count} 个模型` : `✗ ${res.detail || "连接失败"}`;
-            out.className = "prov-test-result " + (res.ok ? "ok" : "fail");
+          const ok = !!res.ok;
+          setProvStatus(p, { ok, count: res.count || 0 });
+          if (statusEl) {
+            statusEl.textContent = ok ? `✓ 已连通 · ${res.count} 个模型` : "✗ 连接失败";
+            statusEl.className = "prov-status " + (ok ? "ok" : "fail");
           }
+          if (dotEl) dotEl.className = "prov-dot " + (ok ? "ok" : "fail");
+          logLine(ok ? "ok" : "fail", ok ? `✓ 连接成功 · ${res.count} 个模型` : `✗ ${res.detail || "连接失败"}`);
         } catch (err) {
-          if (out) { out.textContent = "✗ " + err.message; out.className = "prov-test-result fail"; }
+          setProvStatus(p, { ok: false, count: 0 });
+          if (statusEl) { statusEl.textContent = "✗ 连接失败"; statusEl.className = "prov-status fail"; }
+          if (dotEl) dotEl.className = "prov-dot fail";
+          logLine("fail", "✗ " + err.message);
         } finally {
           btn.disabled = false;
         }
@@ -1341,27 +1434,46 @@ function renderSettings() {
     }
   }
 
+  // Poll a background probe job, streaming its progress into the run log.
+  async function runProbeJob(role, pid, force) {
+    const { job_id } = await api("/api/config/probe_start", {
+      method: "POST",
+      body: JSON.stringify({ provider_id: pid, roles: [role], force }),
+    });
+    let since = 0;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 600));
+      if (!document.getElementById("run-log")) throw new Error("页面已离开");
+      const st = await api(`/api/config/probe_status?job_id=${encodeURIComponent(job_id)}&since=${since}`);
+      for (const ev of st.events || []) {
+        logLine(ev.level, ev.text);
+        since = Math.max(since, ev.seq);
+      }
+      if (st.state === "done") return st.result || {};
+      if (st.state === "error") throw new Error(st.error || "检测失败");
+    }
+  }
+
   async function probeRole(role, force) {
     const ids = roleIds(role);
     const pid = document.getElementById(ids.prov).value || document.getElementById("role-chat").value;
     if (!pid) { toast("请先添加并保存 API"); return; }
+    const prov = providers.find((p) => p.id === pid);
+    const label = role === "asr" ? "语音转写" : "画面字幕 OCR";
     const btnIds = role === "asr" ? ["cfg-refresh-asr", "cfg-probe-asr"] : ["cfg-refresh-vision", "cfg-probe-vision"];
     btnIds.forEach((id) => { const b = document.getElementById(id); if (b) b.disabled = true; });
     setProbeHint(role, force
-      ? "正在重新检测（忽略缓存）…"
-      : "正在获取模型并逐个检测…（模型多时约需一两分钟）");
+      ? "正在重新检测（忽略缓存）… 进度见下方运行日志"
+      : "正在获取模型并逐个检测… 进度见下方运行日志");
+    logLine("info", `—— ${force ? "重新检测" : "检测"} ${label} @ ${prov ? prov.name || pid : pid} ——`);
     try {
-      const res = await api("/api/config/probe", {
-        method: "POST",
-        body: JSON.stringify({ provider_id: pid, roles: [role], force }),
-      });
-      const r = res[role] || {};
+      const result = await runProbeJob(role, pid, force);
+      const r = result[role] || {};
       const found = r.models || [];
       // keep the local cache in sync so switching providers/tabs reuses it
       cfgCache = cfgCache || {};
       cfgCache.probe_cache = cfgCache.probe_cache || {};
       const entry = cfgCache.probe_cache[pid] || {};
-      const prov = providers.find((p) => p.id === pid);
       entry.base_url = normBase(prov ? prov.base_url : "");
       entry[role] = { at: r.at, models: found };
       cfgCache.probe_cache[pid] = entry;
@@ -1374,6 +1486,7 @@ function renderSettings() {
       toast(found.length ? `检出 ${found.length} 个可用模型` : "没有检测到支持该功能的模型");
     } catch (err) {
       setProbeHint(role, "✗ 检测失败: " + err.message);
+      logLine("fail", "✗ " + err.message);
     } finally {
       btnIds.forEach((id) => { const b = document.getElementById(id); if (b) b.disabled = false; });
     }
@@ -1490,6 +1603,7 @@ function renderSettings() {
   document.getElementById("cfg-test").onclick = async () => {
     const el = document.getElementById("test-result");
     el.className = "test-result"; el.textContent = "测试中…";
+    logLine("info", "—— 测试连接（当前保存的配置）——");
     await saveConfigQuiet();
     try {
       const res = await api("/api/config/test", { method: "POST", body: JSON.stringify({}) });
@@ -1498,9 +1612,13 @@ function renderSettings() {
       parts.push(res.transcribe ? "✓ 转写端点可达" : "✗ 转写端点不可用");
       el.className = "test-result " + (res.chat || res.transcribe ? "ok" : "fail");
       el.textContent = parts.join("　") + (res.detail ? ` · ${res.detail}` : "");
+      logLine(res.chat ? "ok" : "fail", `Chat：${res.chat ? "可用" : "不可用"}`);
+      logLine(res.transcribe ? "ok" : "fail", `转写端点：${res.transcribe ? "可达" : "不可用"}`);
+      if (res.detail) logLine("warn", res.detail);
     } catch (err) {
       el.className = "test-result fail";
       el.textContent = "连接失败: " + err.message;
+      logLine("fail", "✗ 连接失败: " + err.message);
     }
   };
 
