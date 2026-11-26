@@ -20,9 +20,10 @@ def create_backup(data_dir: Path, backups_dir: Path, note: str = "",
                   include_media: bool = True) -> Path:
     """Zip config + course data (+ optionally media files) into backups_dir."""
     backups_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     out = backups_dir / f"deepread-backup-{ts}.zip"
     media_manifest = []
+    archived_media: set[str] = set()  # dedupe: same media file only archived once
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
         config = data_dir / "config.json"
         if config.exists():
@@ -60,26 +61,32 @@ def create_backup(data_dir: Path, backups_dir: Path, note: str = "",
                         })
                         if include_media and mp.exists():
                             zf.write(mp, f"media/{mp.name}")
+                            archived_media.add(mp.name)
                     except Exception:
                         pass
-        # legacy media dir (pre-material uploads)
+        # legacy media dir — only files NOT already archived via a material
+        # (migrated materials keep media_path pointing into data/media)
         media_dir = data_dir / "media"
         if media_dir.exists():
             for mp in sorted(media_dir.iterdir()):
-                if mp.suffix.lower() in MEDIA_EXTS:
-                    media_manifest.append({
-                        "kind": "legacy_media",
-                        "id": mp.stem,
-                        "title": "",
-                        "media_file": mp.name,
-                        "media_size": mp.stat().st_size,
-                        "in_archive": bool(include_media),
-                    })
-                    if include_media:
-                        zf.write(mp, f"media/{mp.name}")
+                if mp.suffix.lower() not in MEDIA_EXTS:
+                    continue
+                dup = mp.name in archived_media
+                media_manifest.append({
+                    "kind": "legacy_media",
+                    "id": mp.stem,
+                    "title": "",
+                    "media_file": mp.name,
+                    "media_size": mp.stat().st_size,
+                    "in_archive": bool(include_media) and not dup,
+                    "duplicate_of_material": dup,
+                })
+                if include_media and not dup:
+                    zf.write(mp, f"media/{mp.name}")
+                    archived_media.add(mp.name)
         zf.writestr("media_manifest.json", json.dumps(media_manifest, ensure_ascii=False, indent=2))
         info = {
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now().astimezone().isoformat(),
             "note": note,
             "include_media": bool(include_media),
             "app": "DeepRead",
