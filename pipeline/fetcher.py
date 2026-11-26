@@ -88,9 +88,9 @@ def douyin_fetch(url: str, media_dir: Path, cid: str,
 
     media_dir.mkdir(parents=True, exist_ok=True)
     out = media_dir / f"{cid}.mp4"
-    req = urllib.request.Request(
-        play_url, headers={"user-agent": _UA, "referer": "https://www.douyin.com/"})
-    with _http(req, timeout=600) as resp, open(out, "wb") as fh:
+    with _http(play_url, headers={"user-agent": _UA,
+                                  "referer": "https://www.douyin.com/"},
+               timeout=600) as resp, open(out, "wb") as fh:
         total = int(resp.headers.get("Content-Length") or 0)
         got = 0
         while True:
