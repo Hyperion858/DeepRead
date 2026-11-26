@@ -1228,11 +1228,11 @@ function renderSettings() {
           <div class="prov-card-hit" data-toggle="${i}">
             <div class="prov-card-head">
               <span class="prov-dot ${st.cls}" title="${st.cls === "ok" ? "上次测试通过" : st.cls === "fail" ? "上次测试失败" : "未测试"}"></span>
-              <span class="prov-card-name">${esc(p.name || `API ${i + 1}`)}</span>
+              <span class="prov-card-name" title="${esc(p.name || `API ${i + 1}`)}">${esc(p.name || `API ${i + 1}`)}</span>
+              <span class="prov-status ${st.cls}" title="${st.text}">${st.text}</span>
             </div>
-            <div class="prov-card-url">${esc((p.base_url || "").replace(/^https?:\/\//, ""))}</div>
-            <div class="prov-status ${st.cls}">${st.text}</div>
-            <div class="prov-card-roles">用于：${roles.length ? roles.join(" · ") : "未分配"}</div>
+            <div class="prov-card-url" title="${esc(p.base_url)}">${esc((p.base_url || "").replace(/^https?:\/\//, ""))}</div>
+            <div class="prov-card-roles" title="${roles.length ? roles.join(" · ") : "未分配"}">用于：${roles.length ? roles.join(" · ") : "未分配"}</div>
           </div>
           <div class="prov-card-actions">
             <button class="prov-test" data-test="${i}" title="测试这个 API 的连接">测试</button>
