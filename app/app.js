@@ -217,10 +217,9 @@ async function refreshMaterials() {
         return `
       <tr data-mid="${esc(m.id)}">
         <td class="mat-title-cell">
-          <span class="mat-title">${esc(m.title)}</span>
+          ${m.course_id ? `<a class="badge ready" style="text-decoration:none;vertical-align:middle;margin-right:8px" href="#/course/${esc(m.course_id)}">已有课程 →</a>` : ""}<span class="mat-title">${esc(m.title)}</span>
           <button class="mat-rename" data-rename="${esc(m.id)}" title="重命名">✎ 改名</button>
           ${m.media_exists ? `<a class="mat-play" data-play="${esc(m.id)}" href="#" title="播放">▶ 播放</a>` : ""}
-          ${m.course_id ? `<a class="badge ready" style="text-decoration:none" href="#/course/${esc(m.course_id)}">已有课程 →</a>` : ""}
         </td>
         <td>${m.kind === "audio" ? "音频" : "视频"}</td>
         <td>${m.size_mb} MB</td>
