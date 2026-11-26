@@ -1346,6 +1346,12 @@ def generate(cid: str, request: Request = None):
     if not channels:
         channels = {"embedded", "ocr", "asr"}
     if cid not in JOBS:
+        # a fresh generate is explicit new intent: clear a stale cancelled /
+        # interrupted status (incl. the zombie left by a container restart)
+        # so the disk-level kill switch in set_stage doesn't kill this run
+        status["stage"] = "uploaded"
+        status["detail"] = "准备生成…"
+        write_json(cdir / "status.json", status)
         JOBS[cid] = JobState()
         threading.Thread(target=run_pipeline, args=(cid,), kwargs={"channels": channels}, daemon=True).start()
         log_event("action", f"重新生成课程（通道: {', '.join(sorted(channels))}）", course_id=cid)
@@ -1531,6 +1537,31 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=APP_DIR), name="static")
+
+
+def _mark_interrupted_courses() -> None:
+    """On startup, flag courses stuck in a running stage as cancelled.
+
+    The pipeline runs in a daemon thread, so a container restart orphans it
+    and leaves a frozen "transcribing…" status that both blocks /generate
+    (409) and lies to the UI. After this sweep, such a course can be
+    regenerated like any cancelled one.
+    """
+    running = {"transcribing", "subtitles", "ocr", "channels", "aligning", "generating"}
+    courses_root = DATA_DIR / "courses"
+    if not courses_root.exists():
+        return
+    for cdir in courses_root.iterdir():
+        status_path = cdir / "status.json"
+        if not status_path.exists():
+            continue
+        status = read_json(status_path, {}) or {}
+        if status.get("stage") in running:
+            set_stage(cdir.name, "cancelled", "服务重启，生成中断，请重新生成")
+            log_event("pipeline", "检测到重启前的孤儿任务，已标记中断", course_id=cdir.name, level="warn")
+
+
+_mark_interrupted_courses()
 
 # start the daily auto-backup scheduler
 threading.Thread(target=_backup_scheduler, daemon=True).start()
