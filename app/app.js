@@ -28,6 +28,15 @@ function fmtDuration(sec) {
   return h ? `${h}小时${m}分` : `${m}分${sec % 60}秒`;
 }
 
+// server stores UTC ISO timestamps; display as China Standard Time
+function fmtCNTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function toast(msg, ms = 2600) {
   document.querySelectorAll(".toast").forEach((t) => t.remove());
   const el = document.createElement("div");
@@ -201,7 +210,7 @@ async function refreshMaterials() {
       return;
     }
     wrap.innerHTML = `<div class="table-scroll"><table class="bk-table">
-      <tr><th>标题</th><th>类型</th><th>大小</th><th>来源</th><th>状态</th><th style="width:220px"></th></tr>` +
+      <tr><th>标题</th><th>类型</th><th>大小</th><th>添加时间</th><th>来源</th><th>状态</th><th style="width:220px"></th></tr>` +
       list.map((m) => {
         const statusLabel = { ready: "就绪", downloading: "下载中", error: "下载失败" }[m.status || "ready"] || "就绪";
         const downloading = m.status === "downloading";
@@ -214,6 +223,7 @@ async function refreshMaterials() {
         </td>
         <td>${m.kind === "audio" ? "音频" : "视频"}</td>
         <td>${m.size_mb} MB</td>
+        <td>${fmtCNTime(m.created_at)}</td>
         <td>${m.source_url ? `<a href="${esc(m.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">链接</a>` : "上传"}</td>
         <td>${downloading ? '<span class="spinner"></span> ' : ""}<span class="${m.status === "error" ? "flag-uncertain" : ""}">${statusLabel}${m.error ? " · " + esc(m.error.slice(0, 40)) : ""}</span></td>
         <td>
@@ -341,6 +351,7 @@ async function refreshCourses() {
           <span class="badge ${badgeCls}">${stageLabel}</span>
           <span>${fmtDuration(c.duration)}</span>
           <span>${c.sentence_count ? c.sentence_count + " 句" : ""}</span>
+          <span title="添加时间">${fmtCNTime(c.created_at)}</span>
         </div>
         ${working ? `<div class="progressbar"><div style="width:${Math.round((c.progress || 0) * 100)}%"></div></div>
                      <div class="cc-detail">${esc(c.detail || "")}</div>` : ""}
