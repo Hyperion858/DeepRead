@@ -410,7 +410,92 @@ async def list_models(provider_id: str = ""):
         raise HTTPException(502, f"连接失败: {exc}")
     asr = [m for m in ids if any(k in m.lower() for k in
            ("whisper", "transcri", "asr", "audio", "speech", "sensevoice", "paraformer", "funasr", "vox"))]
-    return {"models": ids, "asr_models": asr or ids}
+    from pipeline.lesson import filter_models_for_role
+    return {"models": ids, "asr_models": asr or ids,
+            "vision_models": filter_models_for_role(ids, "vision")}
+
+
+_PROBE_SKIP = ("embed", "tts", "whisper", "transcri", "rerank", "moderation",
+               "dall-e", "stable-diffusion", "sdxl", "flux", "image", "video", "audio", "speech")
+
+
+def _probe_image_uri() -> str:
+    """A small solid-colour PNG, as a data URI, for probing image support."""
+    import base64
+    import struct
+    import zlib
+
+    w = h = 32
+    raw = b"".join(b"\x00" + bytes((220, 40, 40)) * w for _ in range(h))
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(raw))
+    png += chunk(b"IEND", b"")
+    return "data:image/png;base64," + base64.b64encode(png).decode()
+
+
+@app.post("/api/config/probe_vision")
+async def probe_vision(request: Request):
+    """Ask every model of a provider to look at a tiny image.
+
+    Many providers advertise no modality metadata, so the only reliable way to
+    tell multimodal models apart is to send one image. Returns the models that
+    accepted it (HTTP 200). Body: {provider_id?}.
+    """
+    import asyncio
+    import httpx
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    cfg = load_config()
+    pid = body.get("provider_id") or cfg.get("vision_provider") or cfg.get("chat_provider")
+    prov = next((p for p in cfg.get("providers", []) if p.get("id") == pid), None)
+    if prov is None:
+        raise HTTPException(400, "provider 不存在")
+    base = (prov.get("base_url") or "").rstrip("/")
+    headers = {"Authorization": f"Bearer {prov.get('api_key', '')}"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(f"{base}/models", headers=headers)
+        if r.status_code != 200:
+            raise HTTPException(502, f"获取模型列表失败 HTTP {r.status_code}")
+        ids = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"连接失败: {exc}")
+
+    candidates = [m for m in ids if not any(k in m.lower() for k in _PROBE_SKIP)]
+    if not candidates:
+        return {"vision_models": [], "checked": 0, "total": len(ids)}
+    img = _probe_image_uri()
+    sem = asyncio.Semaphore(8)
+
+    async with httpx.AsyncClient(timeout=25) as client:
+        async def probe(model: str) -> str | None:
+            payload = {
+                "model": model, "max_tokens": 4, "temperature": 0,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "这张图片是什么颜色？只回答一个词。"},
+                    {"type": "image_url", "image_url": {"url": img}},
+                ]}],
+            }
+            async with sem:
+                try:
+                    resp = await client.post(f"{base}/chat/completions", headers=headers, json=payload)
+                    return model if resp.status_code == 200 else None
+                except Exception:  # noqa: BLE001 — one bad model must not abort the scan
+                    return None
+
+        results = await asyncio.gather(*(probe(m) for m in candidates))
+
+    found = [m for m in results if m]
+    return {"vision_models": found, "checked": len(candidates), "total": len(ids)}
 
 
 @app.post("/api/config/test")

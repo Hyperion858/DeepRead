@@ -163,16 +163,21 @@ def provider_model_ids(prov: dict[str, Any]) -> list[str]:
         return ids
 
 
+def filter_models_for_role(ids: list[str], role: str) -> list[str]:
+    """Name-based guess at which of `ids` can serve `role` (may be empty)."""
+    if not ids:
+        return []
+    if role in _ROLE_MARKERS:
+        return [m for m in ids if any(k in m.lower() for k in _ROLE_MARKERS[role])]
+    return [m for m in ids if not any(k in m.lower() for k in _ROLE_EXCLUDE)]
+
+
 def models_for_role(prov: dict[str, Any], role: str) -> list[str]:
     """Provider models that can plausibly serve `role` (chat / asr / vision)."""
     ids = provider_model_ids(prov)
     if not ids:
         return []
-    if role in _ROLE_MARKERS:
-        pool = [m for m in ids if any(k in m.lower() for k in _ROLE_MARKERS[role])]
-    else:
-        pool = [m for m in ids if not any(k in m.lower() for k in _ROLE_EXCLUDE)]
-    return pool or ids
+    return filter_models_for_role(ids, role) or ids
 
 
 def ordered_models(cfg: dict[str, Any], prov: dict[str, Any], model_key: str,

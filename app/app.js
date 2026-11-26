@@ -1067,6 +1067,10 @@ function renderSettings() {
                     <select id="cfg-vision" style="flex:1;min-width:0"></select>
                     <button id="cfg-refresh-vision" style="flex-shrink:0" title="获取模型列表">↻</button>
                   </div>
+                  <div class="probe-row">
+                    <button id="cfg-probe-vision" title="给每个模型发一张图片，测试它能不能读图">🔍 检测多模态</button>
+                    <span class="probe-hint" id="vision-probe-hint"></span>
+                  </div>
                   <label class="switch-row role-switch">
                     <input type="checkbox" id="auto-vision">
                     <span class="switch-ui"></span>
@@ -1370,13 +1374,46 @@ function renderSettings() {
     toast("获取模型列表中…");
     try {
       const res = await fetchModels(pid);
-      // vision-capable models: OCR models first, then omni/vl/chat as fallbacks
-      const vis = [...(res.asr_models || []), ...(res.models || [])]
-        .filter((v, i, a) => a.indexOf(v) === i);
+      const guessed = res.vision_models || [];
+      const vis = guessed.length
+        ? guessed
+        : [...(res.asr_models || []), ...(res.models || [])].filter((v, i, a) => a.indexOf(v) === i);
       fillVisionSelect(vis, "");
+      setProbeHint(guessed.length
+        ? `按名字筛出 ${vis.length} 个疑似视觉模型；不确定可点「检测多模态」`
+        : `共 ${vis.length} 个模型；点「检测多模态」找出能读图的`);
       toast(`获取到 ${vis.length} 个模型`);
     } catch (err) { toast("获取失败: " + err.message); }
   };
+
+  document.getElementById("cfg-probe-vision").onclick = async () => {
+    const pid = document.getElementById("role-vision").value || document.getElementById("role-chat").value;
+    if (!pid) { toast("请先添加并保存 API"); return; }
+    const btn = document.getElementById("cfg-probe-vision");
+    btn.disabled = true;
+    setProbeHint("正在给每个模型发一张图片测试…（模型多时约需一两分钟）");
+    try {
+      const res = await api("/api/config/probe_vision", {
+        method: "POST",
+        body: JSON.stringify({ provider_id: pid }),
+      });
+      const found = res.vision_models || [];
+      fillVisionSelect(found, document.getElementById("cfg-vision").value);
+      setProbeHint(`✓ 检出 ${found.length} 个支持图片输入的模型（检测了 ${res.checked} 个，目录共 ${res.total} 个）`);
+      toast(`检出 ${found.length} 个多模态模型`);
+    } catch (err) {
+      setProbeHint("✗ 检测失败: " + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  function setProbeHint(text) {
+    const el = document.getElementById("vision-probe-hint");
+    if (!el) return;
+    el.textContent = text || "";
+    el.style.display = text ? "block" : "none";
+  }
 
   async function saveConfigQuiet() {
     collectProviders();
