@@ -7,9 +7,20 @@ from pathlib import Path
 from typing import Any
 
 
+def _cookie_args() -> list[str]:
+    """yt-dlp cookie options: use the mounted cookies file when present.
+
+    Douyin blocks anonymous info queries ("Fresh cookies are needed"); export
+    cookies.txt from a logged-in browser (Get cookies.txt extension) and put
+    it at data/cookies.txt (host) -> /app/data/cookies.txt (container).
+    """
+    p = Path("/app/data/cookies.txt")
+    return ["--cookies", str(p)] if p.exists() else []
+
+
 def fetch_info(url: str) -> dict[str, Any]:
     r = subprocess.run(
-        ["yt-dlp", "-j", "--no-warnings", url],
+        ["yt-dlp", "-j", "--no-warnings", *_cookie_args(), url],
         capture_output=True, timeout=120,
     )
     if r.returncode != 0:
@@ -24,13 +35,17 @@ def fetch_info(url: str) -> dict[str, Any]:
 
 
 def download(url: str, media_dir: Path, cid: str,
-             progress_cb: Any = None) -> dict[str, Any]:
+             progress_cb: Any = None,
+             should_cancel: Any = None) -> dict[str, Any]:
     """Download best mp4 into media_dir as <cid>.<ext>. Returns {path,title,duration}."""
     media_dir.mkdir(parents=True, exist_ok=True)
+    if should_cancel and should_cancel():
+        raise RuntimeError("已取消")
     info = fetch_info(url)
     out_tmpl = str(media_dir / f"{cid}.%(ext)s")
     cmd = [
         "yt-dlp", "--no-warnings",
+        *_cookie_args(),
         "-f", "bv*+ba/b",
         "--merge-output-format", "mp4",
         "-o", out_tmpl,

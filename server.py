@@ -71,6 +71,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "probe_cache": {},
     # pipeline tuning
     "ocr_workers": 6,             # concurrent OCR frame recognitions
+    "ocr_interval": 1.0,          # seconds between sampled frames (lower = denser, more requests)
     "asr_workers": 4,             # concurrent ASR segment transcriptions
     "translate_workers": 3,       # concurrent translation batches
     "segment_minutes": 5,
@@ -294,6 +295,7 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
                         progress_cb=lambda p, msg: set_stage(cid, "ocr", msg, 0.08 + 0.62 * p),
                         should_cancel=lambda: bool(job and job.cancelled),
                         workers=max(1, int(cfg.get("ocr_workers") or 6)),
+                        interval=max(0.5, float(cfg.get("ocr_interval") or 1.0)),
                     )
                 except Exception as ocr_exc:  # noqa: BLE001 — OCR is best-effort
                     set_stage(cid, "ocr", f"OCR 失败: {ocr_exc}", 0.7)
@@ -388,7 +390,7 @@ async def put_config(request: Request):
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
     for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model", "segment_minutes",
               "chat_models", "asr_models", "vision_models", "align_base",
-              "ocr_workers", "asr_workers", "translate_workers",
+              "ocr_workers", "ocr_interval", "asr_workers", "translate_workers",
               "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):
         if k in body:
             cfg[k] = body[k]
@@ -1100,6 +1102,8 @@ def _download_material(mid: str, url: str) -> None:
         mat = read_json(mdir / "material.json", {}) or {}
         mat["status"] = "error"
         mat["error"] = str(exc)
+        if mat.get("title") == "正在获取视频信息…":
+            mat["title"] = f"导入失败（{str(exc)[:60]}）"
         write_json(mdir / "material.json", mat)
         log_event("material", "素材下载失败", detail=f"{url} · {exc}", level="error")
     finally:

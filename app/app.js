@@ -1087,6 +1087,8 @@ function renderSettings() {
                   <input type="number" id="cfg-seg-min" min="1" max="15"></div>
                 <div class="bk-field"><label>OCR 并发数<small>每帧图片识别并发（3-8）</small></label>
                   <input type="number" id="cfg-ocr-workers" min="1" max="12"></div>
+                <div class="bk-field"><label>OCR 采样间隔（秒）<small>越小越密、越不易漏短字幕，请求数越多（0.5-3）</small></label>
+                  <input type="number" id="cfg-ocr-interval" min="0.5" max="3" step="0.5"></div>
                 <div class="bk-field"><label>转写并发数<small>音频分段转写并发（2-6）</small></label>
                   <input type="number" id="cfg-asr-workers" min="1" max="8"></div>
                 <div class="bk-field"><label>翻译并发数<small>翻译批次并发（1-6）</small></label>
@@ -1170,6 +1172,7 @@ function renderSettings() {
     document.getElementById("cfg-align-base").value = cfgCache.align_base || "asr";
     document.getElementById("cfg-seg-min").value = cfgCache.segment_minutes || 5;
     document.getElementById("cfg-ocr-workers").value = cfgCache.ocr_workers || 6;
+    document.getElementById("cfg-ocr-interval").value = cfgCache.ocr_interval || 1;
     document.getElementById("cfg-asr-workers").value = cfgCache.asr_workers || 4;
     document.getElementById("cfg-tr-workers").value = cfgCache.translate_workers || 3;
     selSection = "providers";
@@ -1670,6 +1673,7 @@ function renderSettings() {
           segment_minutes: parseInt(document.getElementById("cfg-seg-min").value, 10) || 5,
           align_base: document.getElementById("cfg-align-base").value || "asr",
           ocr_workers: parseInt(document.getElementById("cfg-ocr-workers").value, 10) || 6,
+          ocr_interval: parseFloat(document.getElementById("cfg-ocr-interval").value) || 1,
           asr_workers: parseInt(document.getElementById("cfg-asr-workers").value, 10) || 4,
           translate_workers: parseInt(document.getElementById("cfg-tr-workers").value, 10) || 3,
         }),

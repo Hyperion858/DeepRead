@@ -220,16 +220,17 @@ def extract_ocr_subtitles(
     progress_cb: Callable[[float, str], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     workers: int = 6,
+    interval: float = SAMPLE_INTERVAL,
 ) -> list[dict[str, Any]]:
     """Full OCR subtitle channel. Returns [{start,end,text,lang,source='ocr'}]."""
     prov = _vision_provider(cfg)
     if not prov["base_url"] or not prov["model"]:
         return []
-    frames = extract_frames(media_path, course_dir, progress_cb=progress_cb)
+    frames = extract_frames(media_path, course_dir,
+                            interval=interval, progress_cb=progress_cb)
     if not frames:
         return []
 
-    interval = SAMPLE_INTERVAL
     results: list[tuple[float, str]] = []
     if should_cancel and should_cancel():
         return []
