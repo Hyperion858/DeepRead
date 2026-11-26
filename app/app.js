@@ -1212,18 +1212,18 @@ function renderSettings() {
       <h1>模型配置</h1>
       <div class="set-layout">
         <aside class="set-side">
-          <div class="set-side-head">
-            <span>API 提供商</span>
-            <button id="prov-add" class="primary" title="添加 API">+</button>
-          </div>
+          <div class="set-group-label">API 提供商</div>
           <div id="prov-nav"></div>
+          <button id="prov-add" class="set-add">＋ 添加 API</button>
+          <div class="set-group-label" style="margin-top:16px">设置</div>
+          <div class="prov-nav-item set-fixed" data-sec="roles">
+            <span class="pnav-name">🎯 角色分配</span>
+          </div>
+          <div class="prov-nav-item set-fixed" data-sec="tuning">
+            <span class="pnav-name">🎛 生成参数</span>
+          </div>
         </aside>
         <section class="set-main">
-          <div class="set-tabs">
-            <button data-stab="provider" class="active">提供商配置</button>
-            <button data-stab="roles">角色分配</button>
-            <button data-stab="tuning">生成参数</button>
-          </div>
           <div id="stab-provider" class="stab"></div>
           <div id="stab-roles" class="stab" style="display:none">
             <div class="cfg-card">
@@ -1285,7 +1285,7 @@ function renderSettings() {
               </div>
             </div>
           </div>
-          <div class="form-actions">
+          <div class="form-actions set-savebar">
             <button class="primary" id="cfg-save" style="padding:9px 26px">保存配置</button>
             <button id="cfg-test">测试连接</button>
           </div>
@@ -1341,6 +1341,7 @@ function renderSettings() {
     document.getElementById("cfg-ocr-workers").value = cfgCache.ocr_workers || 6;
     document.getElementById("cfg-asr-workers").value = cfgCache.asr_workers || 4;
     document.getElementById("cfg-tr-workers").value = cfgCache.translate_workers || 3;
+    drawSection();
   }
 
   function drawPriority() {
@@ -1422,17 +1423,39 @@ function renderSettings() {
     };
   }
 
-  let selProvider = 0;  // which provider is being edited (index)
+  let selSection = "prov:0";  // "prov:<index>" | "roles" | "tuning"
+
+  function currentProviderIndex() {
+    const m = /^prov:(\d+)$/.exec(selSection);
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  function drawSection() {
+    const isProv = selSection.startsWith("prov:");
+    document.getElementById("stab-provider").style.display = isProv ? "block" : "none";
+    document.getElementById("stab-roles").style.display = selSection === "roles" ? "block" : "none";
+    document.getElementById("stab-tuning").style.display = selSection === "tuning" ? "block" : "none";
+    // nav highlight: provider items + fixed items
+    const nav = document.getElementById("prov-nav");
+    nav.querySelectorAll(".prov-nav-item").forEach((el) => {
+      el.classList.toggle("on",
+        el.dataset.pi !== undefined ? selSection === `prov:${el.dataset.pi}` : false);
+    });
+    document.querySelectorAll(".set-fixed").forEach((el) => {
+      el.classList.toggle("on", selSection === el.dataset.sec);
+    });
+  }
 
   function drawProviders() {
     // left nav list
     const nav = document.getElementById("prov-nav");
     if (!nav) return;
+    const selIdx = currentProviderIndex();
     if (!providers.length) {
-      nav.innerHTML = `<div class="panel-empty" style="padding:16px">还没有 API<br>点右上 + 添加</div>`;
+      nav.innerHTML = `<div class="panel-empty" style="padding:10px">还没有 API<br>点下方 + 添加</div>`;
     } else {
       nav.innerHTML = providers.map((p, i) => `
-        <div class="prov-nav-item ${i === selProvider ? "on" : ""}" data-pi="${i}">
+        <div class="prov-nav-item ${selSection === `prov:${i}` ? "on" : ""}" data-pi="${i}">
           <div class="pnav-main">
             <span class="pnav-name">${esc(p.name || `API ${i + 1}`)}</span>
             <span class="pnav-url">${esc(p.base_url.replace(/^https?:\/\//, "").slice(0, 26))}</span>
@@ -1444,8 +1467,9 @@ function renderSettings() {
       el.onclick = (e) => {
         if (e.target.closest(".p-del")) return;
         collectProviders();
-        selProvider = +el.dataset.pi;
+        selSection = `prov:${el.dataset.pi}`;
         drawProviders();
+        drawSection();
       };
     });
     nav.querySelectorAll(".p-del").forEach((btn) => {
@@ -1455,26 +1479,32 @@ function renderSettings() {
         if (!confirm(`删除 API「${providers[i].name}」？`)) return;
         collectProviders();
         providers.splice(i, 1);
-        if (selProvider >= providers.length) selProvider = Math.max(0, providers.length - 1);
+        if (selSection.startsWith("prov:")) {
+          const cur = currentProviderIndex();
+          if (cur >= providers.length) selSection = `prov:${Math.max(0, providers.length - 1)}`;
+          else if (cur > i) selSection = `prov:${cur - 1}`;
+        }
         drawProviders();
+        drawSection();
       };
     });
     // right-side editor for the selected provider
     const wrap = document.getElementById("stab-provider");
+    const idx = currentProviderIndex();
     if (!providers.length) {
-      wrap.innerHTML = `<div class="panel-empty" style="padding:40px 0">还没有 API<br>点击左侧「+」添加一个中转 API</div>`;
-    } else if (providers[selProvider]) {
-      const p = providers[selProvider];
+      wrap.innerHTML = `<div class="panel-empty" style="padding:40px 0">还没有 API<br>点击左侧「＋ 添加 API」</div>`;
+    } else if (providers[idx]) {
+      const p = providers[idx];
       wrap.innerHTML = `
         <div class="cfg-card">
-          <div class="cfg-card-head"><span class="cfg-card-title">🔌 ${esc(p.name || `API ${selProvider + 1}`)}</span></div>
+          <div class="cfg-card-head"><span class="cfg-card-title">🔌 ${esc(p.name || `API ${idx + 1}`)}</span></div>
           <div class="form-row"><label>名称</label>
             <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 阿里云百炼）"></div>
           <div class="form-row"><label>Base URL</label>
             <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
           <div class="form-row"><label>API Key</label>
             <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
-          <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见「角色分配」标签）。</div>
+          <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见左侧「角色分配」）。</div>
         </div>`;
     }
     // keep role dropdowns in sync when providers are added/renamed/removed
@@ -1483,10 +1513,11 @@ function renderSettings() {
 
   function collectProviders() {
     const card = document.getElementById("stab-provider")?.querySelector(".cfg-card");
-    if (card && providers[selProvider]) {
-      providers[selProvider].name = card.querySelector(".p-name").value.trim() || `API ${selProvider + 1}`;
-      providers[selProvider].base_url = card.querySelector(".p-url").value.trim();
-      providers[selProvider].api_key = card.querySelector(".p-key").value.trim();
+    const idx = currentProviderIndex();
+    if (card && providers[idx]) {
+      providers[idx].name = card.querySelector(".p-name").value.trim() || `API ${idx + 1}`;
+      providers[idx].base_url = card.querySelector(".p-url").value.trim();
+      providers[idx].api_key = card.querySelector(".p-key").value.trim();
     }
   }
 
@@ -1553,21 +1584,18 @@ function renderSettings() {
   document.getElementById("prov-add").onclick = async () => {
     collectProviders();
     providers.push({ id: "", name: "", base_url: "", api_key: "" });
-    selProvider = providers.length - 1;
+    selSection = `prov:${providers.length - 1}`;
     drawProviders(); // drawProviders now refreshes role dropdowns too
-    // switch to the provider tab so the new API's form is visible
-    document.querySelector('.set-tabs button[data-stab="provider"]')?.click();
+    drawSection();
   };
 
-  // settings right-panel tabs
-  document.querySelectorAll(".set-tabs button").forEach((btn) => {
-    btn.onclick = () => {
-      document.querySelectorAll(".set-tabs button").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      const t = btn.dataset.stab;
-      document.querySelectorAll(".stab").forEach((el) => (el.style.display = "none"));
-      document.getElementById(`stab-${t}`).style.display = "block";
-      if (t === "provider") drawProviders();
+  // left-nav fixed sections (角色分配 / 生成参数)
+  document.querySelectorAll(".set-fixed").forEach((el) => {
+    el.onclick = () => {
+      collectProviders();
+      selSection = el.dataset.sec;
+      drawProviders();
+      drawSection();
     };
   });
 

@@ -280,6 +280,16 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
   font-size: 13.5px; font-weight: 600; color: var(--ink-2); margin-bottom: 10px;
 }
 .set-side-head button { padding: 2px 12px; font-size: 15px; line-height: 1.4; }
+.set-group-label {
+  font-size: 11px; font-weight: 600; color: var(--ink-3);
+  text-transform: uppercase; letter-spacing: .5px; padding: 0 10px 6px;
+}
+.set-add {
+  width: 100%; margin-top: 8px; border-style: dashed; color: var(--ink-2);
+  font-size: 13px; padding: 7px;
+}
+.set-add:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.set-fixed .pnav-name { font-size: 13.5px; }
 .prov-nav-item {
   display: flex; align-items: center; gap: 8px; padding: 9px 10px;
   border-radius: 8px; cursor: pointer; transition: background .15s; margin-bottom: 2px;
@@ -287,6 +297,11 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .prov-nav-item:hover { background: var(--bg); }
 .prov-nav-item.on { background: var(--accent-soft); }
 .prov-nav-item.on .pnav-name { color: var(--accent-ink); }
+.set-savebar {
+  position: sticky; bottom: 0; background: var(--bg);
+  padding: 12px 0 4px; margin-top: 16px; border-top: 1px solid var(--line);
+  z-index: 5;
+}
 .pnav-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .pnav-name { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pnav-url { font-size: 11px; color: var(--ink-3); font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
