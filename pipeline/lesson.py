@@ -239,7 +239,15 @@ def audio_transcribe_with_failover(
                     if not _is_model_dead(r.text):
                         raise RuntimeError(errors[-1])
                     continue
-                content = r.json()["choices"][0]["message"]["content"].strip()
+                payload = r.json()
+                if not isinstance(payload, dict) or "choices" not in payload:
+                    # 200 but no chat payload — DashScope realtime / relay quirk.
+                    # Surface the body so the error log says WHY, not just 'choices'.
+                    body_snip = (r.text or "")[:160]
+                    errors.append(f"{model}: 响应缺少 choices: {body_snip}")
+                    note_model_result(prov.get("id", ""), model, False, f"响应缺少 choices: {body_snip}")
+                    continue
+                content = payload["choices"][0]["message"]["content"].strip()
                 note_model_result(prov.get("id", ""), model, True)
                 if not content:
                     return [], model
@@ -329,8 +337,15 @@ def ocr_with_failover(
                 timeout=httpx.Timeout(connect=15, read=90, write=30, pool=15),
             )
             if r.status_code == 200:
+                payload = r.json()
+                if not isinstance(payload, dict) or "choices" not in payload:
+                    # 200 but no chat payload — surface the body, skip to next model
+                    body_snip = (r.text or "")[:160]
+                    errors.append(f"{model}: 响应缺少 choices: {body_snip}")
+                    note_model_result(prov.get("id", ""), model, False, f"响应缺少 choices: {body_snip}")
+                    continue
                 note_model_result(prov.get("id", ""), model, True)
-                return r.json()["choices"][0]["message"]["content"].strip()
+                return payload["choices"][0]["message"]["content"].strip()
             errors.append(f"{model}: {r.status_code} {r.text[:120]}")
             note_model_result(prov.get("id", ""), model, False, f"HTTP {r.status_code}: {r.text[:120]}")
             if not _is_model_dead(r.text):

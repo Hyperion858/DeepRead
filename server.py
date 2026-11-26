@@ -475,6 +475,19 @@ def _probe_wav() -> bytes:
     return buf.getvalue()
 
 
+def _has_chat_payload(resp) -> bool:
+    """True when a 200 chat/completions response actually carries choices.
+
+    Some backends (DashScope realtime models via HTTP, quirky relays) answer
+    200 with a non-chat body; probing must not mark those usable.
+    """
+    try:
+        payload = resp.json()
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and "choices" in payload
+
+
 async def _probe_role(client, base, headers, models, role, on_result=None):
     """Return the subset of `models` that accepted a sample for `role`.
 
@@ -501,7 +514,8 @@ async def _probe_role(client, base, headers, models, role, on_result=None):
                             {"type": "image_url", "image_url": {"url": img}},
                         ]}],
                     })
-                    return model, resp.status_code == 200, resp.status_code
+                    ok = resp.status_code == 200 and _has_chat_payload(resp)
+                    return model, ok, resp.status_code
                 except Exception:  # noqa: BLE001 — one bad model must not abort the scan
                     return model, False, "ERR"
     else:
@@ -521,13 +535,15 @@ async def _probe_role(client, base, headers, models, role, on_result=None):
                                 {"type": "text", "text": "转写这段音频"},
                             ]}],
                         })
+                        ok = resp.status_code == 200 and _has_chat_payload(resp)
                     else:
                         resp = await client.post(
                             f"{base}/audio/transcriptions", headers=headers,
                             files={"file": ("probe.wav", wav, "audio/wav")},
                             data={"model": model},
                         )
-                    return model, resp.status_code == 200, resp.status_code
+                        ok = resp.status_code == 200
+                    return model, ok, resp.status_code
                 except Exception:  # noqa: BLE001
                     return model, False, "ERR"
 
