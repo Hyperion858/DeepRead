@@ -1207,6 +1207,16 @@ function openCalibrationPanel({ player, sentences, rawSentences, activeId, onApp
 /* ================= Settings (model config) ================= */
 function renderSettings() {
   document.title = "模型配置 · DeepRead";
+  // state declared BEFORE the template — the template interpolates these
+  let selSection = "providers";   // "providers" | "roles" | "tuning"
+  let editProvider = -1;          // -1 = providers list view; >=0 = editing that provider
+  let providers = [];
+  let cfgCache = null;
+  let modelCache = {};            // provider_id -> {models, asr_models}
+  let priorityModels = [];        // chat failover priority list
+  let priorityAsrModels = [];     // ASR failover priority list
+  let priorityVisionModels = [];  // OCR failover priority list
+  let priorityRole = "chat";      // which role's list is being edited
   $app.innerHTML = shell("settings", `
     <div class="page settings-split">
       <h1>模型配置</h1>
@@ -1216,7 +1226,7 @@ function renderSettings() {
             <span class="pnav-name"><span class="pnav-icon">🔌</span>API 提供商</span>
           </div>
           <div class="prov-nav-item set-fixed ${selSection === "roles" ? "on" : ""}" data-sec="roles">
-            <span class="pnav-name"><span class="pnav-icon">🎯</span>角色分配</span>
+            <span class="pnav-name"><span class="pnav-icon">🎯</span>模型分配</span>
           </div>
           <div class="prov-nav-item set-fixed ${selSection === "tuning" ? "on" : ""}" data-sec="tuning">
             <span class="pnav-name"><span class="pnav-icon">🎛</span>生成参数</span>
@@ -1226,7 +1236,7 @@ function renderSettings() {
           <div id="stab-providers" class="stab"></div>
           <div id="stab-roles" class="stab" style="display:none">
             <div class="cfg-card">
-              <div class="cfg-card-head"><span class="cfg-card-title">🎯 角色分配</span></div>
+              <div class="cfg-card-head"><span class="cfg-card-title">🎯 模型分配</span></div>
               <div class="role-grid">
                 <div class="role-block">
                   <div class="role-name">📝 翻译与精讲 <i>Chat</i></div>
@@ -1292,13 +1302,6 @@ function renderSettings() {
         </section>
       </div>
     </div>`);
-  let providers = [];
-  let cfgCache = null;
-  let modelCache = {};          // provider_id -> {models, asr_models}
-  let priorityModels = [];      // chat failover priority list
-  let priorityAsrModels = [];   // ASR failover priority list
-  let priorityVisionModels = []; // OCR failover priority list
-  let priorityRole = "chat";    // which role's list is being edited
 
   async function init() {
     cfgCache = await api("/api/config");
@@ -1424,9 +1427,6 @@ function renderSettings() {
     };
   }
 
-  let selSection = "providers";        // "providers" | "roles" | "tuning"
-  let editProvider = -1;               // -1 = providers list view; >=0 = editing that provider
-
   function drawSection() {
     document.getElementById("stab-providers").style.display = selSection === "providers" ? "block" : "none";
     document.getElementById("stab-roles").style.display = selSection === "roles" ? "block" : "none";
@@ -1498,7 +1498,7 @@ function renderSettings() {
           <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
         <div class="form-row"><label>API Key</label>
           <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
-        <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见「角色分配」标签）。</div>
+        <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见左侧「模型分配」）。</div>
         <div class="form-actions">
           <button class="primary prov-done" style="padding:8px 22px">完成</button>
         </div>
@@ -1586,7 +1586,7 @@ function renderSettings() {
     drawSection();
   };
 
-  // left-nav fixed sections (API 提供商 / 角色分配 / 生成参数)
+  // left-nav fixed sections (API 提供商 / 模型分配 / 生成参数)
   document.querySelectorAll(".set-fixed").forEach((el) => {
     el.onclick = () => {
       collectProviders();
