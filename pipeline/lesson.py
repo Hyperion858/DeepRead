@@ -128,6 +128,8 @@ _ROLE_MARKERS = {
     "vision": ("vl", "vision", "ocr", "omni", "gemini", "gpt-4o", "gpt-4.1", "gpt-5", "claude",
                "pixtral", "llava", "internvl", "glm-4v", "qvq"),
 }
+# providers advertise hundreds of models; never walk more than a handful
+_MODEL_LIMIT = {"chat": 8, "asr": 6, "vision": 6}
 
 
 def _cache_fresh(hit) -> bool:
@@ -189,7 +191,7 @@ def ordered_models(cfg: dict[str, Any], prov: dict[str, Any], model_key: str,
         default = {"chat_model": "gpt-4o-mini", "asr_model": "whisper-1", "vision_model": "qwen3.5-ocr"}.get(model_key)
         if default:
             models.append(default)
-    return models
+    return models[:_MODEL_LIMIT.get(role, 8)]
 
 
 def audio_transcribe_with_failover(

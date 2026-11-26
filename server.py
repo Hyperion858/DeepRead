@@ -91,6 +91,10 @@ def load_config() -> dict[str, Any]:
             ):
                 legacy = bool(stored["auto_model_switch"])
                 cfg["auto_switch_chat"] = cfg["auto_switch_asr"] = cfg["auto_switch_vision"] = legacy
+            # the old priority lists carried the effective model when none was set
+            for role in ("chat", "asr", "vision"):
+                if not cfg.get(f"{role}_model") and stored.get(f"{role}_models"):
+                    cfg[f"{role}_model"] = stored[f"{role}_models"][0]
         else:
             # migrate legacy flat configs (single API or two-group) into providers
             legacy_groups = []
