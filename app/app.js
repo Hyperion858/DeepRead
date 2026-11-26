@@ -219,6 +219,7 @@ async function refreshMaterials() {
         <td class="mat-title-cell">
           <span class="mat-title">${esc(m.title)}</span>
           <button class="mat-rename" data-rename="${esc(m.id)}" title="重命名">✎ 改名</button>
+          ${m.media_exists ? `<a class="mat-play" data-play="${esc(m.id)}" href="#" title="播放">▶ 播放</a>` : ""}
           ${m.course_id ? `<a class="badge ready" style="text-decoration:none" href="#/course/${esc(m.course_id)}">已有课程 →</a>` : ""}
         </td>
         <td>${m.kind === "audio" ? "音频" : "视频"}</td>
@@ -237,10 +238,13 @@ async function refreshMaterials() {
 
     wrap.querySelectorAll("[data-genc]").forEach((btn) => {
       btn.onclick = () => {
-        const m = materials.find((x) => x.id === btn.dataset.genc) || {};
+        const m = list.find((x) => x.id === btn.dataset.genc) || {};
         openChannelDialog({ mid: btn.dataset.genc, kind: "material",
                             lastChannels: m.last_channels, lastAlignBase: m.last_align_base });
       };
+    });
+    wrap.querySelectorAll("[data-play]").forEach((a) => {
+      a.onclick = (e) => { e.preventDefault(); openMaterialPlayer(a.dataset.play); };
     });
     wrap.querySelectorAll("[data-regen]").forEach((btn) => {
       btn.onclick = () => {
@@ -1018,6 +1022,28 @@ async function openChannelDialog({ mid, kind, lastChannels, lastAlignBase }) {
   };
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay || e.target.closest(".cal-close")) overlay.remove();
+  });
+  document.body.appendChild(overlay);
+}
+
+/* ---------------- material video player dialog ---------------- */
+function openMaterialPlayer(mid) {
+  document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
+  const overlay = document.createElement("div");
+  overlay.className = "cal-overlay";
+  overlay.innerHTML = `
+    <div class="cal-panel" style="width:min(720px,96%);padding:14px">
+      <div class="cal-head"><b>播放素材</b><button class="cal-close">✕</button></div>
+      <video class="mat-player" src="/media/${encodeURIComponent(mid)}/material"
+             controls autoplay style="width:100%;max-height:70vh;border-radius:8px;background:#000;margin-top:10px"></video>
+    </div>`;
+  const video = overlay.querySelector("video");
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay || e.target.closest(".cal-close")) {
+      video.pause();
+      video.src = "";
+      overlay.remove();
+    }
   });
   document.body.appendChild(overlay);
 }
