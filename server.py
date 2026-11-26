@@ -63,6 +63,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "auto_switch_chat": False,
     "auto_switch_asr": False,
     "auto_switch_vision": False,
+    # results of capability probing, per provider:
+    # {pid: {"base_url": str, "vision": {"at": ts, "models": [...]}, "asr": {...}}}
+    "probe_cache": {},
     # pipeline tuning
     "ocr_workers": 6,             # concurrent OCR frame recognitions
     "asr_workers": 4,             # concurrent ASR segment transcriptions
@@ -415,8 +418,14 @@ async def list_models(provider_id: str = ""):
             "vision_models": filter_models_for_role(ids, "vision")}
 
 
+# Capability probing. Providers rarely expose modality metadata, so the only
+# reliable check is to send a tiny sample of the right kind to every model.
 _PROBE_SKIP = ("embed", "tts", "whisper", "transcri", "rerank", "moderation",
                "dall-e", "stable-diffusion", "sdxl", "flux", "image", "video", "audio", "speech")
+_PROBE_SKIP_ASR = ("embed", "rerank", "moderation", "dall-e", "stable-diffusion",
+                   "sdxl", "flux", "image", "video", "tts")
+_PROBE_TTL = 7 * 24 * 3600
+_CHAT_AUDIO_MARKERS = ("omni", "qwen-audio", "gemini", "gpt-4o-audio")
 
 
 def _probe_image_uri() -> str:
@@ -439,15 +448,92 @@ def _probe_image_uri() -> str:
     return "data:image/png;base64," + base64.b64encode(png).decode()
 
 
-@app.post("/api/config/probe_vision")
-async def probe_vision(request: Request):
-    """Ask every model of a provider to look at a tiny image.
+def _probe_wav() -> bytes:
+    """One second of 440 Hz mono WAV — valid audio for transcription probes."""
+    import io
+    import math
+    import struct
+    import wave
 
-    Many providers advertise no modality metadata, so the only reliable way to
-    tell multimodal models apart is to send one image. Returns the models that
-    accepted it (HTTP 200). Body: {provider_id?}.
-    """
+    rate = 16000
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(b"".join(
+            struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / rate)))
+            for i in range(rate)
+        ))
+    return buf.getvalue()
+
+
+async def _probe_role(client, base, headers, models, role):
+    """Return the subset of `models` that accepted a sample for `role`."""
     import asyncio
+    import base64
+
+    if not models:
+        return []
+    sem = asyncio.Semaphore(8)
+
+    if role == "vision":
+        img = _probe_image_uri()
+
+        async def probe(model):
+            async with sem:
+                try:
+                    resp = await client.post(f"{base}/chat/completions", headers=headers, json={
+                        "model": model, "max_tokens": 4, "temperature": 0,
+                        "messages": [{"role": "user", "content": [
+                            {"type": "text", "text": "这张图片是什么颜色？只回答一个词。"},
+                            {"type": "image_url", "image_url": {"url": img}},
+                        ]}],
+                    })
+                    return model if resp.status_code == 200 else None
+                except Exception:  # noqa: BLE001 — one bad model must not abort the scan
+                    return None
+    else:
+        wav = _probe_wav()
+        wav_b64 = base64.b64encode(wav).decode()
+
+        async def probe(model):
+            async with sem:
+                try:
+                    # mirror the pipeline's routing: omni-style models take audio
+                    # through chat/completions, everything else via transcriptions
+                    if any(k in model.lower() for k in _CHAT_AUDIO_MARKERS):
+                        resp = await client.post(f"{base}/chat/completions", headers=headers, json={
+                            "model": model, "max_tokens": 16,
+                            "messages": [{"role": "user", "content": [
+                                {"type": "input_audio", "input_audio": {"data": wav_b64, "format": "wav"}},
+                                {"type": "text", "text": "转写这段音频"},
+                            ]}],
+                        })
+                    else:
+                        resp = await client.post(
+                            f"{base}/audio/transcriptions", headers=headers,
+                            files={"file": ("probe.wav", wav, "audio/wav")},
+                            data={"model": model},
+                        )
+                    return model if resp.status_code == 200 else None
+                except Exception:  # noqa: BLE001
+                    return None
+
+    results = await asyncio.gather(*(probe(m) for m in models))
+    return [m for m in results if m]
+
+
+@app.post("/api/config/probe")
+async def probe_capabilities(request: Request):
+    """Probe which models of a provider can serve a role (vision / asr).
+
+    Results are cached in config.probe_cache (7 days, invalidated when the
+    provider's base_url changes) so later calls and page loads don't resend
+    samples. Body: {provider_id?, roles?: ["vision", "asr"], force?}.
+    """
+    import time
+
     import httpx
 
     try:
@@ -461,41 +547,42 @@ async def probe_vision(request: Request):
         raise HTTPException(400, "provider 不存在")
     base = (prov.get("base_url") or "").rstrip("/")
     headers = {"Authorization": f"Bearer {prov.get('api_key', '')}"}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
+    roles = [r for r in (body.get("roles") or ["vision"]) if r in ("vision", "asr")] or ["vision"]
+    force = bool(body.get("force"))
+
+    probe_cache = {k: dict(v) for k, v in (cfg.get("probe_cache") or {}).items()}
+    entry = dict(probe_cache.get(pid) or {})
+    if entry.get("base_url") != base:
+        entry = {"base_url": base}   # provider moved — old results are stale
+    out: dict[str, Any] = {}
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
             r = await client.get(f"{base}/models", headers=headers)
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"连接失败: {exc}")
         if r.status_code != 200:
             raise HTTPException(502, f"获取模型列表失败 HTTP {r.status_code}")
         ids = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
-    except httpx.HTTPError as exc:
-        raise HTTPException(502, f"连接失败: {exc}")
 
-    candidates = [m for m in ids if not any(k in m.lower() for k in _PROBE_SKIP)]
-    if not candidates:
-        return {"vision_models": [], "checked": 0, "total": len(ids)}
-    img = _probe_image_uri()
-    sem = asyncio.Semaphore(8)
+        for role in roles:
+            cached = entry.get(role) or {}
+            if (cached.get("models") is not None and not force
+                    and time.time() - float(cached.get("at") or 0) < _PROBE_TTL):
+                out[role] = {"models": cached["models"], "checked": cached.get("checked", 0),
+                             "total": len(ids), "cached": True, "at": cached.get("at")}
+                continue
+            skip = _PROBE_SKIP_ASR if role == "asr" else _PROBE_SKIP
+            candidates = [m for m in ids if not any(k in m.lower() for k in skip)]
+            found = await _probe_role(client, base, headers, candidates, role)
+            entry[role] = {"at": time.time(), "models": found, "checked": len(candidates)}
+            out[role] = {"models": found, "checked": len(candidates), "total": len(ids),
+                         "cached": False, "at": entry[role]["at"]}
 
-    async with httpx.AsyncClient(timeout=25) as client:
-        async def probe(model: str) -> str | None:
-            payload = {
-                "model": model, "max_tokens": 4, "temperature": 0,
-                "messages": [{"role": "user", "content": [
-                    {"type": "text", "text": "这张图片是什么颜色？只回答一个词。"},
-                    {"type": "image_url", "image_url": {"url": img}},
-                ]}],
-            }
-            async with sem:
-                try:
-                    resp = await client.post(f"{base}/chat/completions", headers=headers, json=payload)
-                    return model if resp.status_code == 200 else None
-                except Exception:  # noqa: BLE001 — one bad model must not abort the scan
-                    return None
-
-        results = await asyncio.gather(*(probe(m) for m in candidates))
-
-    found = [m for m in results if m]
-    return {"vision_models": found, "checked": len(candidates), "total": len(ids)}
+    probe_cache[pid] = entry
+    cfg["probe_cache"] = probe_cache
+    save_config(cfg)
+    return out
 
 
 @app.post("/api/config/test")

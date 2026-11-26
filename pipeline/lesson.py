@@ -172,8 +172,19 @@ def filter_models_for_role(ids: list[str], role: str) -> list[str]:
     return [m for m in ids if not any(k in m.lower() for k in _ROLE_EXCLUDE)]
 
 
-def models_for_role(prov: dict[str, Any], role: str) -> list[str]:
-    """Provider models that can plausibly serve `role` (chat / asr / vision)."""
+def models_for_role(prov: dict[str, Any], role: str,
+                    cfg: dict[str, Any] | None = None) -> list[str]:
+    """Provider models that can plausibly serve `role` (chat / asr / vision).
+
+    Prefers the probed capability list from config.probe_cache; otherwise falls
+    back to name heuristics over the provider's advertised models.
+    """
+    if cfg and role in ("vision", "asr"):
+        entry = (cfg.get("probe_cache") or {}).get(prov.get("id") or "") or {}
+        if entry.get("base_url") == (prov.get("base_url") or "").rstrip("/"):
+            probed = (entry.get(role) or {}).get("models")
+            if probed:
+                return list(probed)
     ids = provider_model_ids(prov)
     if not ids:
         return []
@@ -189,7 +200,7 @@ def ordered_models(cfg: dict[str, Any], prov: dict[str, Any], model_key: str,
     if primary:
         models.append(primary)
     if cfg.get(switch_key):
-        for m in models_for_role(prov, role):
+        for m in models_for_role(prov, role, cfg):
             if m not in models:
                 models.append(m)
     if not models:
