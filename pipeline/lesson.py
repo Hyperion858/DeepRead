@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 import time
 from typing import Any, Callable
 
@@ -56,8 +55,8 @@ def chat_with_failover(
     max_tokens: int = 8000,
     temperature: float = 0.3,
 ) -> tuple[str, str]:
-    """Call chat completions, moving to other chat-capable models when the
-    selected one is dead or out of quota (auto_switch_chat).
+    """Call chat completions, walking the selected models in order when one is
+    dead or out of quota.
 
     Returns (content, model_used). Raises when every model fails.
     """
@@ -67,7 +66,7 @@ def chat_with_failover(
     if not prov:
         raise RuntimeError("chat provider 未配置")
 
-    models = ordered_models(cfg, prov, "chat_model", "auto_switch_chat", "chat", "chat_models")
+    models = ordered_models(cfg, "chat_model", "chat", "chat_models")
 
     base = prov.get("base_url", "").rstrip("/")
     key = prov.get("api_key", "")
@@ -118,12 +117,7 @@ def _resolve_provider(cfg: dict[str, Any], provider_key: str) -> dict[str, Any]:
     return prov or {}
 
 
-# ---- provider model discovery (per-role auto-switch) ----
-_MODEL_LIST_CACHE: dict[str, tuple[float, list[str]]] = {}
-_MODEL_LIST_TTL = 3600.0
-_MODEL_LIST_FAIL_TTL = 300.0
-_MODEL_LIST_LOCK = threading.Lock()
-
+# ---- model lists ----
 # models that one role can plausibly use
 _ROLE_EXCLUDE = ("embed", "tts", "whisper", "transcri", "asr", "speech", "rerank",
                  "moderation", "dall-e", "stable-diffusion", "sdxl", "flux", "image", "ocr", "audio")
@@ -134,37 +128,6 @@ _ROLE_MARKERS = {
 }
 # providers advertise hundreds of models; never walk more than a handful
 _MODEL_LIMIT = {"chat": 8, "asr": 6, "vision": 6}
-
-
-def _cache_fresh(hit) -> bool:
-    # successful lists stay for an hour; failures retry after 5 minutes
-    ttl = _MODEL_LIST_TTL if hit and hit[1] else _MODEL_LIST_FAIL_TTL
-    return bool(hit) and time.time() - hit[0] < ttl
-
-
-def provider_model_ids(prov: dict[str, Any]) -> list[str]:
-    """Model ids advertised by a provider (cached; empty list on any failure)."""
-    base = (prov.get("base_url") or "").rstrip("/")
-    if not base:
-        return []
-    key = prov.get("api_key") or ""
-    cache_key = f"{base}|{key[-8:]}"
-    hit = _MODEL_LIST_CACHE.get(cache_key)
-    if _cache_fresh(hit):
-        return hit[1]
-    with _MODEL_LIST_LOCK:
-        hit = _MODEL_LIST_CACHE.get(cache_key)
-        if _cache_fresh(hit):
-            return hit[1]
-        ids: list[str] = []
-        try:
-            r = httpx.get(f"{base}/models", headers={"Authorization": f"Bearer {key}"}, timeout=20)
-            if r.status_code == 200:
-                ids = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
-        except Exception:  # noqa: BLE001 — failover just degrades to the selected model
-            ids = []
-        _MODEL_LIST_CACHE[cache_key] = (time.time(), ids)
-        return ids
 
 
 def filter_models_for_role(ids: list[str], role: str) -> list[str]:
@@ -178,27 +141,23 @@ def filter_models_for_role(ids: list[str], role: str) -> list[str]:
 
 def models_for_role(prov: dict[str, Any], role: str,
                     cfg: dict[str, Any] | None = None) -> list[str]:
-    """Provider models that can plausibly serve `role` (chat / asr / vision).
+    """Probed capability list for this provider+role (empty when not probed).
 
-    Prefers the probed capability list from config.probe_cache; otherwise falls
-    back to name heuristics over the provider's advertised models.
+    Kept for callers/tests that ask "what can this provider do"; failover itself
+    no longer uses it — the user's selection is authoritative.
     """
-    if cfg and role in ("vision", "asr"):
-        entry = (cfg.get("probe_cache") or {}).get(prov.get("id") or "") or {}
-        if entry.get("base_url") == (prov.get("base_url") or "").rstrip("/"):
-            probed = (entry.get(role) or {}).get("models")
-            if probed:
-                return list(probed)
-    ids = provider_model_ids(prov)
-    if not ids:
+    if not cfg:
         return []
-    return filter_models_for_role(ids, role) or ids
+    entry = (cfg.get("probe_cache") or {}).get(prov.get("id") or "") or {}
+    if entry.get("base_url") != (prov.get("base_url") or "").rstrip("/"):
+        return []
+    return list((entry.get(role) or {}).get("models") or [])
 
 
-def ordered_models(cfg: dict[str, Any], prov: dict[str, Any], model_key: str,
-                   switch_key: str, role: str, list_key: str = "") -> list[str]:
-    """Candidates for one call: the selected models in the user's order, then —
-    only when this role's auto-switch is on — other role-capable models."""
+def ordered_models(cfg: dict[str, Any], model_key: str,
+                   role: str, list_key: str = "") -> list[str]:
+    """Candidates for one call: exactly the models the user selected, in their
+    order. The selection is the single source of truth for failover."""
     models: list[str] = []
     if list_key:
         for m in cfg.get(list_key) or []:
@@ -207,10 +166,6 @@ def ordered_models(cfg: dict[str, Any], prov: dict[str, Any], model_key: str,
     primary = cfg.get(model_key)
     if primary and primary not in models:
         models.append(primary)
-    if cfg.get(switch_key):
-        for m in models_for_role(prov, role, cfg):
-            if m not in models:
-                models.append(m)
     if not models:
         default = {"chat_model": "gpt-4o-mini", "asr_model": "whisper-1", "vision_model": "qwen3.5-ocr"}.get(model_key)
         if default:
@@ -256,7 +211,7 @@ def audio_transcribe_with_failover(
     offset = 0.0  # caller passes offset via part metadata; kept 0 and caller re-offsets
 
     errors: list[str] = []
-    for model in ordered_models(cfg, prov, "asr_model", "auto_switch_asr", "asr", "asr_models"):
+    for model in ordered_models(cfg, "asr_model", "asr", "asr_models"):
         low = model.lower()
         try:
             if any(k in low for k in ("omni", "qwen-audio", "gemini", "gpt-4o-audio")):
@@ -357,7 +312,7 @@ def ocr_with_failover(
         raise RuntimeError("OCR provider 未配置")
     b64 = _base64.b64encode(img_path.read_bytes()).decode()
     errors: list[str] = []
-    for model in ordered_models(cfg, prov, "vision_model", "auto_switch_vision", "vision", "vision_models"):
+    for model in ordered_models(cfg, "vision_model", "vision", "vision_models"):
         try:
             r = _httpx.post(
                 f"{base}/chat/completions",
@@ -398,8 +353,7 @@ def _chat(
     """Chat call for one prompt.
 
     Always walks the selected model list in order, so a dead primary falls
-    through to the next pick. auto_switch_chat additionally lets it append the
-    provider's other chat-capable models after the user's own picks.
+    through to the next pick.
     """
     content, _ = chat_with_failover(
         cfg, messages, max_tokens=max_tokens, temperature=temperature,

@@ -323,9 +323,9 @@ def transcribe(
         if should_cancel and should_cancel():
             raise PipelineCancelled()
         offset = part_starts[i] if i < len(part_starts) else i * seg_secs
-        # several models selected (or auto-switch on): walk them in order and
-        # mark the ones that fail, so the settings page can flag them
-        if len(selected_models) > 1 or cfg.get("auto_switch_asr"):
+        # several models selected: walk them in order and mark the ones that
+        # fail, so the settings page can flag them
+        if len(selected_models) > 1:
             from pipeline.lesson import audio_transcribe_with_failover
             segs, _used = audio_transcribe_with_failover(cfg, parts[i])
             for s in segs:

@@ -61,12 +61,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "chat_model": "",
     "vision_provider": "",
     "vision_model": "",
-    # per-role failover: when a model is dead/over quota, retry with other
-    # role-capable models the provider advertises (see pipeline.models_for_role)
-    "auto_switch_chat": False,
-    "auto_switch_asr": False,
-    "auto_switch_vision": False,
-    # multi-select model lists, tried in this order (first = primary)
+    # multi-select model lists, tried in this order (first = primary).
+    # The list is the only failover source — there is no extra "auto switch".
     "chat_models": [],
     "asr_models": [],
     "vision_models": [],
@@ -95,12 +91,6 @@ def load_config() -> dict[str, Any]:
             stored = {}
         if stored.get("providers"):
             cfg.update({k: v for k, v in stored.items() if k in DEFAULT_CONFIG})
-            # migrate the old single auto-switch flag to per-role switches
-            if "auto_model_switch" in stored and not any(
-                k in stored for k in ("auto_switch_chat", "auto_switch_asr", "auto_switch_vision")
-            ):
-                legacy = bool(stored["auto_model_switch"])
-                cfg["auto_switch_chat"] = cfg["auto_switch_asr"] = cfg["auto_switch_vision"] = legacy
             # the old priority lists carried the effective model when none was set
             for role in ("chat", "asr", "vision"):
                 if not cfg.get(f"{role}_model") and stored.get(f"{role}_models"):
@@ -388,7 +378,6 @@ async def put_config(request: Request):
         if cfg.get("chat_provider") not in live_ids:
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
     for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model", "segment_minutes",
-              "auto_switch_chat", "auto_switch_asr", "auto_switch_vision",
               "chat_models", "asr_models", "vision_models",
               "ocr_workers", "asr_workers", "translate_workers",
               "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):

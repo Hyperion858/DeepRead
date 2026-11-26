@@ -1030,14 +1030,6 @@ function renderSettings() {
                       <button id="cfg-refresh-chat" title="获取这个 API 的模型列表">↻ 获取模型</button>
                     </div>
                   </div>
-                  <label class="switch-row role-switch">
-                    <input type="checkbox" id="auto-chat">
-                    <span class="switch-ui"></span>
-                    <div class="switch-text">
-                      <b>自动切换可用模型</b>
-                      <small>选中的模型总会按顺序尝试。开启后，若全部失败，还会自动尝试该 API 下其他同类模型</small>
-                    </div>
-                  </label>
                 </div>
                 <div class="role-block">
                   <div class="role-name">🎙 语音转写 <i>ASR</i></div>
@@ -1051,14 +1043,6 @@ function renderSettings() {
                     </div>
                     <span class="probe-hint" id="asr-probe-hint"></span>
                   </div>
-                  <label class="switch-row role-switch">
-                    <input type="checkbox" id="auto-asr">
-                    <span class="switch-ui"></span>
-                    <div class="switch-text">
-                      <b>自动切换可用模型</b>
-                      <small>选中的模型总会按顺序尝试。开启后，若全部失败，还会自动尝试该 API 下其他转写模型</small>
-                    </div>
-                  </label>
                 </div>
                 <div class="role-block">
                   <div class="role-name">🖼 画面字幕 OCR <i>Vision</i></div>
@@ -1072,14 +1056,6 @@ function renderSettings() {
                     </div>
                     <span class="probe-hint" id="vision-probe-hint"></span>
                   </div>
-                  <label class="switch-row role-switch">
-                    <input type="checkbox" id="auto-vision">
-                    <span class="switch-ui"></span>
-                    <div class="switch-text">
-                      <b>自动切换可用模型</b>
-                      <small>选中的模型总会按顺序尝试。开启后，若全部失败，还会自动尝试该 API 下其他视觉模型</small>
-                    </div>
-                  </label>
                 </div>
               </div>
             </div>
@@ -1171,11 +1147,6 @@ function renderSettings() {
     showSavedOrProbed("vision");
     setBrowse("chat", []);
     drawAllPickers();
-    // per-role auto-switch toggles (default off)
-    const legacySwitch = !!cfgCache.auto_model_switch;
-    document.getElementById("auto-chat").checked = cfgCache.auto_switch_chat ?? legacySwitch;
-    document.getElementById("auto-asr").checked = cfgCache.auto_switch_asr ?? legacySwitch;
-    document.getElementById("auto-vision").checked = cfgCache.auto_switch_vision ?? legacySwitch;
     // pipeline tuning
     document.getElementById("cfg-seg-min").value = cfgCache.segment_minutes || 5;
     document.getElementById("cfg-ocr-workers").value = cfgCache.ocr_workers || 6;
@@ -1445,9 +1416,10 @@ function renderSettings() {
       ${avail.length ? `
         <div class="mp-add-row">
           <select class="mp-add-sel">
+            <option value="" selected>选择模型…</option>
             ${avail.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}
           </select>
-          <button class="mp-add">＋ 添加</button>
+          <button class="mp-add" disabled>＋ 添加</button>
         </div>` : ""}
       <div class="mp-hint">可多选，按顺序尝试：第一个是主模型，报错时自动换下一个。</div>`;
 
@@ -1469,6 +1441,7 @@ function renderSettings() {
     const addSel = slot.querySelector(".mp-add-sel");
     const addBtn = slot.querySelector(".mp-add");
     if (addSel && addBtn) {
+      addSel.onchange = () => { addBtn.disabled = !addSel.value; };
       addBtn.onclick = () => {
         if (addSel.value && !chosen.includes(addSel.value)) chosen.push(addSel.value);
         drawPicker(role);
@@ -1674,9 +1647,6 @@ function renderSettings() {
           asr_model: picked.asr[0] || "",
           chat_model: picked.chat[0] || "",
           vision_model: picked.vision[0] || "",
-          auto_switch_chat: document.getElementById("auto-chat").checked,
-          auto_switch_asr: document.getElementById("auto-asr").checked,
-          auto_switch_vision: document.getElementById("auto-vision").checked,
           segment_minutes: parseInt(document.getElementById("cfg-seg-min").value, 10) || 5,
           ocr_workers: parseInt(document.getElementById("cfg-ocr-workers").value, 10) || 6,
           asr_workers: parseInt(document.getElementById("cfg-asr-workers").value, 10) || 4,
