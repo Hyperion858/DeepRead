@@ -1010,19 +1010,12 @@ function renderSettings() {
   $app.innerHTML = shell("settings", `
     <div class="page settings-split">
       <h1>模型配置</h1>
-      <div class="set-layout">
-        <aside class="set-side">
-          <div class="prov-nav-item set-fixed ${selSection === "providers" ? "on" : ""}" data-sec="providers">
-            <span class="pnav-name">API 提供商</span>
-          </div>
-          <div class="prov-nav-item set-fixed ${selSection === "roles" ? "on" : ""}" data-sec="roles">
-            <span class="pnav-name">模型分配</span>
-          </div>
-          <div class="prov-nav-item set-fixed ${selSection === "tuning" ? "on" : ""}" data-sec="tuning">
-            <span class="pnav-name">生成参数</span>
-          </div>
-        </aside>
-        <section class="set-main">
+      <div class="set-tabs">
+        <button class="set-fixed ${selSection === "providers" ? "on" : ""}" data-sec="providers">API 提供商</button>
+        <button class="set-fixed ${selSection === "roles" ? "on" : ""}" data-sec="roles">模型分配</button>
+        <button class="set-fixed ${selSection === "tuning" ? "on" : ""}" data-sec="tuning">生成参数</button>
+      </div>
+      <section class="set-main">
           <div id="stab-providers" class="stab"></div>
           <div id="stab-roles" class="stab" style="display:none">
             <div class="cfg-card">
@@ -1108,7 +1101,6 @@ function renderSettings() {
           </div>
           <div class="test-result" id="test-result"></div>
         </section>
-      </div>
       <section class="run-log">
         <div class="run-log-head">
           <span>运行日志</span>
@@ -1217,48 +1209,46 @@ function renderSettings() {
       return assigned;
     };
     wrap.innerHTML = `
-      <div class="cfg-card" style="margin-bottom:0">
-        <div class="cfg-card-head">
-          <span class="cfg-card-title">🔌 API 提供商</span>
-          <button id="prov-add" class="primary" style="padding:6px 16px">＋ 添加</button>
-        </div>
-        ${providers.length ? providers.map((p, i) => {
-          const st = provStatus(p);
-          const roles = rolesFor(i);
-          const open = expandedProvider === i;
-          return `
-          <div class="prov-card ${open ? "open" : ""}" data-pi="${i}">
-            <div class="prov-card-head" data-toggle="${i}">
+      <div class="prov-head">
+        <span class="prov-head-title">API 提供商</span>
+        <button id="prov-add" class="primary" style="padding:6px 16px">＋ 添加</button>
+      </div>
+      ${providers.length ? `<div class="prov-grid">${providers.map((p, i) => {
+        const st = provStatus(p);
+        const roles = rolesFor(i);
+        const open = expandedProvider === i;
+        return `
+        <div class="prov-card ${open ? "open" : ""}" data-pi="${i}">
+          <div class="prov-card-hit" data-toggle="${i}">
+            <div class="prov-card-head">
               <span class="prov-dot ${st.cls}" title="${st.cls === "ok" ? "上次测试通过" : st.cls === "fail" ? "上次测试失败" : "未测试"}"></span>
-              <div class="prov-card-main">
-                <span class="prov-card-name">${esc(p.name || `API ${i + 1}`)}</span>
-                <span class="prov-card-url">${esc((p.base_url || "").replace(/^https?:\/\//, ""))}</span>
-                <span class="prov-card-roles">用于：${roles.length ? roles.join(" · ") : "未分配"}</span>
-              </div>
-              <div class="prov-card-side">
-                <span class="prov-status ${st.cls}">${st.text}</span>
-                <button class="prov-test" data-test="${i}" title="测试这个 API 的连接">测试</button>
-                <button data-edit="${i}" title="编辑这个 API">编辑</button>
-                <button class="danger p-del" data-del="${i}" title="删除">✕</button>
-              </div>
+              <span class="prov-card-name">${esc(p.name || `API ${i + 1}`)}</span>
             </div>
-            <div class="prov-body" data-body="${i}">
-              <div class="form-row"><label>名称</label>
-                <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 阿里云百炼）"></div>
-              <div class="form-row"><label>Base URL</label>
-                <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
-              <div class="form-row"><label>API Key</label>
-                <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
-              <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见左侧「模型分配」）。</div>
-              <div class="form-actions">
-                <button class="primary prov-done" data-done="${i}" style="padding:8px 22px">确定</button>
-                <button class="prov-test" data-test="${i}">测试连接</button>
-              </div>
+            <div class="prov-card-url">${esc((p.base_url || "").replace(/^https?:\/\//, ""))}</div>
+            <div class="prov-status ${st.cls}">${st.text}</div>
+            <div class="prov-card-roles">用于：${roles.length ? roles.join(" · ") : "未分配"}</div>
+          </div>
+          <div class="prov-card-actions">
+            <button class="prov-test" data-test="${i}" title="测试这个 API 的连接">测试</button>
+            <button data-edit="${i}" title="编辑这个 API">编辑</button>
+            <button class="danger p-del" data-del="${i}" title="删除">✕</button>
+          </div>
+          <div class="prov-body" data-body="${i}">
+            <div class="form-row"><label>名称</label>
+              <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 阿里云百炼）"></div>
+            <div class="form-row"><label>Base URL</label>
+              <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
+            <div class="form-row"><label>API Key</label>
+              <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
+            <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见上方「模型分配」）。</div>
+            <div class="form-actions">
+              <button class="primary prov-done" data-done="${i}" style="padding:8px 22px">确定</button>
+              <button class="prov-test" data-test="${i}">测试连接</button>
             </div>
-          </div>`;
-        }).join("")
-        : `<div class="panel-empty" style="padding:24px">还没有 API，点击右上「＋ 添加」</div>`}
-      </div>`;
+          </div>
+        </div>`;
+      }).join("")}</div>`
+        : `<div class="panel-empty" style="padding:24px">还没有 API，点击右上「＋ 添加」</div>`}`;
 
     wrap.querySelectorAll("[data-toggle]").forEach((el) => {
       el.onclick = () => {
