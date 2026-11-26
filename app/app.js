@@ -226,7 +226,11 @@ async function refreshMaterials() {
       }).join("") + `</table></div>`;
 
     wrap.querySelectorAll("[data-genc]").forEach((btn) => {
-      btn.onclick = () => openChannelDialog({ mid: btn.dataset.genc, kind: "material" });
+      btn.onclick = () => {
+        const m = materials.find((x) => x.id === btn.dataset.genc) || {};
+        openChannelDialog({ mid: btn.dataset.genc, kind: "material",
+                            lastChannels: m.last_channels, lastAlignBase: m.last_align_base });
+      };
     });
     wrap.querySelectorAll("[data-regen]").forEach((btn) => {
       btn.onclick = () => {
@@ -800,7 +804,7 @@ function drawCoursePage() {
     const order = shuffle([...vocab.keys()]);
     panel.innerHTML = `
       <div style="margin-bottom:12px;color:var(--ink-2);font-size:13px">
-        点击卡片翻面 · 底部按钮标记认识/不认识 · 点击句号跳转原句
+        点击卡片翻面 · 底部按钮标记认识/不认识
       </div>
       <div class="card-grid">${order.map((vi) => cardHtml(vocab[vi], vi)).join("")}</div>`;
 
@@ -839,10 +843,6 @@ function drawCoursePage() {
           <button data-mark="unknown" class="${known === "unknown" ? "mark-unknown" : ""}">不认识</button>
           <button data-mark="known" class="${known === "known" ? "mark-known" : ""}">认识</button>
         </div>
-        ${(v.sentenceIds || []).length && sentences[v.sentenceIds[0]] ? `
-          <div class="hs-time">⏱ ${fmtTime(sentences[v.sentenceIds[0]].start)} → ${fmtTime(sentences[v.sentenceIds[0]].end)}</div>
-          <a class="jump jump-btn" data-sid="${v.sentenceIds[0]}" href="#">▶ 播放原句</a>
-          ${sentenceActionsHtml(v.sentenceIds[0])}` : ""}
       </div>
       <div class="face back">
         <div class="def">${esc(v.definition || "")}</div>
@@ -864,10 +864,7 @@ function drawCoursePage() {
         <div class="hs-orig">${esc(x.phrase || x.term || x.topic)}</div>
         <div class="hs-structure">${esc(x.meaning || x.explanation || x.note || "")}</div>
         ${x.usage ? `<div class="hs-breakdown">${esc(x.usage)}</div>` : ""}
-        ${s ? `<div class="hs-jump hs-time">⏱ ${fmtTime(s.start)} → ${fmtTime(s.end)}
-                <a class="jump jump-btn" data-sid="${sid}" href="#">▶ 播放原句</a>
-                <span class="hs-snip">${esc(s.text.slice(0, 60))}</span></div>
-              ${sentenceActionsHtml(sid)}` : ""}
+        ${s ? `<div class="hs-jump"><span class="hs-snip">${esc(s.text.slice(0, 60))}</span></div>` : ""}
       </div>`;
     };
     panel.innerHTML = `
@@ -953,14 +950,23 @@ function drawCoursePage() {
 }
 
 /* ---------------- channel selection dialog ---------------- */
-function openChannelDialog({ mid, kind, lastChannels }) {
+async function openChannelDialog({ mid, kind, lastChannels, lastAlignBase }) {
   document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
+  // default baseline comes from the saved config; the dialog can override
+  let cfgAlignBase = "asr";
+  try { cfgAlignBase = (await api("/api/config")).align_base || "asr"; } catch {}
   const CH = [
     { key: "embedded", name: "📺 内嵌字幕", desc: "提取视频内封装的字幕轨（最准，有则强烈推荐）" },
     { key: "ocr", name: "🖼 OCR 硬字幕", desc: "识别烧在画面上的字幕（抖音等平台），耗时较长" },
     { key: "asr", name: "🎙 语音转写", desc: "音频转文字（无字幕视频/纯音频必选；与字幕多选可交叉校验提升准确度）" },
   ];
+  const BASE = [
+    { key: "asr", name: "语音转写", desc: "全文完整，字幕只修正明显错词" },
+    { key: "ocr", name: "OCR 字幕", desc: "以画面字幕为准，缺失段落用转写补齐" },
+    { key: "embedded", name: "内嵌字幕", desc: "以字幕轨为准，缺失段落用转写补齐" },
+  ];
   const checked = new Set(lastChannels || ["embedded", "ocr", "asr"]);
+  const baseSel = lastAlignBase || cfgAlignBase;
   const overlay = document.createElement("div");
   overlay.className = "cal-overlay";
   overlay.innerHTML = `
@@ -972,6 +978,12 @@ function openChannelDialog({ mid, kind, lastChannels }) {
           <input type="checkbox" data-ch="${c.key}" ${checked.has(c.key) ? "checked" : ""}>
           <div class="ch-text"><b>${c.name}</b><small>${c.desc}</small></div>
         </label>`).join("")}
+      <div class="cal-hint" style="margin:14px 0 8px">融合比对基准（多通道时，文本不一致以谁为准）：</div>
+      ${BASE.map((b) => `
+        <label class="ch-row">
+          <input type="radio" name="align-base" value="${b.key}" ${baseSel === b.key ? "checked" : ""}>
+          <div class="ch-text"><b>${b.name}</b><small>${b.desc}</small></div>
+        </label>`).join("")}
       <div class="form-actions" style="margin-top:14px">
         <button class="primary ch-go" style="flex:1">开始生成课程</button>
         <button class="cal-close" style="flex-shrink:0">取消</button>
@@ -980,11 +992,12 @@ function openChannelDialog({ mid, kind, lastChannels }) {
   overlay.querySelector(".ch-go").onclick = async () => {
     const channels = [...overlay.querySelectorAll("[data-ch]:checked")].map((el) => el.dataset.ch);
     if (!channels.length) { toast("至少选择一个通道"); return; }
+    const align_base = overlay.querySelector("input[name=align-base]:checked")?.value || cfgAlignBase;
     try {
       let res;
       if (kind === "material") {
         res = await api(`/api/materials/${mid}/generate`, {
-          method: "POST", body: JSON.stringify({ channels }),
+          method: "POST", body: JSON.stringify({ channels, align_base }),
         });
         toast("课程生成已开始");
         location.hash = `#/course/${res.id}`;
@@ -1064,6 +1077,12 @@ function renderSettings() {
             <div class="cfg-card">
               <div class="cfg-card-head"><span class="cfg-card-title">🎛 生成参数</span></div>
               <div class="tune-grid">
+                <div class="bk-field"><label>融合比对基准<small>多通道生成时，文本不一致以谁为准</small></label>
+                  <select id="cfg-align-base">
+                    <option value="asr">语音转写</option>
+                    <option value="ocr">OCR 字幕</option>
+                    <option value="embedded">内嵌字幕</option>
+                  </select></div>
                 <div class="bk-field"><label>转写分段时长（分钟）<small>越短时间越准，请求越多</small></label>
                   <input type="number" id="cfg-seg-min" min="1" max="15"></div>
                 <div class="bk-field"><label>OCR 并发数<small>每帧图片识别并发（3-8）</small></label>
@@ -1148,6 +1167,7 @@ function renderSettings() {
     setBrowse("chat", []);
     drawAllPickers();
     // pipeline tuning
+    document.getElementById("cfg-align-base").value = cfgCache.align_base || "asr";
     document.getElementById("cfg-seg-min").value = cfgCache.segment_minutes || 5;
     document.getElementById("cfg-ocr-workers").value = cfgCache.ocr_workers || 6;
     document.getElementById("cfg-asr-workers").value = cfgCache.asr_workers || 4;
@@ -1648,6 +1668,7 @@ function renderSettings() {
           chat_model: picked.chat[0] || "",
           vision_model: picked.vision[0] || "",
           segment_minutes: parseInt(document.getElementById("cfg-seg-min").value, 10) || 5,
+          align_base: document.getElementById("cfg-align-base").value || "asr",
           ocr_workers: parseInt(document.getElementById("cfg-ocr-workers").value, 10) || 6,
           asr_workers: parseInt(document.getElementById("cfg-asr-workers").value, 10) || 4,
           translate_workers: parseInt(document.getElementById("cfg-tr-workers").value, 10) || 3,

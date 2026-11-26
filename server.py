@@ -74,6 +74,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "asr_workers": 4,             # concurrent ASR segment transcriptions
     "translate_workers": 3,       # concurrent translation batches
     "segment_minutes": 5,
+    # fusion baseline: which channel's text wins when channels disagree
+    # ("asr" | "ocr" | "embedded") — settable per-generate in the dialog
+    "align_base": "asr",
     # backup settings
     "backup_enabled": True,
     "backup_time": "04:00",   # local time HH:MM
@@ -202,6 +205,11 @@ def new_course_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
 
 
+def cfg_default_align_base() -> str:
+    """Saved fusion baseline from config, defaulting to asr."""
+    return load_config().get("align_base") or "asr"
+
+
 def set_stage(cid: str, stage: str, detail: str = "", progress: float | None = None) -> None:
     status = read_json(course_dir(cid) / "status.json", {}) or {}
     # disk-level kill switch: a cancelled status halts any further stage writes
@@ -218,7 +226,8 @@ def set_stage(cid: str, stage: str, detail: str = "", progress: float | None = N
     write_json(course_dir(cid) / "status.json", status)
 
 
-def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = None) -> None:
+def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = None,
+                 align_base: str = "asr") -> None:
     """Background pipeline with a hard watchdog: if it hasn't finished in
     timeout_sec, mark the course errored so a hung API call can't stall forever.
 
@@ -309,7 +318,7 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
             log_event("runtime", f"通道结果：内嵌字幕 {len(embedded_lines)} 条 / OCR {len(ocr_lines)} 条 / ASR {len(asr_segments)} 段",
                       course_id=cid)
             set_stage(cid, "aligning", f"融合 {len(caption_lines)} 条字幕 + {len(asr_segments)} 段转写…", 0.9)
-            segments = align(asr_segments, caption_lines)
+            segments = align(asr_segments, caption_lines, align_base=align_base)
 
             write_json(cdir / "source.json", {"segments": segments})
 
@@ -378,7 +387,7 @@ async def put_config(request: Request):
         if cfg.get("chat_provider") not in live_ids:
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
     for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model", "segment_minutes",
-              "chat_models", "asr_models", "vision_models",
+              "chat_models", "asr_models", "vision_models", "align_base",
               "ocr_workers", "asr_workers", "translate_workers",
               "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):
         if k in body:
@@ -993,6 +1002,8 @@ def material_payload(mat: dict[str, Any]) -> dict[str, Any]:
         "course_id": mat.get("course_id", ""),
         "created_at": mat.get("created_at", ""),
         "note": mat.get("note", ""),
+        "last_channels": mat.get("last_channels", []),
+        "last_align_base": mat.get("last_align_base", ""),
     }
 
 
@@ -1152,6 +1163,13 @@ def material_generate(mid: str, request: Request = None):
             raise HTTPException(400, "channels 无效，至少选择一个：embedded / ocr / asr")
     else:
         channels = valid
+    # fusion baseline: which channel's text wins on disagreement. Per-request
+    # value, else the saved default. Only meaningful with 2+ channels.
+    align_base = body.get("align_base")
+    if align_base not in valid:
+        align_base = str(cfg_default_align_base())
+    if align_base not in channels:
+        align_base = sorted(channels)[0]
     if "ocr" in channels or "embedded" in channels:
         kind = (read_json(material_dir(mid) / "material.json", {}) or {}).get("kind", "video")
         if kind != "video" and channels != {"asr"}:
@@ -1188,6 +1206,8 @@ def material_generate(mid: str, request: Request = None):
         raise HTTPException(400, "转写 provider 未配置")
     if not get_provider_cfg(cfg, "chat").get("base_url"):
         raise HTTPException(400, "Chat provider 未配置")
+    if align_base not in channels:   # re-check after audio narrowing
+        align_base = sorted(channels)[0]
 
     cid = new_course_id()
     cdir = course_dir(cid)
@@ -1201,15 +1221,18 @@ def material_generate(mid: str, request: Request = None):
         "media_path": str(media),   # course points INTO the material storage
         "source_url": mat.get("source_url", ""),
         "channels": sorted(channels),
+        "align_base": align_base,
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     write_json(cdir / "status.json", {"stage": "uploaded", "detail": "已创建，等待生成", "progress": 0})
     mat["course_id"] = cid
     mat["last_channels"] = sorted(channels)   # remember for next time
+    mat["last_align_base"] = align_base
     write_json(mdir / "material.json", mat)
     JOBS[cid] = JobState(stage_lock=mid)
-    threading.Thread(target=run_pipeline, args=(cid,), kwargs={"channels": channels}, daemon=True).start()
-    log_event("action", f"生成课程（通道: {', '.join(sorted(channels))}）", course_id=cid)
+    threading.Thread(target=run_pipeline, args=(cid,),
+                     kwargs={"channels": channels, "align_base": align_base}, daemon=True).start()
+    log_event("action", f"生成课程（通道: {', '.join(sorted(channels))}, 基准: {align_base}）", course_id=cid)
     return {"id": cid, "title": mat.get("title")}
 
 
@@ -1340,11 +1363,18 @@ def generate(cid: str, request: Request = None):
     # channel choice: meta.channels from course creation, or material's last choice
     meta = read_json(cdir / "meta.json", {}) or {}
     channels = set(meta.get("channels") or [])
+    # baseline: course's own setting, else material's last, else config default
+    align_base = meta.get("align_base") or ""
     if not channels and meta.get("material_id"):
         mat = read_json(material_dir(meta["material_id"]) / "material.json", {}) or {}
         channels = set(mat.get("last_channels") or [])
+        align_base = align_base or mat.get("last_align_base") or ""
     if not channels:
         channels = {"embedded", "ocr", "asr"}
+    if align_base not in channels:
+        align_base = str(cfg.get("align_base") or "asr")
+        if align_base not in channels:
+            align_base = sorted(channels)[0]
     if cid not in JOBS:
         # a fresh generate is explicit new intent: clear a stale cancelled /
         # interrupted status (incl. the zombie left by a container restart)
@@ -1353,8 +1383,9 @@ def generate(cid: str, request: Request = None):
         status["detail"] = "准备生成…"
         write_json(cdir / "status.json", status)
         JOBS[cid] = JobState()
-        threading.Thread(target=run_pipeline, args=(cid,), kwargs={"channels": channels}, daemon=True).start()
-        log_event("action", f"重新生成课程（通道: {', '.join(sorted(channels))}）", course_id=cid)
+        threading.Thread(target=run_pipeline, args=(cid,),
+                         kwargs={"channels": channels, "align_base": align_base}, daemon=True).start()
+        log_event("action", f"重新生成课程（通道: {', '.join(sorted(channels))}, 基准: {align_base}）", course_id=cid)
     return {"ok": True}
 
 

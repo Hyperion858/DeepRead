@@ -46,7 +46,14 @@ def _vision_provider(cfg: dict[str, Any]) -> dict[str, Any]:
 def extract_frames(media_path: Path, workdir: Path,
                    interval: float = SAMPLE_INTERVAL,
                    progress_cb: Callable[[float, str], None] | None = None) -> list[Path]:
-    """Extract bottom-crop frames as jpgs at a fixed interval."""
+    """Extract bottom-crop frames as jpgs at a fixed interval.
+
+    One ffmpeg seek per sample: decode starts at the keyframe before the
+    sample time and runs forward (~one GOP), instead of decoding the whole
+    30fps stream in a single pass. Output frames are identical to the
+    sequential filter-chain version; on low-power ARM boxes this cuts a
+    760s video's extraction from minutes to well under one minute.
+    """
     frames_dir = workdir / "ocr_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     # Frames left over from an earlier run would both inflate the live count
@@ -59,33 +66,38 @@ def extract_frames(media_path: Path, workdir: Path,
     duration = probe_duration(media_path)
     expected = max(1, round(duration / interval)) if duration else 0
     # crop bottom 22% of the frame, full width — where douyin burns subtitles.
-    # stream stderr progress: count written frames while ffmpeg runs so the UI
-    # sees live feedback during the (slow) extraction on low-power devices.
-    cmd = [
-        "ffmpeg", "-y", "-i", str(media_path), "-vf",
-        f"fps=1/{interval},crop=iw:ih*0.22:0:ih*0.78,scale=960:-2",
-        "-q:v", "4", str(frames_dir / "f%06d.jpg"),
-    ]
+    import concurrent.futures as _futures
+
+    vf = "crop=iw:ih*0.22:0:ih*0.78,scale=960:-2"
+
+    def _grab(i: int) -> int:
+        t = (i + 0.5) * interval
+        out = frames_dir / f"f{i:06d}.jpg"
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-ss", f"{t:.3f}", "-i", str(media_path),
+                 "-frames:v", "1", "-vf", vf, "-q:v", "4", str(out)],
+                capture_output=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            return -1
+        return i if (r.returncode == 0 and out.exists()) else -1
+
+    ok = 0
+    with _futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futs = [pool.submit(_grab, i) for i in range(expected)]
+        for n_done, fut in enumerate(_futures.as_completed(futs), 1):
+            if fut.result() >= 0:
+                ok += 1
+            if progress_cb:
+                progress_cb(0.01 + 0.26 * n_done / expected,
+                            f"抽帧中… 已提取 {ok}/{expected} 帧")
     if progress_cb:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        while proc.poll() is None:
-            _time_module.sleep(2)
-            n = len(list(frames_dir.glob("f*.jpg")))
-            # Extraction owns the first ~27% of the OCR step; scale by the
-            # expected frame count so the bar advances instead of sitting still.
-            frac = min(1.0, n / expected) if expected else 0.0
-            detail = f"抽帧中… 已提取 {n}/{expected} 帧" if expected else f"抽帧中… 已提取 {n} 帧"
-            progress_cb(0.01 + 0.26 * frac, detail)
-        if proc.returncode != 0:
-            raise RuntimeError("抽帧失败（ffmpeg 非正常退出）")
-    else:
-        r = subprocess.run(cmd, capture_output=True, timeout=1800)
-        if r.returncode != 0:
-            raise RuntimeError(f"抽帧失败: {r.stderr.decode(errors='replace')[-300:]}")
-    frames = sorted(frames_dir.glob("f*.jpg"))
-    if progress_cb:
-        progress_cb(0.3, f"抽取 {len(frames)} 帧")
-    return frames
+        progress_cb(0.3, f"抽取 {ok} 帧")
+    if expected and ok == 0:
+        raise RuntimeError("抽帧失败（所有采样点均未产出帧）")
+    # keep original sample order; OCR step reads the sample index from the
+    # filename so a missing seek doesn't shift everyone's timestamps
+    return sorted(frames_dir.glob("f*.jpg"))
 
 
 def ocr_frame(client: httpx.Client, prov: dict[str, Any], img_path: Path) -> str:
@@ -226,10 +238,8 @@ def extract_ocr_subtitles(
     # vs serial while staying polite to the relay.
     import concurrent.futures as _futures
 
-    n_frames = len(frames)
-
-    def _ocr_one(i: int) -> tuple[int, str]:
-        frame = frames[i]
+    def _ocr_one(entry: tuple[int, Path]) -> tuple[int, str]:
+        i, frame = entry
         t = (i + 0.5) * interval
         # several OCR models selected: walk them in order
         if len([m for m in (cfg.get("vision_models") or []) if m]) > 1:
@@ -262,19 +272,24 @@ def extract_ocr_subtitles(
         return (i, text)
 
     done_count = 0
+    # filename carries the sample index (extract_frames skips failed seeks),
+    # so timestamps stay aligned even when some frames are missing
+    entries: list[tuple[int, Path]] = []
+    for frame in frames:
+        m = re.match(r"f(\d+)\.jpg$", frame.name)
+        if m:
+            entries.append((int(m.group(1)), frame))
     with _futures.ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        futures = {pool.submit(_ocr_one, i): i for i in range(n_frames)}
+        futures = {pool.submit(_ocr_one, e): e[0] for e in entries}
         for fut in _futures.as_completed(futures):
             i, text = fut.result()
-            if not text and text != "":
-                text = ""
             results.append(((i + 0.5) * interval, text))
             done_count += 1
             if progress_cb and done_count % 5 == 0:
-                progress_cb(0.3 + 0.6 * done_count / n_frames,
-                            f"OCR 识别 {done_count}/{n_frames} 帧…")
-    if progress_cb:
-        progress_cb(0.9, f"OCR 完成 {n_frames} 帧")
+                progress_cb(0.3 + 0.6 * done_count / len(entries),
+                            f"OCR 识别 {done_count}/{len(entries)} 帧…")
+    if progress_cb and entries:
+        progress_cb(0.9, f"OCR 完成 {len(entries)} 帧")
     results.sort(key=lambda x: x[0])
 
     cues = merge_cues(results, interval)

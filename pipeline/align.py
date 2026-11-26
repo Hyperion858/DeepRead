@@ -159,7 +159,8 @@ def _warp_asr_to_cues(asr: list[dict[str, Any]], cues: list[dict[str, Any]]) -> 
     return result
 
 
-def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
+          align_base: str = "asr") -> list[dict[str, Any]]:
     # normalize + merge ASR fragments first
     asr = merge_asr_fragments(asr_segments)
     asr = [s for s in (split_long_segment(s) for s in asr) for s in s]
@@ -191,6 +192,11 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]]) ->
     used_embedded: set[int] = set()
     results: list[dict[str, Any]] = []
 
+    # the baseline channel wins text disagreements. Default asr: caption text
+    # is usually human-authored so strong agreement takes it. ocr/embedded as
+    # baseline: keep the caption text unless ASR clearly carries more content.
+    base_is_caption = align_base in ("ocr", "embedded")
+
     for seg in asr:
         s_start, s_end = seg["start"], seg["end"]
         span = max(s_end - s_start, 0.1)
@@ -215,7 +221,20 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]]) ->
             used_embedded.add(i)
 
         sim = _similarity(seg["text"], sub_text)
-        if sim > 0.75:
+        if base_is_caption:
+            # caption is the authority: take its text whenever it carries
+            # comparable content; flag when ASR disagrees noticeably
+            if len(_norm(sub_text)) >= len(_norm(seg["text"])) * 0.5 or sim > 0.5:
+                results.append({
+                    **seg,
+                    "text": sub_text,
+                    "source": "caption",
+                    "uncertain": sim <= 0.4,
+                })
+            else:
+                # caption too fragmentary to serve — fall back to ASR text
+                results.append({**seg, "source": "asr", "uncertain": True})
+        elif sim > 0.75:
             # strong agreement: caption text is human-authored, take it whole
             results.append({
                 **seg,
