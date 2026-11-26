@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 import httpx
 
-from pipeline.transcribe import detect_lang, probe_duration
+from pipeline.transcribe import PipelineCancelled, detect_lang, probe_duration
 
 SAMPLE_INTERVAL = 2.0   # seconds between sampled frames
 OCR_PREFIX = "OCR"
@@ -45,7 +45,8 @@ def _vision_provider(cfg: dict[str, Any]) -> dict[str, Any]:
 
 def extract_frames(media_path: Path, workdir: Path,
                    interval: float = SAMPLE_INTERVAL,
-                   progress_cb: Callable[[float, str], None] | None = None) -> list[Path]:
+                   progress_cb: Callable[[float, str], None] | None = None,
+                   should_cancel: Callable[[], bool] | None = None) -> list[Path]:
     """Extract bottom-crop frames as jpgs at a fixed interval.
 
     One ffmpeg seek per sample: decode starts at the keyframe before the
@@ -91,6 +92,11 @@ def extract_frames(media_path: Path, workdir: Path,
             if progress_cb:
                 progress_cb(0.01 + 0.26 * n_done / expected,
                             f"抽帧中… 已提取 {ok}/{expected} 帧")
+            # a cancel here must stop the ~760 queued seeks, not just the OCR step
+            if should_cancel and should_cancel():
+                for f in futs:
+                    f.cancel()
+                raise PipelineCancelled
     if progress_cb:
         progress_cb(0.3, f"抽取 {ok} 帧")
     if expected and ok == 0:
@@ -227,7 +233,8 @@ def extract_ocr_subtitles(
     if not prov["base_url"] or not prov["model"]:
         return []
     frames = extract_frames(media_path, course_dir,
-                            interval=interval, progress_cb=progress_cb)
+                            interval=interval, progress_cb=progress_cb,
+                            should_cancel=should_cancel)
     if not frames:
         return []
 
