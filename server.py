@@ -679,6 +679,34 @@ async def probe_status(job_id: str = "", since: int = 0):
             "result": job["result"], "error": job.get("error", "")}
 
 
+@app.delete("/api/config/probe_cache")
+async def clear_probe_cache(provider_id: str = "", role: str = ""):
+    """Drop cached capability results.
+
+    No provider_id -> clear everything; no role -> clear that provider's roles.
+    """
+    cfg = load_config()
+    cache = {k: dict(v) for k, v in (cfg.get("probe_cache") or {}).items()}
+    cleared: list[str] = []
+    if not provider_id:
+        cleared = [f"{pid}/{r}" for pid, ent in cache.items() for r in ("vision", "asr") if ent.get(r)]
+        cache = {}
+    else:
+        entry = dict(cache.get(provider_id) or {})
+        targets = [role] if role in ("vision", "asr") else ["vision", "asr"]
+        for r in targets:
+            if r in entry:
+                entry.pop(r, None)
+                cleared.append(f"{provider_id}/{r}")
+        if any(k in entry for k in ("vision", "asr")):
+            cache[provider_id] = entry
+        else:
+            cache.pop(provider_id, None)
+    cfg["probe_cache"] = cache
+    save_config(cfg)
+    return {"ok": True, "cleared": cleared, "probe_cache": cache}
+
+
 @app.post("/api/config/test")
 async def test_config(request: Request):
     """Probe providers: real chat + transcription endpoint checks.

@@ -1045,7 +1045,10 @@ function renderSettings() {
                     <button id="cfg-refresh-asr" style="flex-shrink:0" title="获取模型并检测哪些支持语音转写">↻</button>
                   </div>
                   <div class="probe-row">
-                    <button id="cfg-probe-asr" title="忽略缓存，重新检测哪些模型支持语音转写">🔄 重新检测</button>
+                    <div class="probe-actions">
+                      <button id="cfg-probe-asr" title="忽略缓存，重新检测哪些模型支持语音转写">🔄 重新检测</button>
+                      <button id="cfg-clear-asr" class="probe-clear" title="删除这个 API 的语音转写检测缓存">清除缓存</button>
+                    </div>
                     <span class="probe-hint" id="asr-probe-hint"></span>
                   </div>
                   <label class="switch-row role-switch">
@@ -1065,7 +1068,10 @@ function renderSettings() {
                     <button id="cfg-refresh-vision" style="flex-shrink:0" title="获取模型并检测哪些支持图片输入">↻</button>
                   </div>
                   <div class="probe-row">
-                    <button id="cfg-probe-vision" title="忽略缓存，重新检测哪些模型支持图片输入">🔄 重新检测</button>
+                    <div class="probe-actions">
+                      <button id="cfg-probe-vision" title="忽略缓存，重新检测哪些模型支持图片输入">🔄 重新检测</button>
+                      <button id="cfg-clear-vision" class="probe-clear" title="删除这个 API 的 OCR 检测缓存">清除缓存</button>
+                    </div>
                     <span class="probe-hint" id="vision-probe-hint"></span>
                   </div>
                   <label class="switch-row role-switch">
@@ -1553,6 +1559,34 @@ function renderSettings() {
     await saveConfigQuiet();
     await probeRole("vision", true);
   };
+
+  document.getElementById("cfg-clear-asr").onclick = () => clearProbeCache("asr");
+  document.getElementById("cfg-clear-vision").onclick = () => clearProbeCache("vision");
+
+  async function clearProbeCache(role) {
+    const ids = roleIds(role);
+    const pid = document.getElementById(ids.prov).value || document.getElementById("role-chat").value;
+    if (!pid) { toast("请先添加并保存 API"); return; }
+    const label = role === "asr" ? "语音转写" : "画面字幕 OCR";
+    try {
+      await api(`/api/config/probe_cache?provider_id=${encodeURIComponent(pid)}&role=${role}`, { method: "DELETE" });
+      cfgCache = cfgCache || {};
+      const entry = (cfgCache.probe_cache || {})[pid];
+      if (entry) {
+        delete entry[role];
+        if (!entry.vision && !entry.asr) delete cfgCache.probe_cache[pid];
+      }
+      // no detection results any more: show only the model that is selected
+      const cur = document.getElementById(ids.model).value;
+      ids.fill(cur ? [cur] : [], cur, "");
+      setProbeHint(role, "检测缓存已清除，下次点 ↻ 会重新检测");
+      logLine("warn", `已清除 ${label} 的检测缓存`);
+      toast("缓存已清除");
+    } catch (err) {
+      toast("清除失败: " + err.message);
+      logLine("fail", "✗ 清除缓存失败: " + err.message);
+    }
+  }
 
   async function saveConfigQuiet() {
     collectProviders();
