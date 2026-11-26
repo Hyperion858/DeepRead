@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 import httpx
 
-from pipeline.transcribe import detect_lang
+from pipeline.transcribe import detect_lang, probe_duration
 
 SAMPLE_INTERVAL = 2.0   # seconds between sampled frames
 OCR_PREFIX = "OCR"
@@ -49,6 +49,15 @@ def extract_frames(media_path: Path, workdir: Path,
     """Extract bottom-crop frames as jpgs at a fixed interval."""
     frames_dir = workdir / "ocr_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
+    # Frames left over from an earlier run would both inflate the live count
+    # (it looked stuck at "380 帧") and be OCR'd if this run failed early.
+    for stale in frames_dir.glob("f*.jpg"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    duration = probe_duration(media_path)
+    expected = max(1, round(duration / interval)) if duration else 0
     # crop bottom 22% of the frame, full width — where douyin burns subtitles.
     # stream stderr progress: count written frames while ffmpeg runs so the UI
     # sees live feedback during the (slow) extraction on low-power devices.
@@ -62,7 +71,11 @@ def extract_frames(media_path: Path, workdir: Path,
         while proc.poll() is None:
             _time_module.sleep(2)
             n = len(list(frames_dir.glob("f*.jpg")))
-            progress_cb(0.02, f"抽帧中… 已提取 {n} 帧")
+            # Extraction owns the first ~27% of the OCR step; scale by the
+            # expected frame count so the bar advances instead of sitting still.
+            frac = min(1.0, n / expected) if expected else 0.0
+            detail = f"抽帧中… 已提取 {n}/{expected} 帧" if expected else f"抽帧中… 已提取 {n} 帧"
+            progress_cb(0.01 + 0.26 * frac, detail)
         if proc.returncode != 0:
             raise RuntimeError("抽帧失败（ffmpeg 非正常退出）")
     else:
