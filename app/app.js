@@ -1223,13 +1223,13 @@ function renderSettings() {
       <div class="set-layout">
         <aside class="set-side">
           <div class="prov-nav-item set-fixed ${selSection === "providers" ? "on" : ""}" data-sec="providers">
-            <span class="pnav-name"><span class="pnav-icon">🔌</span>API 提供商</span>
+            <span class="pnav-name">API 提供商</span>
           </div>
           <div class="prov-nav-item set-fixed ${selSection === "roles" ? "on" : ""}" data-sec="roles">
-            <span class="pnav-name"><span class="pnav-icon">🎯</span>模型分配</span>
+            <span class="pnav-name">模型分配</span>
           </div>
           <div class="prov-nav-item set-fixed ${selSection === "tuning" ? "on" : ""}" data-sec="tuning">
-            <span class="pnav-name"><span class="pnav-icon">🎛</span>生成参数</span>
+            <span class="pnav-name">生成参数</span>
           </div>
         </aside>
         <section class="set-main">
@@ -1454,7 +1454,7 @@ function renderSettings() {
           <div class="prov-row" data-pi="${i}">
             <div class="pnav-main">
               <span class="pnav-name">${esc(p.name || `API ${i + 1}`)}</span>
-              <span class="pnav-url">${esc(p.base_url.replace(/^https?:\/\//, ""))}</span>
+              <span class="pnav-url">${esc((p.base_url || "").replace(/^https?:\/\//, ""))}</span>
             </div>
             <button class="prov-edit" data-edit="${i}">✎ 编辑</button>
             <button class="danger p-del" data-del="${i}" title="删除">✕</button>
@@ -1577,14 +1577,6 @@ function renderSettings() {
     modelCache[providerId] = res;
     return res;
   }
-
-  document.getElementById("prov-add").onclick = async () => {
-    collectProviders();
-    providers.push({ id: "", name: "", base_url: "", api_key: "" });
-    selSection = `prov:${providers.length - 1}`;
-    drawProviders(); // drawProviders now refreshes role dropdowns too
-    drawSection();
-  };
 
   // left-nav fixed sections (API 提供商 / 模型分配 / 生成参数)
   document.querySelectorAll(".set-fixed").forEach((el) => {
