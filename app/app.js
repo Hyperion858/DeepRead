@@ -1035,7 +1035,7 @@ function renderSettings() {
                     <span class="switch-ui"></span>
                     <div class="switch-text">
                       <b>自动切换可用模型</b>
-                      <small>已选模型按顺序尝试，报错时换下一个；还会补充该 API 下其他可用模型</small>
+                      <small>选中的模型总会按顺序尝试。开启后，若全部失败，还会自动尝试该 API 下其他同类模型</small>
                     </div>
                   </label>
                 </div>
@@ -1056,7 +1056,7 @@ function renderSettings() {
                     <span class="switch-ui"></span>
                     <div class="switch-text">
                       <b>自动切换可用模型</b>
-                      <small>已选模型按顺序尝试，报错时换下一个；还会补充该 API 下其他转写模型</small>
+                      <small>选中的模型总会按顺序尝试。开启后，若全部失败，还会自动尝试该 API 下其他转写模型</small>
                     </div>
                   </label>
                 </div>
@@ -1077,7 +1077,7 @@ function renderSettings() {
                     <span class="switch-ui"></span>
                     <div class="switch-text">
                       <b>自动切换可用模型</b>
-                      <small>已选模型按顺序尝试，报错时换下一个；还会补充该 API 下其他视觉模型</small>
+                      <small>选中的模型总会按顺序尝试。开启后，若全部失败，还会自动尝试该 API 下其他视觉模型</small>
                     </div>
                   </label>
                 </div>

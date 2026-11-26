@@ -395,28 +395,16 @@ def _chat(
     max_tokens: int = 8000,
     temperature: float = 0.3,
 ) -> str:
-    """Single chat call. With auto_switch_chat on, falls back to the provider's
-    other chat-capable models on dead-model errors; otherwise one shot."""
-    if cfg.get("auto_switch_chat"):
-        content, _ = chat_with_failover(
-            cfg, messages, max_tokens=max_tokens, temperature=temperature,
-        )
-        return content
-    base_url, api_key, model = _chat_provider(cfg)
-    r = client.post(
-        f"{base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        },
-        timeout=600,
+    """Chat call for one prompt.
+
+    Always walks the selected model list in order, so a dead primary falls
+    through to the next pick. auto_switch_chat additionally lets it append the
+    provider's other chat-capable models after the user's own picks.
+    """
+    content, _ = chat_with_failover(
+        cfg, messages, max_tokens=max_tokens, temperature=temperature,
     )
-    if r.status_code != 200:
-        raise RuntimeError(f"chat API {r.status_code}: {r.text[:300]}")
-    return r.json()["choices"][0]["message"]["content"]
+    return content
 
 
 def _extract_json(text: str) -> Any:
