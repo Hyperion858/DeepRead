@@ -35,12 +35,15 @@ def _chat_provider(cfg: dict[str, Any]) -> tuple[str, str, str]:
 
 # ---- model failover -------------------------------------------------------
 
-# error signatures that mean "this model is dead/over quota" -> try next model
+# error signatures that mean "this model is dead/over quota" -> try next model.
+# 400 belongs here: a model that can't handle the input (e.g. a dedicated ASR
+# model fed through chat/completions) answers 400, and failing over to the
+# next candidate beats aborting the whole pipeline.
 _MODEL_DEAD_MARKERS = (
     "quota", "insufficient", "exceeded", "额度", "余额", "欠费", "免费额度",
     "model_not_found", "not found", "不存在", "not available",
     "no permission", "无权限", "deprecated", "decommissioned", "下线",
-    "429", "403", "402", "404",
+    "400", "429", "403", "402", "404",
 )
 
 
