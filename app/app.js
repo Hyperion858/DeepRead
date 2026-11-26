@@ -1092,11 +1092,11 @@ function renderSettings() {
                 <div class="tune-section-title">字幕识别（OCR）</div>
                 <div class="tune-rows">
                   <div class="tune-row">
-                    <div class="tune-label">OCR 采样间隔<small>越小越密、越不易漏短字幕，请求数越多（0.5-3 秒）</small></div>
+                    <div class="tune-label">OCR 采样间隔：<small>越小越密，越不易漏短字幕（0.5-3 秒）</small></div>
                     <div class="tune-ctl"><input type="number" id="cfg-ocr-interval" min="0.5" max="3" step="0.5"></div>
                   </div>
                   <div class="tune-row">
-                    <div class="tune-label">OCR 并发数<small>每帧图片识别并发（3-8）</small></div>
+                    <div class="tune-label">OCR 并发数：<small>每帧图片识别并发（3-8）</small></div>
                     <div class="tune-ctl"><input type="number" id="cfg-ocr-workers" min="1" max="12"></div>
                   </div>
                 </div>
@@ -1105,11 +1105,11 @@ function renderSettings() {
                 <div class="tune-section-title">语音转写（ASR）</div>
                 <div class="tune-rows">
                   <div class="tune-row">
-                    <div class="tune-label">转写分段时长（分钟）<small>越短时间越准，请求越多</small></div>
+                    <div class="tune-label">转写分段时长：<small>越短时间越准，请求越多（分钟）</small></div>
                     <div class="tune-ctl"><input type="number" id="cfg-seg-min" min="1" max="15"></div>
                   </div>
                   <div class="tune-row">
-                    <div class="tune-label">转写并发数<small>音频分段转写并发（2-6）</small></div>
+                    <div class="tune-label">转写并发数：<small>音频分段转写并发（2-6）</small></div>
                     <div class="tune-ctl"><input type="number" id="cfg-asr-workers" min="1" max="8"></div>
                   </div>
                 </div>
@@ -1118,7 +1118,7 @@ function renderSettings() {
                 <div class="tune-section-title">融合与精讲</div>
                 <div class="tune-rows">
                   <div class="tune-row">
-                    <div class="tune-label">融合比对基准<small>多通道生成时，文本不一致以谁为准</small></div>
+                    <div class="tune-label">融合比对基准：<small>文本不一致以谁为准</small></div>
                     <div class="tune-ctl"><select id="cfg-align-base">
                       <option value="asr">语音转写</option>
                       <option value="ocr">OCR 字幕</option>
@@ -1126,7 +1126,7 @@ function renderSettings() {
                     </select></div>
                   </div>
                   <div class="tune-row">
-                    <div class="tune-label">翻译并发数<small>翻译批次并发（1-6）</small></div>
+                    <div class="tune-label">翻译并发数：<small>翻译批次并发（1-6）</small></div>
                     <div class="tune-ctl"><input type="number" id="cfg-tr-workers" min="1" max="8"></div>
                   </div>
                 </div>
