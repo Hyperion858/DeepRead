@@ -68,10 +68,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "vision_models": [],
     # pipeline tuning
     "ocr_workers": 6,             # concurrent OCR frame recognitions
-    "ocr_interval": 1.0,          # seconds between sampled frames (lower = denser, more requests)
+    "ocr_interval": 1.0,          # silent-stretch sweep interval in seconds
+    "ocr_bottom_crop": 0.22,      # fraction of frame height kept for captions (bottom strip)
     "asr_workers": 4,             # concurrent ASR segment transcriptions
     "translate_workers": 3,       # concurrent translation batches
-    "segment_minutes": 5,
     # fusion baseline: which channel's text wins when channels disagree
     # ("asr" | "ocr" | "embedded") — settable per-generate in the dialog
     "align_base": "asr",
@@ -389,9 +389,9 @@ async def put_config(request: Request):
             cfg["asr_provider"] = incoming[0]["id"] if incoming else ""
         if cfg.get("chat_provider") not in live_ids:
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
-    for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model", "segment_minutes",
+    for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model",
               "chat_models", "asr_models", "vision_models", "align_base",
-              "ocr_workers", "ocr_interval", "asr_workers", "translate_workers",
+              "ocr_workers", "ocr_interval", "ocr_bottom_crop", "asr_workers", "translate_workers",
               "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):
         if k in body:
             cfg[k] = body[k]

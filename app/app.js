@@ -1096,8 +1096,8 @@ function renderSettings() {
                 <div class="tune-section-title">字幕识别（OCR）</div>
                 <div class="tune-rows">
                   <div class="tune-row">
-                    <div class="tune-label">OCR 采样间隔：<small>越小越密，越不易漏短字幕（0.5-3 秒）</small></div>
-                    <div class="tune-ctl"><input type="number" id="cfg-ocr-interval" min="0.5" max="3" step="0.5"></div>
+                    <div class="tune-label">字幕区域高度：<small>画面底部保留比例，字幕不在底部时调大（0.05-0.5）</small></div>
+                    <div class="tune-ctl"><input type="number" id="cfg-ocr-crop" min="0.05" max="0.5" step="0.01"></div>
                   </div>
                   <div class="tune-row">
                     <div class="tune-label">OCR 并发数：<small>每帧图片识别并发（3-8）</small></div>
@@ -1108,10 +1108,6 @@ function renderSettings() {
               <div class="tune-section">
                 <div class="tune-section-title">语音转写（ASR）</div>
                 <div class="tune-rows">
-                  <div class="tune-row">
-                    <div class="tune-label">转写分段时长：<small>越短时间越准，请求越多（分钟）</small></div>
-                    <div class="tune-ctl"><input type="number" id="cfg-seg-min" min="1" max="15"></div>
-                  </div>
                   <div class="tune-row">
                     <div class="tune-label">转写并发数：<small>音频分段转写并发（2-6）</small></div>
                     <div class="tune-ctl"><input type="number" id="cfg-asr-workers" min="1" max="8"></div>
@@ -1202,9 +1198,8 @@ function renderSettings() {
     setBrowse("chat", []);
     drawAllPickers();
     // pipeline tuning
-    document.getElementById("cfg-seg-min").value = cfgCache.segment_minutes || 5;
+    document.getElementById("cfg-ocr-crop").value = cfgCache.ocr_bottom_crop || 0.22;
     document.getElementById("cfg-ocr-workers").value = cfgCache.ocr_workers || 6;
-    document.getElementById("cfg-ocr-interval").value = cfgCache.ocr_interval || 1;
     document.getElementById("cfg-asr-workers").value = cfgCache.asr_workers || 4;
     document.getElementById("cfg-tr-workers").value = cfgCache.translate_workers || 3;
     selSection = "providers";
@@ -1456,15 +1451,15 @@ function renderSettings() {
     slot.innerHTML = `
       <div class="mp-list">${rows}</div>
       ${badCount ? `<div class="mp-warn">⚠ 有 ${badCount} 个已选模型上次调用报错，仍按顺序尝试；连续失败会继续换下一个</div>` : ""}
-      ${browse[role] && browse[role].length ? `
-        <div class="mp-add-row">
-          <input type="text" class="mp-search" placeholder="搜索模型（${shownTotal} 个可选）" value="${esc(modelFilter[role] || "")}">
-          <select class="mp-add-sel">
-            <option value="" selected>${f ? `匹配 ${avail.length} 个` : "选择模型…"}</option>
-            ${avail.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}
-          </select>
-          <button class="mp-add" disabled>＋ 添加</button>
-        </div>` : ""}
+      <div class="mp-add-row">
+        <input type="text" class="mp-search" placeholder="搜索模型（${shownTotal} 个可选）" value="${esc(modelFilter[role] || "")}">
+        <select class="mp-add-sel">
+          <option value="" selected>${f ? `匹配 ${avail.length} 个` : "选择模型…"}</option>
+          ${avail.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}
+        </select>
+        <button class="mp-add" disabled>＋ 添加</button>
+        <button class="mp-manual-add" title="手动输入模型名（官方目录滞后的新模型也能加）">＋ 手动添加</button>
+      </div>
       <div class="mp-hint">可多选，按顺序尝试：第一个是主模型，报错时自动换下一个。</div>`;
 
     slot.querySelectorAll("[data-up]").forEach((btn) => {
@@ -1509,6 +1504,16 @@ function renderSettings() {
         if (addSel.value && !chosen.includes(addSel.value)) chosen.push(addSel.value);
         modelFilter[role] = "";
         drawPicker(role);
+      };
+    }
+    // manual add: for models the provider's /models directory lags behind on
+    const manualBtn = slot.querySelector(".mp-manual-add");
+    if (manualBtn) {
+      manualBtn.onclick = () => {
+        const name = prompt("输入模型名称（按 API 文档的模型 Code，如 qwen-audio-3.1-asr-flash-message）：");
+        const clean = (name || "").trim();
+        if (clean && !chosen.includes(clean)) chosen.push(clean);
+        if (clean) toast(`已添加 ${clean}（保存配置后生效）`);
       };
     }
   }
@@ -1603,9 +1608,8 @@ function renderSettings() {
           asr_model: picked.asr[0] || "",
           chat_model: picked.chat[0] || "",
           vision_model: picked.vision[0] || "",
-          segment_minutes: parseInt(document.getElementById("cfg-seg-min").value, 10) || 5,
           ocr_workers: parseInt(document.getElementById("cfg-ocr-workers").value, 10) || 6,
-          ocr_interval: parseFloat(document.getElementById("cfg-ocr-interval").value) || 1,
+          ocr_bottom_crop: parseFloat(document.getElementById("cfg-ocr-crop").value) || 0.22,
           asr_workers: parseInt(document.getElementById("cfg-asr-workers").value, 10) || 4,
           translate_workers: parseInt(document.getElementById("cfg-tr-workers").value, 10) || 3,
         }),

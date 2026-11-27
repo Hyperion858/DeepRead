@@ -79,7 +79,8 @@ def extract_frames(media_path: Path, workdir: Path,
                    interval: float = SAMPLE_INTERVAL,
                    progress_cb: Callable[[float, str], None] | None = None,
                    should_cancel: Callable[[], bool] | None = None,
-                   speech_spans: list[dict[str, Any]] | None = None) -> list[Path]:
+                   speech_spans: list[dict[str, Any]] | None = None,
+                   crop: float = 0.22) -> list[Path]:
     """Extract bottom-crop frames as jpgs at a fixed interval.
 
     One ffmpeg seek per sample: decode starts at the keyframe before the
@@ -103,7 +104,8 @@ def extract_frames(media_path: Path, workdir: Path,
     # crop bottom 22% of the frame, full width — where douyin burns subtitles.
     import concurrent.futures as _futures
 
-    vf = "crop=iw:ih*0.22:0:ih*0.78,scale=960:-2"
+    crop = max(0.05, min(float(crop or 0.22), 0.5))
+    vf = f"crop=iw:ih*{crop:.3f}:0:ih*{1 - crop:.3f},scale=960:-2"
 
     def _grab(i: int) -> int:
         t = sample_times[i]
@@ -305,7 +307,8 @@ def extract_ocr_subtitles(
     frames = extract_frames(media_path, course_dir,
                             interval=interval, progress_cb=progress_cb,
                             should_cancel=should_cancel,
-                            speech_spans=speech_spans)
+                            speech_spans=speech_spans,
+                            crop=float(cfg.get("ocr_bottom_crop") or 0.22))
     if not frames:
         return []
 

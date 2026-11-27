@@ -284,7 +284,10 @@ def transcribe(
     selected_models = [m for m in (cfg.get("asr_models") or []) if m] or [model]
     if not base_url:
         raise RuntimeError("转写 API base_url 未配置")
-    seg_minutes = int(cfg.get("segment_minutes") or 5)
+    # api-mode (whisper-style) segments: fixed 5min windows — the endpoint
+    # returns real timestamps so long windows are fine; chat-mode is pinned
+    # to 60s for tighter estimated timing (no native timestamps there)
+    seg_secs = 300 if mode == "api" else 60
 
     audio_dir = workdir / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -297,10 +300,6 @@ def transcribe(
     if progress_cb:
         progress_cb(0.05, f"音频 {duration:.0f}s，分段中…")
 
-    # chat-mode omni models have no native timestamps: smaller segments mean
-    # tighter time accuracy (each segment's lines are spread across its window).
-    # API mode (whisper-style) returns real timestamps, so long segments are fine.
-    seg_secs = max(seg_minutes * 60, 60) if mode == "api" else 60
     # snap cuts to natural speech pauses where possible — avoids mid-sentence
     # splits at window boundaries
     silences = detect_silences(wav)
