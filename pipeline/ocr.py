@@ -43,10 +43,43 @@ def _vision_provider(cfg: dict[str, Any]) -> dict[str, Any]:
             "model": model}
 
 
+def plan_sample_times(duration: float, interval: float,
+                      speech_spans: list[dict[str, Any]] | None) -> list[float]:
+    """ASR-guided sample times: one probe per spoken sentence (captions burn
+    while people speak, so a frame inside each sentence catches its caption)
+    plus a dense sweep of silent stretches (captions with no speech). Falls
+    back to a uniform interval grid when there is no transcript."""
+    if not speech_spans:
+        n = max(1, round(duration / interval))
+        return [round((i + 0.5) * interval, 2) for i in range(n)]
+    times: list[float] = []
+    for s in speech_spans:
+        mid = (s["start"] + s["end"]) / 2
+        if 0 <= mid < duration:
+            times.append(round(mid, 2))
+    # silent stretches: complement of [start, end] of speech
+    spans = sorted((s["start"], s["end"]) for s in speech_spans if s["end"] > s["start"])
+    silence: list[tuple[float, float]] = []
+    prev = 0.0
+    for a, b in spans:
+        if a - prev >= interval:
+            silence.append((prev, a))
+        prev = max(prev, b)
+    if duration - prev >= interval:
+        silence.append((prev, duration))
+    for a, b in silence:
+        t = a + interval / 2
+        while t < b:
+            times.append(round(t, 2))
+            t += interval
+    return sorted(set(times))
+
+
 def extract_frames(media_path: Path, workdir: Path,
                    interval: float = SAMPLE_INTERVAL,
                    progress_cb: Callable[[float, str], None] | None = None,
-                   should_cancel: Callable[[], bool] | None = None) -> list[Path]:
+                   should_cancel: Callable[[], bool] | None = None,
+                   speech_spans: list[dict[str, Any]] | None = None) -> list[Path]:
     """Extract bottom-crop frames as jpgs at a fixed interval.
 
     One ffmpeg seek per sample: decode starts at the keyframe before the
@@ -65,14 +98,15 @@ def extract_frames(media_path: Path, workdir: Path,
         except OSError:
             pass
     duration = probe_duration(media_path)
-    expected = max(1, round(duration / interval)) if duration else 0
+    sample_times = plan_sample_times(duration or 0.0, interval, speech_spans)
+    expected = max(1, len(sample_times))
     # crop bottom 22% of the frame, full width — where douyin burns subtitles.
     import concurrent.futures as _futures
 
     vf = "crop=iw:ih*0.22:0:ih*0.78,scale=960:-2"
 
     def _grab(i: int) -> int:
-        t = (i + 0.5) * interval
+        t = sample_times[i]
         out = frames_dir / f"f{i:06d}.jpg"
         try:
             r = subprocess.run(
@@ -101,8 +135,9 @@ def extract_frames(media_path: Path, workdir: Path,
         progress_cb(0.3, f"抽取 {ok} 帧")
     if expected and ok == 0:
         raise RuntimeError("抽帧失败（所有采样点均未产出帧）")
-    # keep original sample order; OCR step reads the sample index from the
-    # filename so a missing seek doesn't shift everyone's timestamps
+    # filename carries the sample index → plan_sample_times[i] is its true
+    # timestamp; the OCR step maps f<i> back to the plan so a missing seek
+    # can't shift anyone's timestamps
     return sorted(frames_dir.glob("f*.jpg"))
 
 
@@ -237,6 +272,15 @@ def _is_continuation(prev: str, nxt: str) -> bool:
     return False
 
 
+def _median_gap(results: list[tuple[float, str]]) -> float:
+    """Median spacing between sample times (for cue-boundary half-intervals)."""
+    ts = [t for t, _ in results]
+    if len(ts) < 2:
+        return 0.0
+    gaps = sorted(b - a for a, b in zip(ts, ts[1:]) if b > a)
+    return gaps[len(gaps) // 2]
+
+
 def extract_ocr_subtitles(
     media_path: Path,
     course_dir: Path,
@@ -245,14 +289,23 @@ def extract_ocr_subtitles(
     should_cancel: Callable[[], bool] | None = None,
     workers: int = 6,
     interval: float = SAMPLE_INTERVAL,
+    speech_spans: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Full OCR subtitle channel. Returns [{start,end,text,lang,source='ocr'}]."""
+    """Full OCR subtitle channel. Returns [{start,end,text,lang,source='ocr'}].
+
+    Sampling is ASR-guided when a transcript is available: one probe per
+    spoken sentence plus a dense sweep of silent stretches (see
+    plan_sample_times). Falls back to a uniform grid otherwise.
+    """
     prov = _vision_provider(cfg)
     if not prov["base_url"] or not prov["model"]:
         return []
+    duration = probe_duration(media_path)
+    sample_times = plan_sample_times(duration or 0.0, interval, speech_spans)
     frames = extract_frames(media_path, course_dir,
                             interval=interval, progress_cb=progress_cb,
-                            should_cancel=should_cancel)
+                            should_cancel=should_cancel,
+                            speech_spans=speech_spans)
     if not frames:
         return []
 
@@ -266,7 +319,7 @@ def extract_ocr_subtitles(
 
     def _ocr_one(entry: tuple[int, Path]) -> tuple[int, str]:
         i, frame = entry
-        t = (i + 0.5) * interval
+        t = sample_times[i] if i < len(sample_times) else (i + 0.5) * interval
         # several OCR models selected: walk them in order
         if len([m for m in (cfg.get("vision_models") or []) if m]) > 1:
             from pipeline.lesson import ocr_with_failover
@@ -309,7 +362,8 @@ def extract_ocr_subtitles(
         futures = {pool.submit(_ocr_one, e): e[0] for e in entries}
         for fut in _futures.as_completed(futures):
             i, text = fut.result()
-            results.append(((i + 0.5) * interval, text))
+            t = sample_times[i] if i < len(sample_times) else (i + 0.5) * interval
+            results.append((t, text))
             done_count += 1
             if progress_cb and done_count % 5 == 0:
                 progress_cb(0.3 + 0.6 * done_count / len(entries),
@@ -318,7 +372,9 @@ def extract_ocr_subtitles(
         progress_cb(0.9, f"OCR 完成 {len(entries)} 帧")
     results.sort(key=lambda x: x[0])
 
-    cues = merge_cues(results, interval)
+    # cue merging: with ASR-guided sampling the gaps between probes vary, so
+    # merge on each pair's actual spacing instead of a fixed interval
+    cues = merge_cues(results, _median_gap(results) or interval)
     cues = merge_fragments(cues)
     for c in cues:
         c["source"] = OCR_PREFIX

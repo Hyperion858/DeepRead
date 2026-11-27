@@ -285,23 +285,8 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
                 if not embedded_lines:
                     set_stage(cid, "subtitles", "无内嵌字幕轨", 0.08)
 
-            # 2. OCR burned-in subtitles (video only)
-            if "ocr" in channels and meta.get("kind") == "video":
-                step += 1
-                set_stage(cid, "ocr", "OCR 识别画面硬字幕…", 0.08)
-                try:
-                    ocr_lines = extract_ocr_subtitles(
-                        media_path, cdir, cfg,
-                        progress_cb=lambda p, msg: set_stage(cid, "ocr", msg, 0.08 + 0.62 * p),
-                        should_cancel=lambda: bool(job and job.cancelled),
-                        workers=max(1, int(cfg.get("ocr_workers") or 6)),
-                        interval=max(0.5, float(cfg.get("ocr_interval") or 1.0)),
-                    )
-                except Exception as ocr_exc:  # noqa: BLE001 — OCR is best-effort
-                    set_stage(cid, "ocr", f"OCR 失败: {ocr_exc}", 0.7)
-                    ocr_lines = []
-
-            # 3. ASR
+            # 2. ASR first: the transcript is the timeline backbone, and the
+            # OCR sampling below is guided by where speech actually is
             if "asr" in channels:
                 step += 1
                 set_stage(cid, "transcribing", "调用转写 API 中…", 0.15)
@@ -309,10 +294,29 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
                     media_path,
                     cfg=cfg,
                     workdir=cdir,
-                    progress_cb=lambda p, msg: set_stage(cid, "transcribing", msg, 0.15 + 0.7 * p),
+                    progress_cb=lambda p, msg: set_stage(cid, "transcribing", msg, 0.15 + 0.55 * p),
                     should_cancel=lambda: bool(job and job.cancelled),
                     workers=max(1, int(cfg.get("asr_workers") or 4)),
                 )
+
+            # 3. OCR burned-in subtitles (video only) — ASR-guided sampling:
+            #    one frame per spoken sentence (text cross-check) plus dense
+            #    sampling in silent stretches (captions without speech)
+            if "ocr" in channels and meta.get("kind") == "video":
+                step += 1
+                set_stage(cid, "ocr", "OCR 识别画面硬字幕…", 0.72)
+                try:
+                    ocr_lines = extract_ocr_subtitles(
+                        media_path, cdir, cfg,
+                        progress_cb=lambda p, msg: set_stage(cid, "ocr", msg, 0.72 + 0.18 * p),
+                        should_cancel=lambda: bool(job and job.cancelled),
+                        workers=max(1, int(cfg.get("ocr_workers") or 6)),
+                        interval=max(0.5, float(cfg.get("ocr_interval") or 1.0)),
+                        speech_spans=asr_segments,
+                    )
+                except Exception as ocr_exc:  # noqa: BLE001 — OCR is best-effort
+                    set_stage(cid, "ocr", f"OCR 失败: {ocr_exc}", 0.9)
+                    ocr_lines = []
 
             # 4. fusion
             caption_lines = embedded_lines + ocr_lines

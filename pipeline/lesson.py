@@ -257,7 +257,41 @@ def audio_transcribe_with_failover(
                 lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
                 lines = [_re.sub(r"^[-*\d.、)\s]+", "", ln) or ln for ln in lines]
                 part_dur = probe_duration(part_path)
-                dur_per = part_dur / max(len(lines), 1)
+                # omni models sometimes truncate: a 60s part answered with 1-2
+                # lines. One immediate retry — the flakiness is per-call — then
+                # accept whatever we got (capped spread) rather than fail the
+                # whole course over a flaky model.
+                if len(lines) <= 2 and part_dur > 25.0:
+                    r2 = _httpx.post(
+                        f"{base}/chat/completions",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={
+                            "model": model,
+                            "messages": [{"role": "user", "content": [
+                                {"type": "text", "text": prompt or (
+                                    "逐字转写这段音频。要求：按说话顺序输出，每句话单独一行；"
+                                    "保留原始语言（中文说中文，英文说英文）；不要添加任何解释、总结或标注。"
+                                )},
+                                {"type": "input_audio", "input_audio": {"data": f"data:audio/{fmt};base64,{b64}", "format": fmt}},
+                            ]}],
+                            "max_tokens": 8000,
+                            "temperature": 0,
+                        },
+                        timeout=httpx.Timeout(connect=15, read=300, write=120, pool=15),
+                    )
+                    if r2.status_code == 200:
+                        try:
+                            c2 = r2.json()["choices"][0]["message"]["content"].strip()
+                            l2 = [ln.strip() for ln in c2.splitlines() if ln.strip()]
+                            l2 = [_re.sub(r"^[-*\d.、)\s]+", "", ln) or ln for ln in l2]
+                            if len(l2) > len(lines):
+                                lines, content = l2, c2
+                        except Exception:  # noqa: BLE001 — keep first attempt
+                            pass
+                # spread lines evenly, capped: naive spreading stretched a
+                # truncated single line across the whole 60s part and blew the
+                # timeline into "52-minute" ghosts. 15s ≈ max speech run.
+                dur_per = min(part_dur / max(len(lines), 1), 15.0)
                 segs = []
                 t = 0.0
                 for ln in lines:
