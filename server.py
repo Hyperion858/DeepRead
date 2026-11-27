@@ -1168,12 +1168,16 @@ def material_generate(mid: str, request: Request = None):
     else:
         channels = valid
     # fusion baseline: which channel's text wins on disagreement. Per-request
-    # value, else the saved default. Only meaningful with 2+ channels.
+    # value, else the saved default. When it isn't among the selected
+    # channels, fall back in embedded -> asr -> ocr order.
     align_base = body.get("align_base")
     if align_base not in valid:
         align_base = str(cfg_default_align_base())
     if align_base not in channels:
-        align_base = sorted(channels)[0]
+        for pref in ("embedded", "asr", "ocr"):
+            if pref in channels:
+                align_base = pref
+                break
     if "ocr" in channels or "embedded" in channels:
         kind = (read_json(material_dir(mid) / "material.json", {}) or {}).get("kind", "video")
         if kind != "video" and channels != {"asr"}:
@@ -1364,21 +1368,42 @@ def generate(cid: str, request: Request = None):
         raise HTTPException(400, "转写 provider 未配置")
     if not get_provider_cfg(cfg, "chat").get("base_url"):
         raise HTTPException(400, "Chat provider 未配置")
-    # channel choice: meta.channels from course creation, or material's last choice
+    body = {}
+    if request is not None:
+        try:
+            import asyncio
+            body = asyncio.get_event_loop().run_until_complete(request.json())
+        except Exception:
+            body = {}
+    # channel choice: request override > meta.channels > material's last choice
+    valid = {"embedded", "ocr", "asr"}
     meta = read_json(cdir / "meta.json", {}) or {}
-    channels = set(meta.get("channels") or [])
-    # baseline: course's own setting, else material's last, else config default
-    align_base = meta.get("align_base") or ""
-    if not channels and meta.get("material_id"):
+    channels_in = body.get("channels")
+    if isinstance(channels_in, list) and channels_in:
+        channels = {c for c in channels_in if c in valid}
+        if not channels:
+            raise HTTPException(400, "channels 无效，至少选择一个：embedded / ocr / asr")
+    else:
+        channels = set(meta.get("channels") or [])
+        if not channels and meta.get("material_id"):
+            mat = read_json(material_dir(meta["material_id"]) / "material.json", {}) or {}
+            channels = set(mat.get("last_channels") or [])
+        if not channels:
+            channels = valid
+    # baseline: request override > course setting > material's last > config default;
+    # when that channel isn't among the selected ones, fall back in
+    # embedded -> asr -> ocr order (embedded is absent in many douyin videos)
+    align_base = body.get("align_base") or meta.get("align_base") or ""
+    if not align_base and meta.get("material_id"):
         mat = read_json(material_dir(meta["material_id"]) / "material.json", {}) or {}
-        channels = set(mat.get("last_channels") or [])
-        align_base = align_base or mat.get("last_align_base") or ""
-    if not channels:
-        channels = {"embedded", "ocr", "asr"}
+        align_base = mat.get("last_align_base") or ""
+    if not align_base:
+        align_base = str(cfg.get("align_base") or "")
     if align_base not in channels:
-        align_base = str(cfg.get("align_base") or "asr")
-        if align_base not in channels:
-            align_base = sorted(channels)[0]
+        for pref in ("embedded", "asr", "ocr"):
+            if pref in channels:
+                align_base = pref
+                break
     if cid not in JOBS:
         # a fresh generate is explicit new intent: clear a stale cancelled /
         # interrupted status (incl. the zombie left by a container restart)

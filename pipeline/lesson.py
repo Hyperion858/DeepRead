@@ -348,7 +348,8 @@ def ocr_with_failover(
                     note_model_result(prov.get("id", ""), model, False, f"响应缺少 choices: {body_snip}")
                     continue
                 note_model_result(prov.get("id", ""), model, True)
-                return payload["choices"][0]["message"]["content"].strip()
+                from pipeline.ocr import clean_ocr_text
+                return clean_ocr_text(payload["choices"][0]["message"]["content"].strip())
             errors.append(f"{model}: {r.status_code} {r.text[:120]}")
             note_model_result(prov.get("id", ""), model, False, f"HTTP {r.status_code}: {r.text[:120]}")
             if not _is_model_dead(r.text):

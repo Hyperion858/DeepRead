@@ -106,6 +106,24 @@ def extract_frames(media_path: Path, workdir: Path,
     return sorted(frames_dir.glob("f*.jpg"))
 
 
+def clean_ocr_text(s: str) -> str:
+    """Vision models sometimes wrap the caption in JSON or labels; keep just the caption."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    # {"subtitle": "..."} / {"text": "..."} wrappers
+    m = re.search(r'\{\s*"?(?:subtitle|text|caption)"?\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}', s, re.I)
+    if m:
+        s = m.group(1)
+    else:
+        # ```json fences, subtitle:/字幕: labels
+        s = re.sub(r"^```(?:json)?\s*|```\s*$", "", s.strip(), flags=re.M | re.I).strip()
+        m = re.search(r"^(?:subtitle|字幕|caption|text)\s*[:：]\s*(.+)$", s, re.S | re.I)
+        if m:
+            s = m.group(1).strip()
+    return s.strip().strip('"').strip()
+
+
 def ocr_frame(client: httpx.Client, prov: dict[str, Any], img_path: Path) -> str:
     b64 = base64.b64encode(img_path.read_bytes()).decode()
     r = client.post(
@@ -124,7 +142,7 @@ def ocr_frame(client: httpx.Client, prov: dict[str, Any], img_path: Path) -> str
     )
     if r.status_code != 200:
         raise RuntimeError(f"OCR API {r.status_code}: {r.text[:200]}")
-    return r.json()["choices"][0]["message"]["content"].strip()
+    return clean_ocr_text(r.json()["choices"][0]["message"]["content"].strip())
 
 
 def _norm(s: str) -> str:

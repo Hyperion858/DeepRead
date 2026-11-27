@@ -159,6 +159,38 @@ def _warp_asr_to_cues(asr: list[dict[str, Any]], cues: list[dict[str, Any]]) -> 
     return result
 
 
+def _split_bilingual(text: str) -> str:
+    """Strip the second language from bilingual captions.
+
+    Douyin vlogs burn EN+ZH two-line subtitles; OCR grabs both lines and the
+    mixed text is useless for study. Keep the dominant-language run only:
+    split into consecutive same-script runs and return the longest one.
+    """
+    runs: list[tuple[str, str]] = []   # (lang, text)
+    cur_lang, cur = None, ""
+    for ch in text:
+        lang = "zh" if "一" <= ch <= "鿿" else ("en" if (ch.isascii() and ch.isalpha()) else None)
+        if lang is None:            # punctuation/space stays with current run
+            cur += ch
+            continue
+        if lang != cur_lang:
+            if cur_lang and cur.strip():
+                runs.append((cur_lang, cur))
+            cur_lang, cur = lang, ""
+        cur += ch
+    if cur_lang and cur.strip():
+        runs.append((cur_lang, cur))
+    if not runs:
+        return text.strip()
+    # dominant language = most text overall; keep ALL its runs in order
+    # (English often gets split by the Chinese translation line)
+    totals: dict[str, int] = {}
+    for lang, run in runs:
+        totals[lang] = totals.get(lang, 0) + len(run.strip())
+    best_lang = max(totals, key=totals.get)
+    return " ".join(run.strip() for lang, run in runs if lang == best_lang)
+
+
 def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
           align_base: str = "asr") -> list[dict[str, Any]]:
     # normalize + merge ASR fragments first
@@ -169,6 +201,11 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
         for s in asr:
             s["uncertain"] = False
         return asr
+
+    # bilingual burned-in captions (EN+ZH douyin style) poison every
+    # comparison and the study text — keep only the dominant-language run
+    embedded = [{**sub, "text": _split_bilingual(sub["text"])} for sub in embedded]
+    embedded = [sub for sub in embedded if _norm(sub["text"])]
 
     # caption-only path: no ASR at all, cues ARE the timeline (accurate times)
     if not asr:

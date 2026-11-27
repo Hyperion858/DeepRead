@@ -247,10 +247,9 @@ async function refreshMaterials() {
     });
     wrap.querySelectorAll("[data-regen]").forEach((btn) => {
       btn.onclick = () => {
-        if (!confirm("重新生成会覆盖这门课程的转写和精讲，继续？")) return;
-        api(`/api/courses/${btn.dataset.regen}/generate`, { method: "POST" })
-          .then(() => toast("重新生成已开始"))
-          .catch((err) => toast(err.message));
+        const m = list.find((x) => x.course_id === btn.dataset.regen) || {};
+        openChannelDialog({ mid: btn.dataset.regen, kind: "course",
+                            lastChannels: m.last_channels, lastAlignBase: m.last_align_base });
       };
     });
     wrap.querySelectorAll("[data-del]").forEach((btn) => {
@@ -839,10 +838,23 @@ function drawCoursePage() {
         btn.classList.add(btn.dataset.mark === "known" ? "mark-known" : "mark-unknown");
       };
     });
+    panel.querySelectorAll("[data-speak]").forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); speak(b.dataset.speak); };
+    });
     panel.querySelectorAll(".jump").forEach((a) => {
       a.onclick = (e) => { e.preventDefault(); window.__jumpTo(sentences[+a.dataset.sid].start); };
     });
     wireSentenceActions(panel);
+  }
+
+  // speak an English word/phrase with the browser's built-in TTS
+  function speak(text) {
+    if (!("speechSynthesis" in window) || !text) return;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "en-US";
+    u.rate = 0.9;
+    speechSynthesis.speak(u);
   }
 
   function cardHtml(v, vi) {
@@ -850,7 +862,8 @@ function drawCoursePage() {
     return `
     <div class="lcard" data-term="${esc(v.term)}">
       <div class="face front">
-        <div class="term">${esc(v.term)}<span class="pos">${esc(v.pos || "")}</span></div>
+        <div class="term">${esc(v.term)}<span class="pos">${esc(v.pos || "")}</span>
+          <button class="speak-btn" data-speak="${esc(v.term)}" title="朗读发音">🔊</button></div>
         <div class="phon">${esc(v.phonetic || "")}</div>
         <div class="def" style="visibility:hidden"></div>
         <div class="lcard-actions">
@@ -873,9 +886,10 @@ function drawCoursePage() {
     const item = (x) => {
       const sid = (x.sentenceIds || [])[0];
       const s = sid !== undefined && sentences[sid] ? sentences[sid] : null;
+      const phrase = x.phrase || x.term || x.topic || "";
       return `
       <div class="hs-card">
-        <div class="hs-orig">${esc(x.phrase || x.term || x.topic)}</div>
+        <div class="hs-orig">${esc(phrase)}${phrase ? ` <button class="speak-btn" data-speak="${esc(phrase)}" title="朗读发音">🔊</button>` : ""}</div>
         <div class="hs-structure">${esc(x.meaning || x.explanation || x.note || "")}</div>
         ${x.usage ? `<div class="hs-breakdown">${esc(x.usage)}</div>` : ""}
         ${s ? `<div class="hs-jump"><span class="hs-snip">${esc(s.text.slice(0, 60))}</span></div>` : ""}
@@ -888,6 +902,9 @@ function drawCoursePage() {
       ${dom.length ? dom.map((x) => item(x)).join("") : `<div class="panel-empty">暂无</div>`}
       <div class="section-title">🌍 文化背景</div>
       ${cult.length ? cult.map((x) => item(x)).join("") : `<div class="panel-empty">暂无</div>`}`;
+    panel.querySelectorAll("[data-speak]").forEach((b) => {
+      b.onclick = (e) => { e.stopPropagation(); speak(b.dataset.speak); };
+    });
     panel.querySelectorAll(".jump").forEach((a) => {
       a.onclick = (e) => { e.preventDefault(); window.__jumpTo(sentences[+a.dataset.sid].start); };
     });
@@ -968,53 +985,82 @@ async function openChannelDialog({ mid, kind, lastChannels, lastAlignBase }) {
   document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
   // default baseline comes from the saved config; the dialog can override
   let cfgAlignBase = "asr";
-  try { cfgAlignBase = (await api("/api/config")).align_base || "asr"; } catch {}
-  const CH = [
+  try { cfgAlignBase = (await api("/api/config")).align_base || "asr"; } catch {}  const CH = [
     { key: "embedded", name: "📺 内嵌字幕", desc: "提取视频内封装的字幕轨（最准，有则强烈推荐）" },
-    { key: "ocr", name: "🖼 OCR 硬字幕", desc: "识别烧在画面上的字幕（抖音等平台），耗时较长" },
     { key: "asr", name: "🎙 语音转写", desc: "音频转文字（无字幕视频/纯音频必选；与字幕多选可交叉校验提升准确度）" },
-  ];
-  const BASE = [
-    { key: "asr", name: "语音转写", desc: "全文完整，字幕只修正明显错词" },
-    { key: "ocr", name: "OCR 字幕", desc: "以画面字幕为准，缺失段落用转写补齐" },
-    { key: "embedded", name: "内嵌字幕", desc: "以字幕轨为准，缺失段落用转写补齐" },
+    { key: "ocr", name: "🖼 OCR 硬字幕", desc: "识别烧在画面上的字幕（抖音等平台），耗时较长" },
   ];
   const checked = new Set(lastChannels || ["embedded", "ocr", "asr"]);
-  const baseSel = lastAlignBase || cfgAlignBase;
+  // baseline: last choice for this material > saved default > first selected
+  let base = lastAlignBase || cfgAlignBase;
+  if (!checked.has(base)) base = (CH.find((c) => checked.has(c.key)) || CH[0]).key;
   const overlay = document.createElement("div");
   overlay.className = "cal-overlay";
   overlay.innerHTML = `
     <div class="cal-panel" style="width:min(520px,100%)">
       <div class="cal-head"><b>选择生成通道</b><button class="cal-close">✕</button></div>
-      <div class="cal-hint" style="margin:8px 0 12px">至少选一项，可多选 — 多选时各通道结果会融合比对，准确度更高。</div>
+      <div class="cal-hint" style="margin:8px 0 12px">至少选一项，可多选 — 多选时各通道结果会融合比对，准确度更高。点「设为基准」决定文本不一致时以谁为准（基准未选时按顺序自动回退）。</div>
       ${CH.map((c) => `
-        <label class="ch-row">
+        <label class="ch-row" data-row="${c.key}">
           <input type="checkbox" data-ch="${c.key}" ${checked.has(c.key) ? "checked" : ""}>
           <div class="ch-text"><b>${c.name}</b><small>${c.desc}</small></div>
+          <button class="ch-base-btn" data-base="${c.key}" title="把文本不一致时的基准设为此通道">基准</button>
         </label>`).join("")}
-      <div class="cal-hint" style="margin:14px 0 8px">融合比对基准（多通道时，文本不一致以谁为准）：</div>
-      ${BASE.map((b) => `
-        <label class="ch-row">
-          <input type="radio" name="align-base" value="${b.key}" ${baseSel === b.key ? "checked" : ""}>
-          <div class="ch-text"><b>${b.name}</b><small>${b.desc}</small></div>
-        </label>`).join("")}
+      <div class="ch-base-hint" style="margin:10px 0 0;color:var(--ink-2);font-size:12.5px"></div>
       <div class="form-actions" style="margin-top:14px">
         <button class="primary ch-go" style="flex:1">开始生成课程</button>
         <button class="cal-close" style="flex-shrink:0">取消</button>
       </div>
     </div>`;
+  const baseHint = overlay.querySelector(".ch-base-hint");
+  const drawBase = () => {
+    overlay.querySelectorAll(".ch-base-btn").forEach((b) => {
+      const active = b.dataset.base === base;
+      b.classList.toggle("on", active);
+      b.disabled = !overlay.querySelector(`[data-ch="${b.dataset.base}"]`)?.checked;
+    });
+    const name = CH.find((c) => c.key === base)?.name || "";
+    baseHint.textContent = `当前基准：${name}`;
+  };
+  overlay.querySelectorAll(".ch-base-btn").forEach((b) => {
+    b.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      base = b.dataset.base;
+      // a baseline must be a selected channel; tick it if it isn't
+      const cb = overlay.querySelector(`[data-ch="${base}"]`);
+      if (cb && !cb.checked) cb.checked = true;
+      drawBase();
+    };
+  });
+  overlay.querySelectorAll("[data-ch]").forEach((cb) => {
+    cb.onchange = () => {
+      if (!cb.checked && cb.dataset.ch === base) {
+        const next = overlay.querySelector("[data-ch]:checked");
+        base = next ? next.dataset.ch : "";
+      }
+      drawBase();
+    };
+  });
+  drawBase();
   overlay.querySelector(".ch-go").onclick = async () => {
     const channels = [...overlay.querySelectorAll("[data-ch]:checked")].map((el) => el.dataset.ch);
     if (!channels.length) { toast("至少选择一个通道"); return; }
-    const align_base = overlay.querySelector("input[name=align-base]:checked")?.value || cfgAlignBase;
+    if (!channels.includes(base)) base = channels[0];
     try {
       let res;
       if (kind === "material") {
         res = await api(`/api/materials/${mid}/generate`, {
-          method: "POST", body: JSON.stringify({ channels, align_base }),
+          method: "POST", body: JSON.stringify({ channels, align_base: base }),
         });
         toast("课程生成已开始");
         location.hash = `#/course/${res.id}`;
+      } else if (kind === "course") {
+        await api(`/api/courses/${mid}/generate`, {
+          method: "POST", body: JSON.stringify({ channels, align_base: base }),
+        });
+        toast("重新生成已开始");
+        refreshCourses();
       }
       overlay.remove();
     } catch (err) { toast(err.message); }
