@@ -10,6 +10,7 @@ one provider.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import threading
 import uuid
@@ -66,6 +67,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "chat_models": [],
     "asr_models": [],
     "vision_models": [],
+    # global model pool: {provider_id: [models]} — which models of which
+    # provider are available at all; the per-role lists pick from this pool
+    "global_models": {},
+    # ASR engine: "chat" = segmented chat transcription (existing flow),
+    # "filetrans" = Aliyun async file transcription (native timestamps)
+    "asr_engine": "chat",
+    "filetrans_public_base": "",  # public base URL exposing GET /ft/<file>
+    "filetrans_model": "qwen-audio-3.1-asr-flash-filetrans",
     # pipeline tuning
     "ocr_workers": 6,             # concurrent OCR frame recognitions
     "ocr_interval": 1.0,          # silent-stretch sweep interval in seconds
@@ -390,7 +399,8 @@ async def put_config(request: Request):
         if cfg.get("chat_provider") not in live_ids:
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
     for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model",
-              "chat_models", "asr_models", "vision_models", "align_base",
+              "chat_models", "asr_models", "vision_models", "global_models", "align_base",
+              "asr_engine", "filetrans_public_base", "filetrans_model",
               "ocr_workers", "ocr_interval", "ocr_bottom_crop", "asr_workers", "translate_workers",
               "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):
         if k in body:
@@ -533,6 +543,130 @@ async def test_provider(request: Request):
     except Exception:  # noqa: BLE001
         return {"ok": False, "detail": "返回内容不是 OpenAI 兼容的模型列表"}
     return {"ok": True, "count": len(ids), "models": ids[:20]}
+
+
+@app.post("/api/config/test_model")
+async def test_model(request: Request):
+    """Test one specific model of one provider (saved values).
+
+    Body: {provider_id, model, kind: chat|asr|vision}. Returns
+    {ok, elapsed_ms, detail}; failure is 200 with ok=false so the run log
+    can show the reason. Records a health mark either way.
+    """
+    import asyncio
+    import base64
+    import struct
+    import time as _time
+    import wave as _wave
+    import io as _io
+
+    import httpx
+
+    body = await request.json()
+    pid = body.get("provider_id") or ""
+    model = (body.get("model") or "").strip()
+    kind = body.get("kind") or "chat"
+    if kind not in ("chat", "asr", "vision"):
+        kind = "chat"
+    cfg = load_config()
+    prov = next((p for p in cfg.get("providers", []) if p.get("id") == pid), None)
+    if prov is None:
+        return {"ok": False, "elapsed_ms": 0, "detail": "provider 不存在"}
+    if not model:
+        return {"ok": False, "elapsed_ms": 0, "detail": "请填写模型名"}
+    base = (prov.get("base_url") or "").rstrip("/")
+    headers = {"Authorization": f"Bearer {prov.get('api_key', '')}"}
+
+    def _silent_wav_b64(seconds: float = 1.0, rate: int = 16000) -> str:
+        buf = _io.BytesIO()
+        with _wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(b"\x00\x00" * int(rate * seconds))
+        return base64.b64encode(buf.getvalue()).decode()
+
+    low = model.lower()
+    is_chat_audio = any(k in low for k in ("omni", "qwen-audio", "audio-chat", "gemini", "gpt-4o-audio"))
+
+    t0 = _time.time()
+    ok, detail = False, ""
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            if kind == "asr":
+                wav_b64 = _silent_wav_b64()
+                if is_chat_audio:
+                    r = await client.post(f"{base}/chat/completions", headers=headers, json={
+                        "model": model, "max_tokens": 16,
+                        "messages": [{"role": "user", "content": [
+                            {"type": "input_audio", "input_audio": {"data": wav_b64, "format": "wav"}},
+                            {"type": "text", "text": "转写这段音频"},
+                        ]}],
+                    })
+                    ok = r.status_code == 200 and "choices" in (r.json() if r.status_code == 200 else {})
+                else:
+                    raw = base64.b64decode(wav_b64)
+                    r = await client.post(
+                        f"{base}/audio/transcriptions", headers=headers,
+                        files={"file": ("probe.wav", raw, "audio/wav")},
+                        data={"model": model},
+                    )
+                    ok = r.status_code == 200
+                if not ok:
+                    detail = f"HTTP {r.status_code}: {r.text[:200]}"
+            elif kind == "vision":
+                # 1x1 red pixel PNG
+                png = base64.b64decode(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+                r = await client.post(f"{base}/chat/completions", headers=headers, json={
+                    "model": model, "max_tokens": 8, "temperature": 0,
+                    "messages": [{"role": "user", "content": [
+                        {"type": "text", "text": "这张图是什么颜色？只回答一个词。"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode()}},
+                    ]}],
+                })
+                ok = r.status_code == 200 and "choices" in (r.json() if r.status_code == 200 else {})
+                if not ok:
+                    detail = f"HTTP {r.status_code}: {r.text[:200]}"
+            else:
+                r = await client.post(f"{base}/chat/completions", headers=headers, json={
+                    "model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1,
+                })
+                ok = r.status_code == 200
+                if not ok:
+                    detail = f"HTTP {r.status_code}: {r.text[:200]}"
+    except Exception as exc:  # noqa: BLE001
+        detail = f"连接失败: {exc}"
+
+    elapsed = int((_time.time() - t0) * 1000)
+    try:
+        from pipeline import health as health_mod
+        health_mod.note(pid, model, ok, detail[:160] if not ok else "")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": ok, "elapsed_ms": elapsed, "detail": detail}
+
+
+# ---------------------------------------------------------------- filetrans public file serving
+
+FILETRANS_TMP = DATA_DIR / "filetrans-tmp"
+_FILETRANS_NAME_RE = re.compile(r"^[0-9a-f]{12}\.(mp4|wav)$")
+
+
+@app.get("/ft/{name}")
+def filetrans_public_file(name: str):
+    """Public, unauthenticated file endpoint for the filetrans channel.
+
+    Aliyun's transcription worker needs to fetch the audio from a public URL;
+    files here are uuid-named (unguessable) and deleted after transcription.
+    """
+    if not _FILETRANS_NAME_RE.match(name):
+        raise HTTPException(404, "Not Found")
+    f = FILETRANS_TMP / name
+    if not f.exists():
+        raise HTTPException(404, "Not Found")
+    media_type = "video/mp4" if name.endswith(".mp4") else "audio/wav"
+    return FileResponse(f, media_type=media_type)
 
 
 # ---------------------------------------------------------------- API: backup
@@ -903,7 +1037,10 @@ def material_generate(mid: str, request: Request = None):
     cfg = load_config()
     if not cfg.get("providers"):
         raise HTTPException(400, "请先在模型配置页配置 API")
-    if "asr" in channels and not get_provider_cfg(cfg, "asr").get("base_url"):
+    if "asr" in channels and (cfg.get("asr_engine") or "chat") == "filetrans":
+        if not cfg.get("filetrans_public_base"):
+            raise HTTPException(400, "转写方式为 filetrans，但公网地址未配置（转写设置）")
+    elif "asr" in channels and not get_provider_cfg(cfg, "asr").get("base_url"):
         raise HTTPException(400, "转写 provider 未配置")
     if not get_provider_cfg(cfg, "chat").get("base_url"):
         raise HTTPException(400, "Chat provider 未配置")
@@ -931,8 +1068,10 @@ def material_generate(mid: str, request: Request = None):
     mat["last_align_base"] = align_base
     write_json(mdir / "material.json", mat)
     JOBS[cid] = JobState(stage_lock=mid)
+    tmo = 4 * 3600 if (cfg.get("asr_engine") or "chat") == "filetrans" else 7200
     threading.Thread(target=run_pipeline, args=(cid,),
-                     kwargs={"channels": channels, "align_base": align_base}, daemon=True).start()
+                     kwargs={"channels": channels, "align_base": align_base, "timeout_sec": tmo},
+                     daemon=True).start()
     log_event("action", f"生成课程（通道: {', '.join(sorted(channels))}, 基准: {align_base}）", course_id=cid)
     return {"id": cid, "title": mat.get("title")}
 
@@ -1057,7 +1196,12 @@ def generate(cid: str, request: Request = None):
     cfg = load_config()
     if not cfg.get("providers"):
         raise HTTPException(400, "请先在设置页配置 API")
-    if not get_provider_cfg(cfg, "asr").get("base_url"):
+    # filetrans mode doesn't need an ASR provider — it validates its own
+    # public base here and its keys at transcription time
+    filetrans_mode = (cfg.get("asr_engine") or "chat") == "filetrans"
+    if filetrans_mode and not cfg.get("filetrans_public_base"):
+        raise HTTPException(400, "转写方式为 filetrans，但公网地址未配置（转写设置）")
+    if not filetrans_mode and not get_provider_cfg(cfg, "asr").get("base_url"):
         raise HTTPException(400, "转写 provider 未配置")
     if not get_provider_cfg(cfg, "chat").get("base_url"):
         raise HTTPException(400, "Chat provider 未配置")
@@ -1105,8 +1249,10 @@ def generate(cid: str, request: Request = None):
         status["detail"] = "准备生成…"
         write_json(cdir / "status.json", status)
         JOBS[cid] = JobState()
+        tmo = 4 * 3600 if (cfg.get("asr_engine") or "chat") == "filetrans" else 7200
         threading.Thread(target=run_pipeline, args=(cid,),
-                         kwargs={"channels": channels, "align_base": align_base}, daemon=True).start()
+                         kwargs={"channels": channels, "align_base": align_base, "timeout_sec": tmo},
+                         daemon=True).start()
         log_event("action", f"重新生成课程（通道: {', '.join(sorted(channels))}, 基准: {align_base}）", course_id=cid)
     return {"ok": True}
 

@@ -61,12 +61,13 @@ async function api(path, opts = {}) {
 
 /* ---------------- layout shell ---------------- */
 const NAV = [
-  { hash: "#/",         key: "home",     icon: "🏠", label: "首页" },
-  { hash: "#/library",  key: "library",  icon: "📥", label: "素材库" },
-  { hash: "#/courses",  key: "courses",  icon: "📚", label: "课程库" },
-  { hash: "#/settings", key: "settings", icon: "🧠", label: "模型配置" },
-  { hash: "#/backup",   key: "backup",   icon: "💾", label: "备份恢复" },
-  { hash: "#/logs",     key: "logs",     icon: "📋", label: "日志" },
+  { hash: "#/",           key: "home",      icon: "🏠", label: "首页" },
+  { hash: "#/library",    key: "library",   icon: "📥", label: "素材库" },
+  { hash: "#/courses",    key: "courses",   icon: "📚", label: "课程库" },
+  { hash: "#/settings",   key: "settings",  icon: "🧠", label: "模型配置" },
+  { hash: "#/transcribe", key: "transcribe", icon: "🎙", label: "转写设置" },
+  { hash: "#/backup",     key: "backup",    icon: "💾", label: "备份恢复" },
+  { hash: "#/logs",       key: "logs",      icon: "📋", label: "日志" },
 ];
 
 function shell(activeKey, contentHtml) {
@@ -97,6 +98,7 @@ function route() {
   if (hash.startsWith("#/library")) return renderLibrary();
   if (hash.startsWith("#/courses")) return renderCourses();
   if (hash.startsWith("#/settings")) return renderSettings();
+  if (hash.startsWith("#/transcribe")) return renderTranscribeSettings();
   if (hash.startsWith("#/backup")) return renderBackup();
   if (hash.startsWith("#/logs")) return renderLogs();
   return renderHome();
@@ -1046,81 +1048,19 @@ function renderSettings() {
       <h1>模型配置</h1>
       <div class="set-tabs">
         <button class="set-fixed ${selSection === "providers" ? "on" : ""}" data-sec="providers">API 提供商</button>
-        <button class="set-fixed ${selSection === "roles" ? "on" : ""}" data-sec="roles">模型分配</button>
-        <button class="set-fixed ${selSection === "tuning" ? "on" : ""}" data-sec="tuning">生成参数</button>
+        <button class="set-fixed ${selSection === "roles" ? "on" : ""}" data-sec="roles">全局模型</button>
       </div>
       <section class="set-main">
           <div id="stab-providers" class="stab"></div>
           <div id="stab-roles" class="stab" style="display:none">
             <div class="cfg-card">
-              <div class="cfg-card-head"><span class="cfg-card-title">🎯 模型分配</span></div>
-              <div class="role-grid">
-                <div class="role-block">
-                  <div class="role-name">📝 翻译与精讲 <i>Chat</i></div>
-                  <div class="form-row"><select id="role-chat"></select></div>
-                  <div class="mp-slot" id="mp-chat"></div>
-                  <div class="probe-row">
-                    <div class="probe-actions">
-                      <button id="cfg-refresh-chat" title="获取这个 API 的模型列表">↻ 获取模型</button>
-                    </div>
-                  </div>
-                </div>
-                <div class="role-block">
-                  <div class="role-name">🎙 语音转写 <i>ASR</i></div>
-                  <div class="form-row"><select id="role-asr"></select></div>
-                  <div class="mp-slot" id="mp-asr"></div>
-                  <div class="probe-row">
-                    <div class="probe-actions">
-                      <button id="cfg-refresh-asr" title="获取这个 API 的模型列表">↻ 获取模型</button>
-                    </div>
-                  </div>
-                </div>
-                <div class="role-block">
-                  <div class="role-name">🖼 画面字幕 OCR <i>Vision</i></div>
-                  <div class="form-row"><select id="role-vision"></select></div>
-                  <div class="mp-slot" id="mp-vision"></div>
-                  <div class="probe-row">
-                    <div class="probe-actions">
-                      <button id="cfg-refresh-vision" title="获取这个 API 的模型列表">↻ 获取模型</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div id="stab-tuning" class="stab" style="display:none">
-            <div class="cfg-card">
-              <div class="cfg-card-head"><span class="cfg-card-title">🎛 生成参数</span></div>
-              <div class="tune-grid">
-              <div class="tune-section">
-                <div class="tune-section-title">字幕识别（OCR）</div>
-                <div class="tune-rows">
-                  <div class="tune-row">
-                    <div class="tune-label">字幕区域高度：<small>画面底部保留比例，字幕不在底部时调大（0.05-0.5）</small></div>
-                    <div class="tune-ctl"><input type="number" id="cfg-ocr-crop" min="0.05" max="0.5" step="0.01"></div>
-                  </div>
-                  <div class="tune-row">
-                    <div class="tune-label">OCR 并发数：<small>每帧图片识别并发（3-8）</small></div>
-                    <div class="tune-ctl"><input type="number" id="cfg-ocr-workers" min="1" max="12"></div>
-                  </div>
-                </div>
-              </div>
-              <div class="tune-section">
-                <div class="tune-section-title">语音转写（ASR）</div>
-                <div class="tune-rows">
-                  <div class="tune-row">
-                    <div class="tune-label">转写并发数：<small>音频分段转写并发（2-6）</small></div>
-                    <div class="tune-ctl"><input type="number" id="cfg-asr-workers" min="1" max="8"></div>
-                  </div>
-                </div>
-              </div>
-              <div class="tune-section">
-                <div class="tune-section-title">融合与精讲</div>
-                <div class="tune-rows">
-                  <div class="tune-row">
-                    <div class="tune-label">翻译并发数：<small>翻译批次并发（1-6）</small></div>
-                    <div class="tune-ctl"><input type="number" id="cfg-tr-workers" min="1" max="8"></div>
-                  </div>
+              <div class="cfg-card-head"><span class="cfg-card-title">🌐 全局模型</span>
+                <span class="cfg-card-sub">勾选各提供商可用的模型；角色分配（哪些模型用于哪个环节）在「转写设置」页配置</span></div>
+              <div id="global-pool"></div>
+              <div class="probe-row">
+                <div class="probe-actions">
+                  <select id="pool-provider" style="font-size:12.5px"></select>
+                  <button id="cfg-refresh-pool" title="获取这个 API 的模型列表">↻ 获取模型</button>
                 </div>
               </div>
             </div>
@@ -1186,22 +1126,12 @@ function renderSettings() {
   async function init() {
     cfgCache = await api("/api/config");
     providers = (cfgCache.providers || []).map((p) => ({ ...p }));
+    globalPool = {};
+    for (const [pid, models] of Object.entries(cfgCache.global_models || {})) {
+      if (Array.isArray(models) && models.length) globalPool[pid] = [...models];
+    }
     drawProviders();
     drawRoles();
-    document.getElementById("role-asr").value = cfgCache.asr_provider || "";
-    document.getElementById("role-chat").value = cfgCache.chat_provider || "";
-    document.getElementById("role-vision").value = cfgCache.vision_provider || "";
-    // restore the saved multi-selection, then reuse saved probe results
-    initPickedFromConfig();
-    showSavedOrProbed("asr");
-    showSavedOrProbed("vision");
-    setBrowse("chat", []);
-    drawAllPickers();
-    // pipeline tuning
-    document.getElementById("cfg-ocr-crop").value = cfgCache.ocr_bottom_crop || 0.22;
-    document.getElementById("cfg-ocr-workers").value = cfgCache.ocr_workers || 6;
-    document.getElementById("cfg-asr-workers").value = cfgCache.asr_workers || 4;
-    document.getElementById("cfg-tr-workers").value = cfgCache.translate_workers || 3;
     selSection = "providers";
     expandedProvider = -1;
     drawProviders();
@@ -1211,7 +1141,6 @@ function renderSettings() {
   function drawSection() {
     document.getElementById("stab-providers").style.display = selSection === "providers" ? "block" : "none";
     document.getElementById("stab-roles").style.display = selSection === "roles" ? "block" : "none";
-    document.getElementById("stab-tuning").style.display = selSection === "tuning" ? "block" : "none";
     // save bar only makes sense for roles/tuning (providers have per-card save)
     document.getElementById("savebar").style.display = selSection === "providers" ? "none" : "flex";
     document.querySelectorAll(".set-fixed").forEach((el) => {
@@ -1227,13 +1156,8 @@ function renderSettings() {
     if (!providers.length) expandedProvider = -1;
     const rolesFor = (i) => {
       const pid = providers[i].id;
-      const assigned = [];
-      if (pid) {
-        if (document.getElementById("role-chat")?.value === pid) assigned.push("精讲");
-        if (document.getElementById("role-asr")?.value === pid) assigned.push("转写");
-        if (document.getElementById("role-vision")?.value === pid) assigned.push("OCR");
-      }
-      return assigned;
+      const n = (globalPool[pid] || []).length;
+      return n ? [`${n} 个模型`] : [];
     };
     wrap.innerHTML = `
       <div class="prov-head">
@@ -1391,28 +1315,12 @@ function renderSettings() {
     providers[expandedProvider].api_key = body.querySelector(".p-key").value.trim();
   }
 
-  function drawRoles() {
-    collectProviders();
-    const opts = () => providers.map((p, i) =>
-      `<option value="${esc(p.id)}">${esc(p.name || `API ${i + 1}`)}</option>`).join("");
-    const asrSel = document.getElementById("role-asr");
-    const chatSel = document.getElementById("role-chat");
-    const visSel = document.getElementById("role-vision");
-    const prevAsr = asrSel.value, prevChat = chatSel.value, prevVis = visSel.value;
-    asrSel.innerHTML = opts() || `<option value="">（请先添加 API）</option>`;
-    chatSel.innerHTML = opts() || `<option value="">（请先添加 API）</option>`;
-    visSel.innerHTML = `<option value="">（用 Chat API）</option>` + (opts() || "");
-    if (prevAsr && providers.some((p) => p.id === prevAsr)) asrSel.value = prevAsr;
-    if (prevChat && providers.some((p) => p.id === prevChat)) chatSel.value = prevChat;
-    if (prevVis && providers.some((p) => p.id === prevVis)) visSel.value = prevVis;
-    asrSel.onchange = () => showSavedOrProbed("asr");
-    chatSel.onchange = () => { setBrowse("chat", []); };
-    visSel.onchange = () => showSavedOrProbed("vision");
-  }
-
-  /* ---- multi-select model picker (ordered list; first = primary) ---- */
-  const picked = { chat: [], asr: [], vision: [] };   // working selection per role
-  let browse = { chat: [], asr: [], vision: [] };     // models known for the current provider
+  /* ---- global model pool: which provider's which models are usable ---- */
+  let globalPool = {};              // {provider_id: [models]} working copy
+  let poolBrowse = [];              // models fetched for the selected provider
+  let poolPid = "";                 // provider currently shown in the pool tab
+  let poolFilter = "";
+  let poolFetched = false;          // has 获取模型 run for poolPid this session
 
   function healthKey(pid, model) { return `${pid || ""}||${model || ""}`; }
 
@@ -1420,127 +1328,137 @@ function renderSettings() {
     return (cfgCache?.model_health || {})[healthKey(pid, model)] || null;
   }
 
-  function setPicked(role, list) {
-    picked[role] = [...new Set((list || []).filter(Boolean))];
+  function drawRoles() {
+    collectProviders();
+    const sel = document.getElementById("pool-provider");
+    if (!sel) return;
+    const opts = () => providers.map((p) =>
+      `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`).join("");
+    const prev = sel.value || poolPid;
+    sel.innerHTML = opts() || `<option value="">（请先添加 API）</option>`;
+    if (prev && providers.some((p) => p.id === prev)) sel.value = prev;
+    else if (providers.length) sel.value = providers[0].id;
+    poolPid = sel.value;
+    sel.onchange = () => {
+      poolPid = sel.value;
+      poolBrowse = [];
+      poolFetched = false;
+      drawPool();
+    };
+    drawPool();
   }
 
-  const modelFilter = { chat: "", asr: "", vision: "" };   // per-role browse search
-
-  function drawPicker(role) {
-    const slot = document.getElementById(`mp-${role}`);
-    if (!slot) return;
-    const pid = document.getElementById(role === "chat" ? "role-chat" : role === "asr" ? "role-asr" : "role-vision")?.value || "";
-    const chosen = picked[role];
-    const f = (modelFilter[role] || "").toLowerCase();
-    const avail = (browse[role] || [])
+  function drawPool() {
+    const wrap = document.getElementById("global-pool");
+    if (!wrap) return;
+    const chosen = globalPool[poolPid] || [];
+    const f = (poolFilter || "").toLowerCase();
+    const avail = poolBrowse
       .filter((m) => !chosen.includes(m))
       .filter((m) => !f || m.toLowerCase().includes(f));
-    const rows = chosen.length ? chosen.map((m, i) => {
-      const bad = healthFor(pid, m);
+    const rows = (poolBrowse.length || chosen.length) ? chosen.map((m) => {
+      const bad = healthFor(poolPid, m);
       return `
-        <div class="mp-item ${bad ? "bad" : ""}" data-role="${role}" data-model="${esc(m)}">
-          <span class="mp-idx">${i + 1}</span>
+        <div class="mp-item ${bad ? "bad" : ""}" data-model="${esc(m)}">
+          <input type="checkbox" checked data-uncheck="${esc(m)}" title="取消勾选即从全局池移除">
           <span class="mp-name" title="${esc(m)}">${esc(m)}</span>
           ${bad ? `<span class="mp-bad" title="${esc(bad.message || "上次调用失败")}">⚠ 报错</span>` : ""}
-          <button class="mp-up" data-up="${i}" title="上移" ${i === 0 ? "disabled" : ""}>▲</button>
-          <button class="mp-del" data-del="${i}" title="移除">✕</button>
+          <button class="mp-test" data-mtest="${esc(m)}" title="发一次真实请求测试这个模型">测试</button>
+          <button class="mp-del" data-uncheck="${esc(m)}" title="移除">✕</button>
         </div>`;
-    }).join("") : `<div class="mp-empty">还没有选择模型 — 用下面的列表添加</div>`;
-    const badCount = chosen.filter((m) => healthFor(pid, m)).length;
-    const shownTotal = (browse[role] || []).length - chosen.length;
-    slot.innerHTML = `
+    }).join("") : `<div class="mp-empty">还没有获取模型 — 点下方「↻ 获取模型」拉取列表，或手动添加</div>`;
+    const searchPh = poolFetched
+      ? `搜索模型（${poolBrowse.length} 个）`
+      : "搜索或手动输入模型名";
+    wrap.innerHTML = `
       <div class="mp-list">${rows}</div>
-      ${badCount ? `<div class="mp-warn">⚠ 有 ${badCount} 个已选模型上次调用报错，仍按顺序尝试；连续失败会继续换下一个</div>` : ""}
       <div class="mp-add-row">
-        <input type="text" class="mp-search" placeholder="搜索模型（${shownTotal} 个可选）" value="${esc(modelFilter[role] || "")}">
+        <input type="text" class="mp-search" placeholder="${searchPh}" value="${esc(poolFilter)}">
         <select class="mp-add-sel">
-          <option value="" selected>${f ? `匹配 ${avail.length} 个` : "选择模型…"}</option>
+          <option value="" selected>${f ? `匹配 ${avail.length} 个` : "从获取的列表选择…"}</option>
           ${avail.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}
         </select>
         <button class="mp-add" disabled>＋ 添加</button>
         <button class="mp-manual-add" title="手动输入模型名（官方目录滞后的新模型也能加）">＋ 手动添加</button>
       </div>
-      <div class="mp-hint">可多选，按顺序尝试：第一个是主模型，报错时自动换下一个。</div>`;
+      <div class="mp-hint">勾选 = 全局可用。具体哪个环节用哪些模型、按什么顺序，在「转写设置」页配置。</div>`;
 
-    slot.querySelectorAll("[data-up]").forEach((btn) => {
-      btn.onclick = () => {
-        const i = +btn.dataset.up;
-        if (i > 0) {
-          [chosen[i - 1], chosen[i]] = [chosen[i], chosen[i - 1]];
-          drawPicker(role);
+    wrap.querySelectorAll("[data-uncheck]").forEach((el) => {
+      const m = el.dataset.uncheck;
+      const handler = () => {
+        globalPool[poolPid] = (globalPool[poolPid] || []).filter((x) => x !== m);
+        if (!(globalPool[poolPid] || []).length) delete globalPool[poolPid];
+        drawPool();
+      };
+      if (el.tagName === "INPUT") el.onchange = handler;
+      else el.onclick = handler;
+    });
+    wrap.querySelectorAll("[data-mtest]").forEach((btn) => {
+      btn.onclick = async () => {
+        const model = btn.dataset.mtest;
+        btn.disabled = true;
+        logLine("info", `—— 测试模型 ${model} @ ${poolPid}（类型: 通用）——`);
+        try {
+          const res = await api("/api/config/test_model", {
+            method: "POST",
+            body: JSON.stringify({ provider_id: poolPid, model, kind: "chat" }),
+          });
+          logLine(res.ok ? "ok" : "fail",
+            `${res.ok ? "✓" : "✗"} ${model}：${res.ok ? `可用（${res.elapsed_ms}ms）` : res.detail}`);
+        } catch (err) {
+          logLine("fail", "✗ 测试失败: " + err.message);
         }
+        btn.disabled = false;
+        drawPool();
       };
     });
-    slot.querySelectorAll("[data-del]").forEach((btn) => {
-      btn.onclick = () => {
-        chosen.splice(+btn.dataset.del, 1);
-        drawPicker(role);
-      };
-    });
-    const addSel = slot.querySelector(".mp-add-sel");
-    const addBtn = slot.querySelector(".mp-add");
-    const search = slot.querySelector(".mp-search");
+    const search = wrap.querySelector(".mp-search");
     if (search) {
-      // keep focus and caret position across redraws
       const pos = search.selectionStart;
       search.oninput = () => {
-        modelFilter[role] = search.value;
-        drawPicker(role);
-        const again = slot.querySelector(".mp-search");
+        poolFilter = search.value;
+        drawPool();
+        const again = wrap.querySelector(".mp-search");
         if (again) { again.focus(); again.setSelectionRange(pos, pos); }
       };
       search.onkeydown = (e) => {
         if (e.key === "Enter" && avail.length === 1) {
-          // quick add: exactly one match → add it
-          if (!chosen.includes(avail[0])) chosen.push(avail[0]);
-          modelFilter[role] = "";
-          drawPicker(role);
+          globalPool[poolPid] = [...new Set([...(globalPool[poolPid] || []), avail[0]])];
+          poolFilter = "";
+          drawPool();
+        } else if (e.key === "Enter" && search.value.trim() && !poolBrowse.length) {
+          // manual add via Enter when no list fetched
+          const name = search.value.trim();
+          globalPool[poolPid] = [...new Set([...(globalPool[poolPid] || []), name])];
+          poolFilter = "";
+          drawPool();
         }
       };
     }
+    const addSel = wrap.querySelector(".mp-add-sel");
+    const addBtn = wrap.querySelector(".mp-add");
     if (addSel && addBtn) {
       addSel.onchange = () => { addBtn.disabled = !addSel.value; };
       addBtn.onclick = () => {
-        if (addSel.value && !chosen.includes(addSel.value)) chosen.push(addSel.value);
-        modelFilter[role] = "";
-        drawPicker(role);
+        if (addSel.value) {
+          globalPool[poolPid] = [...new Set([...(globalPool[poolPid] || []), addSel.value])];
+          poolFilter = "";
+          drawPool();
+        }
       };
     }
-    // manual add: for models the provider's /models directory lags behind on
-    const manualBtn = slot.querySelector(".mp-manual-add");
+    const manualBtn = wrap.querySelector(".mp-manual-add");
     if (manualBtn) {
       manualBtn.onclick = () => {
         const name = prompt("输入模型名称（按 API 文档的模型 Code，如 qwen-audio-3.1-asr-flash-message）：");
         const clean = (name || "").trim();
-        if (clean && !chosen.includes(clean)) chosen.push(clean);
-        if (clean) toast(`已添加 ${clean}（保存配置后生效）`);
+        if (clean) {
+          globalPool[poolPid] = [...new Set([...(globalPool[poolPid] || []), clean])];
+          toast(`已添加 ${clean}（保存配置后生效）`);
+          drawPool();
+        }
       };
     }
-  }
-
-  function drawAllPickers() { ["chat", "asr", "vision"].forEach(drawPicker); }
-
-  // Show whatever was saved before this page load (selection is stored in config).
-  function initPickedFromConfig() {
-    setPicked("chat", (cfgCache?.chat_models || []).length ? cfgCache.chat_models : [cfgCache?.chat_model]);
-    setPicked("asr", (cfgCache?.asr_models || []).length ? cfgCache.asr_models : [cfgCache?.asr_model]);
-    setPicked("vision", (cfgCache?.vision_models || []).length ? cfgCache.vision_models : [cfgCache?.vision_model]);
-  }
-
-  // Fill the "add" list for a role with the provider model list.
-  // Models that last failed a real call are dropped so the list stays usable.
-  function setBrowse(role, models) {
-    const provSel = role === "asr" ? "role-asr" : role === "vision" ? "role-vision" : "role-chat";
-    const pid = document.getElementById(provSel)?.value || "";
-    const healthy = (models || []).filter((m) => !healthFor(pid, m) || picked[role].includes(m));
-    browse[role] = [...new Set([...healthy, ...picked[role]])];
-    drawPicker(role);
-  }
-
-  // No cached list yet: keep the saved selection, browse starts empty until
-  // 获取模型 runs for the selected provider.
-  function showSavedOrProbed(role) {
-    setBrowse(role, []);
   }
 
   async function fetchModels(providerId) {
@@ -1550,7 +1468,7 @@ function renderSettings() {
     return res;
   }
 
-  // left-nav fixed sections (API 提供商 / 模型分配 / 生成参数)
+  // left-nav fixed sections (API 提供商 / 全局模型)
   document.querySelectorAll(".set-fixed").forEach((el) => {
     el.onclick = () => {
       collectProviders();
@@ -1561,57 +1479,38 @@ function renderSettings() {
     };
   });
 
-  // unified "获取模型" for all three roles: clear the session cache, fetch
-  // the provider's full model list, and fill the role's browse picker
-  async function refreshRoleModels(role) {
-    const sel = document.getElementById(role === "asr" ? "role-asr" : role === "vision" ? "role-vision" : "role-chat");
-    const pid = sel?.value;
-    if (!pid) { toast("请先添加并保存 API"); return; }
-    await saveConfigQuiet();
-    const btn = document.getElementById(role === "asr" ? "cfg-refresh-asr"
-      : role === "vision" ? "cfg-refresh-vision" : "cfg-refresh-chat");
-    if (btn) btn.disabled = true;
-    const prov = providers.find((p) => p.id === pid);
-    logLine("info", `—— 获取模型 @ ${prov ? prov.name || pid : pid} ——`);
+  document.getElementById("cfg-refresh-pool").onclick = async () => {
+    if (!poolPid) { toast("请先添加并保存 API"); return; }
+    await saveModelsPage();
+    const btn = document.getElementById("cfg-refresh-pool");
+    btn.disabled = true;
+    const prov = providers.find((p) => p.id === poolPid);
+    logLine("info", `—— 获取模型 @ ${prov ? prov.name || poolPid : poolPid} ——`);
     try {
-      delete modelCache[pid];   // always re-fetch; nothing is cached
-      const res = await fetchModels(pid);
-      setBrowse(role, res.models || []);
-      const n = (res.models || []).length;
-      logLine("ok", `✓ 获取到 ${n} 个模型`);
-      toast(`获取到 ${n} 个模型`);
+      delete modelCache[poolPid];
+      const res = await fetchModels(poolPid);
+      poolBrowse = res.models || [];
+      poolFetched = true;
+      poolFilter = "";
+      logLine("ok", `✓ 获取到 ${poolBrowse.length} 个模型`);
+      toast(`获取到 ${poolBrowse.length} 个模型`);
     } catch (err) {
       logLine("fail", "✗ 获取失败: " + err.message);
       toast("获取失败: " + err.message);
     } finally {
-      if (btn) btn.disabled = false;
+      btn.disabled = false;
     }
-  }
+    drawPool();
+  };
 
-  document.getElementById("cfg-refresh-asr").onclick = () => refreshRoleModels("asr");
-  document.getElementById("cfg-refresh-chat").onclick = () => refreshRoleModels("chat");
-  document.getElementById("cfg-refresh-vision").onclick = () => refreshRoleModels("vision");
-
-  async function saveConfigQuiet() {
+  async function saveModelsPage() {
     collectProviders();
     try {
       await api("/api/config", {
         method: "PUT",
         body: JSON.stringify({
           providers,
-          asr_provider: document.getElementById("role-asr").value,
-          chat_provider: document.getElementById("role-chat").value,
-          vision_provider: document.getElementById("role-vision").value,
-          chat_models: picked.chat,
-          asr_models: picked.asr,
-          vision_models: picked.vision,
-          asr_model: picked.asr[0] || "",
-          chat_model: picked.chat[0] || "",
-          vision_model: picked.vision[0] || "",
-          ocr_workers: parseInt(document.getElementById("cfg-ocr-workers").value, 10) || 6,
-          ocr_bottom_crop: parseFloat(document.getElementById("cfg-ocr-crop").value) || 0.22,
-          asr_workers: parseInt(document.getElementById("cfg-asr-workers").value, 10) || 4,
-          translate_workers: parseInt(document.getElementById("cfg-tr-workers").value, 10) || 3,
+          global_models: globalPool,
         }),
       });
       cfgCache = await api("/api/config");
@@ -1621,10 +1520,7 @@ function renderSettings() {
 
   document.getElementById("cfg-save").onclick = async () => {
     if (!providers.length) { toast("请至少添加一个 API"); return; }
-    if (!picked.asr.length) { toast("请选择转写模型"); return; }
-    if (!picked.chat.length) { toast("请选择 Chat 模型"); return; }
-    await saveConfigQuiet();
-    drawAllPickers();
+    await saveModelsPage();
     toast("已保存");
   };
 
@@ -1632,7 +1528,7 @@ function renderSettings() {
     const el = document.getElementById("test-result");
     el.className = "test-result"; el.textContent = "测试中…";
     logLine("info", "—— 测试连接（当前保存的配置）——");
-    await saveConfigQuiet();
+    await saveModelsPage();
     try {
       const res = await api("/api/config/test", { method: "POST", body: JSON.stringify({}) });
       const parts = [];
@@ -1647,6 +1543,311 @@ function renderSettings() {
       el.className = "test-result fail";
       el.textContent = "连接失败: " + err.message;
       logLine("fail", "✗ 连接失败: " + err.message);
+    }
+  };
+
+  init();
+}
+
+/* ================= Transcribe settings ================= */
+function renderTranscribeSettings() {
+  document.title = "转写设置 · DeepRead";
+  let cfgCache = null;
+  // per-role ordered selection (first = primary, failover order)
+  const rolePicked = { chat: [], asr: [], vision: [] };
+  const roleFilter = { chat: "", asr: "", vision: "" };
+  const ROLE_META = [
+    { key: "chat", name: "📝 翻译与精讲", tag: "Chat", provKey: "chat_provider" },
+    { key: "asr", name: "🎙 语音转写", tag: "ASR", provKey: "asr_provider" },
+    { key: "vision", name: "🖼 画面字幕 OCR", tag: "Vision", provKey: "vision_provider" },
+  ];
+
+  $app.innerHTML = shell("transcribe", `
+    <div class="page settings-split">
+      <h1>转写设置</h1>
+      <section class="set-main">
+        <div class="cfg-card">
+          <div class="cfg-card-head"><span class="cfg-card-title">🔁 转写方式</span></div>
+          <label class="ch-row" style="margin-bottom:8px">
+            <input type="radio" name="asr-engine" value="chat">
+            <div class="ch-text"><b>第一套 · Chat 分段转写</b><small>音频切 60 秒段逐段转写（omni 等 chat 模型），OCR 按语音时间线定向采样，融合比对 + LLM 仲裁</small></div>
+          </label>
+          <label class="ch-row">
+            <input type="radio" name="asr-engine" value="filetrans">
+            <div class="ch-text"><b>第二套 · filetrans 云端整文件转写</b><small>整个文件提交阿里云异步转写，返回<b>原生毫秒级时间戳</b>（更准，支持 ≤2GB / ≤12 小时）；后续 OCR / 翻译 / 精讲流程相同</small></div>
+          </label>
+          <div id="ft-config" style="display:none;margin-top:10px">
+            <div class="tune-row">
+              <div class="tune-label">公网地址：<small>能从公网访问本服务 /ft/ 路径的基址（换部署环境只改这里）</small></div>
+              <div class="tune-ctl" style="flex:1"><input type="text" id="ft-public-base" placeholder="https://dr.tail632d9e.ts.net/ft"></div>
+            </div>
+            <div class="tune-row" style="margin-top:8px">
+              <div class="tune-label">转写模型：<small>阿里云异步文件转写模型 Code</small></div>
+              <div class="tune-ctl" style="flex:1"><input type="text" id="ft-model" placeholder="qwen-audio-3.1-asr-flash-filetrans"></div>
+            </div>
+            <div class="mp-hint" style="margin-top:6px">ⓘ 需要一次性把 /ft 路径暴露到公网（N1: Tailscale funnel；腾讯云: 公网 IP 直连即默认可用）。ASR 角色在此模式下使用上面的 filetrans 模型，无 failover。</div>
+          </div>
+        </div>
+
+        <div class="cfg-card">
+          <div class="cfg-card-head"><span class="cfg-card-title">🎯 模型分配</span>
+            <span class="cfg-card-sub">从「模型配置」页勾选的全局模型池中为每个环节选择模型；可多选按顺序尝试</span></div>
+          <div class="role-grid">
+            ${ROLE_META.map((r) => `
+            <div class="role-block">
+              <div class="role-name">${r.name} <i>${r.tag}</i></div>
+              <div class="form-row"><select id="tr-prov-${r.key}"></select></div>
+              <div class="mp-slot" id="tr-mp-${r.key}"></div>
+            </div>`).join("")}
+          </div>
+        </div>
+
+        <div class="cfg-card">
+          <div class="cfg-card-head"><span class="cfg-card-title">🎛 生成参数</span></div>
+          <div class="tune-grid">
+            <div class="tune-section">
+              <div class="tune-section-title">字幕识别（OCR）</div>
+              <div class="tune-rows">
+                <div class="tune-row">
+                  <div class="tune-label">字幕区域高度：<small>画面底部保留比例（0.05-0.5）</small></div>
+                  <div class="tune-ctl"><input type="number" id="cfg-ocr-crop" min="0.05" max="0.5" step="0.01"></div>
+                </div>
+                <div class="tune-row">
+                  <div class="tune-label">OCR 并发数：<small>每帧图片识别并发（3-8）</small></div>
+                  <div class="tune-ctl"><input type="number" id="cfg-ocr-workers" min="1" max="12"></div>
+                </div>
+              </div>
+            </div>
+            <div class="tune-section">
+              <div class="tune-section-title">语音转写（ASR）</div>
+              <div class="tune-rows">
+                <div class="tune-row">
+                  <div class="tune-label">转写并发数：<small>分段转写并发，filetrans 模式不适用（2-6）</small></div>
+                  <div class="tune-ctl"><input type="number" id="cfg-asr-workers" min="1" max="8"></div>
+                </div>
+              </div>
+            </div>
+            <div class="tune-section">
+              <div class="tune-section-title">融合与精讲</div>
+              <div class="tune-rows">
+                <div class="tune-row">
+                  <div class="tune-label">翻译并发数：<small>翻译批次并发（1-6）</small></div>
+                  <div class="tune-ctl"><input type="number" id="cfg-tr-workers" min="1" max="8"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-actions set-savebar" id="tr-savebar">
+          <button class="primary" id="tr-save" style="padding:9px 26px">保存设置</button>
+        </div>
+      </section>
+      <section class="run-log">
+        <div class="run-log-head">
+          <span>运行日志</span>
+          <button id="tr-log-clear" title="清空日志">清空</button>
+        </div>
+        <div class="run-log-body" id="tr-log">
+          <div class="run-log-empty">保存设置时这里会打印过程日志。</div>
+        </div>
+      </section>
+    </div>`);
+
+  function trLog(level, text) {
+    const el = document.getElementById("tr-log");
+    if (!el) return;
+    const empty = el.querySelector(".run-log-empty");
+    if (empty) empty.remove();
+    const row = document.createElement("div");
+    row.className = "run-log-row " + (level || "info");
+    const t = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    row.textContent = `[${t}] ${text}`;
+    el.appendChild(row);
+    while (el.children.length > 400) el.removeChild(el.firstChild);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function globalPoolFor(pid) {
+    return (cfgCache?.global_models || {})[pid] || [];
+  }
+
+  function healthFor(pid, model) {
+    return (cfgCache?.model_health || {})[`${pid || ""}||${model || ""}`] || null;
+  }
+
+  function drawRolePicker(role) {
+    const meta = ROLE_META.find((r) => r.key === role);
+    const slot = document.getElementById(`tr-mp-${role}`);
+    if (!slot) return;
+    const provSel = document.getElementById(`tr-prov-${role}`);
+    const pid = provSel?.value || "";
+    const chosen = rolePicked[role];
+    const pool = globalPoolFor(pid);
+    const f = (roleFilter[role] || "").toLowerCase();
+    const avail = pool
+      .filter((m) => !chosen.includes(m))
+      .filter((m) => !f || m.toLowerCase().includes(f));
+    const rows = chosen.length ? chosen.map((m, i) => {
+      const bad = healthFor(pid, m);
+      return `
+        <div class="mp-item ${bad ? "bad" : ""}">
+          <span class="mp-idx">${i + 1}</span>
+          <span class="mp-name" title="${esc(m)}">${esc(m)}</span>
+          ${bad ? `<span class="mp-bad" title="${esc(bad.message || "上次调用失败")}">⚠ 报错</span>` : ""}
+          <button class="mp-up" data-up="${i}" title="上移" ${i === 0 ? "disabled" : ""}>▲</button>
+          <button class="mp-del" data-del="${i}" title="移除">✕</button>
+        </div>`;
+    }).join("") : `<div class="mp-empty">还没有选择模型 — 先在「模型配置」页勾选该 API 的全局模型，再从下方添加</div>`;
+    slot.innerHTML = `
+      <div class="mp-list">${rows}</div>
+      ${pool.length ? `
+      <div class="mp-add-row">
+        <input type="text" class="mp-search" placeholder="搜索模型（${pool.filter((m) => !chosen.includes(m)).length} 个可选）" value="${esc(roleFilter[role] || "")}">
+        <select class="mp-add-sel">
+          <option value="" selected>${f ? `匹配 ${avail.length} 个` : "从全局池选择…"}</option>
+          ${avail.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}
+        </select>
+        <button class="mp-add" disabled>＋ 添加</button>
+        <button class="mp-manual-add" title="手动输入模型名">＋ 手动添加</button>
+      </div>` : ""}
+      ${role === "asr" && document.querySelector("input[name=asr-engine]:checked")?.value === "filetrans"
+        ? `<div class="mp-hint">ⓘ filetrans 模式下此角色由「转写方式」里的模型接管，此列表不参与转写。</div>`
+        : `<div class="mp-hint">可多选，按顺序尝试：第一个是主模型，报错时自动换下一个。</div>`}`;
+
+    slot.querySelectorAll("[data-up]").forEach((btn) => {
+      btn.onclick = () => {
+        const i = +btn.dataset.up;
+        if (i > 0) {
+          [chosen[i - 1], chosen[i]] = [chosen[i], chosen[i - 1]];
+          drawRolePicker(role);
+        }
+      };
+    });
+    slot.querySelectorAll("[data-del]").forEach((btn) => {
+      btn.onclick = () => {
+        chosen.splice(+btn.dataset.del, 1);
+        drawRolePicker(role);
+      };
+    });
+    const search = slot.querySelector(".mp-search");
+    if (search) {
+      const pos = search.selectionStart;
+      search.oninput = () => {
+        roleFilter[role] = search.value;
+        drawRolePicker(role);
+        const again = slot.querySelector(".mp-search");
+        if (again) { again.focus(); again.setSelectionRange(pos, pos); }
+      };
+      search.onkeydown = (e) => {
+        if (e.key === "Enter" && avail.length === 1) {
+          chosen.push(avail[0]);
+          roleFilter[role] = "";
+          drawRolePicker(role);
+        }
+      };
+    }
+    const addSel = slot.querySelector(".mp-add-sel");
+    const addBtn = slot.querySelector(".mp-add");
+    if (addSel && addBtn) {
+      addSel.onchange = () => { addBtn.disabled = !addSel.value; };
+      addBtn.onclick = () => {
+        if (addSel.value && !chosen.includes(addSel.value)) chosen.push(addSel.value);
+        roleFilter[role] = "";
+        drawRolePicker(role);
+      };
+    }
+    const manualBtn = slot.querySelector(".mp-manual-add");
+    if (manualBtn) {
+      manualBtn.onclick = () => {
+        const name = prompt("输入模型名称：");
+        const clean = (name || "").trim();
+        if (clean && !chosen.includes(clean)) chosen.push(clean);
+      };
+    }
+  }
+
+  function drawAllRolePickers() { ROLE_META.forEach((r) => drawRolePicker(r.key)); }
+
+  function drawRoleProviders() {
+    const opts = () => providers.map((p) =>
+      `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`).join("");
+    ROLE_META.forEach((r) => {
+      const sel = document.getElementById(`tr-prov-${r.key}`);
+      if (!sel) return;
+      const prev = sel.value || cfgCache?.[r.provKey] || "";
+      sel.innerHTML = opts() || `<option value="">（请先在模型配置页添加 API）</option>`;
+      if (prev && providers.some((p) => p.id === prev)) sel.value = prev;
+      sel.onchange = () => drawRolePicker(r.key);
+    });
+  }
+
+  function syncFiletransBlock() {
+    const engine = document.querySelector("input[name=asr-engine]:checked")?.value || "chat";
+    document.getElementById("ft-config").style.display = engine === "filetrans" ? "block" : "none";
+    drawAllRolePickers();
+  }
+
+  async function init() {
+    cfgCache = await api("/api/config");
+    ROLE_META.forEach((r) => {
+      const models = (cfgCache[`${r.key}_models`] || []).length
+        ? cfgCache[`${r.key}_models`]
+        : [cfgCache?.[`${r.key}_model`]].filter(Boolean);
+      rolePicked[r.key] = [...models];
+    });
+    document.querySelectorAll("input[name=asr-engine]").forEach((el) => {
+      el.checked = (cfgCache.asr_engine || "chat") === el.value;
+      el.onchange = syncFiletransBlock;
+    });
+    document.getElementById("ft-public-base").value = cfgCache.filetrans_public_base || "";
+    document.getElementById("ft-model").value = cfgCache.filetrans_model || "qwen-audio-3.1-asr-flash-filetrans";
+    document.getElementById("cfg-ocr-crop").value = cfgCache.ocr_bottom_crop || 0.22;
+    document.getElementById("cfg-ocr-workers").value = cfgCache.ocr_workers || 6;
+    document.getElementById("cfg-asr-workers").value = cfgCache.asr_workers || 4;
+    document.getElementById("cfg-tr-workers").value = cfgCache.translate_workers || 3;
+    syncFiletransBlock();
+    drawRoleProviders();
+    drawAllRolePickers();
+  }
+
+  document.getElementById("tr-log-clear").onclick = () => {
+    document.getElementById("tr-log").innerHTML = `<div class="run-log-empty">日志已清空</div>`;
+  };
+
+  document.getElementById("tr-save").onclick = async () => {
+    const engine = document.querySelector("input[name=asr-engine]:checked")?.value || "chat";
+    if (engine === "filetrans" && !document.getElementById("ft-public-base").value.trim()) {
+      toast("filetrans 模式需要填写公网地址"); return;
+    }
+    if (!rolePicked.chat.length) { toast("请为「翻译与精讲」选择至少一个模型"); return; }
+    const body = {
+      asr_engine: engine,
+      filetrans_public_base: document.getElementById("ft-public-base").value.trim(),
+      filetrans_model: document.getElementById("ft-model").value.trim() || "qwen-audio-3.1-asr-flash-filetrans",
+      chat_models: rolePicked.chat,
+      asr_models: rolePicked.asr,
+      vision_models: rolePicked.vision,
+      chat_provider: document.getElementById("tr-prov-chat").value,
+      asr_provider: document.getElementById("tr-prov-asr").value,
+      vision_provider: document.getElementById("tr-prov-vision").value,
+      ocr_workers: parseInt(document.getElementById("cfg-ocr-workers").value, 10) || 6,
+      ocr_bottom_crop: parseFloat(document.getElementById("cfg-ocr-crop").value) || 0.22,
+      asr_workers: parseInt(document.getElementById("cfg-asr-workers").value, 10) || 4,
+      translate_workers: parseInt(document.getElementById("cfg-tr-workers").value, 10) || 3,
+    };
+    ROLE_META.forEach((r) => {
+      body[`${r.key}_model`] = rolePicked[r.key][0] || "";
+    });
+    trLog("info", "保存转写设置…");
+    try {
+      await api("/api/config", { method: "PUT", body: JSON.stringify(body) });
+      cfgCache = await api("/api/config");
+      trLog("ok", "✓ 已保存");
+      toast("已保存");
+    } catch (err) {
+      trLog("fail", "✗ 保存失败: " + err.message);
+      toast("保存失败: " + err.message);
     }
   };
 

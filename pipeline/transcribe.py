@@ -275,6 +275,11 @@ def transcribe(
     should_cancel: Callable[[], bool] | None = None,
     workers: int = 4,
 ) -> list[dict[str, Any]]:
+    # filetrans engine: whole-file async transcription, no segmentation here
+    if (cfg.get("asr_engine") or "chat") == "filetrans":
+        from pipeline.filetrans import transcribe_filetrans
+        return transcribe_filetrans(media_path, cfg, workdir=workdir,
+                                    progress_cb=progress_cb, should_cancel=should_cancel)
     prov = _provider(cfg)
     base_url = prov["base_url"]
     api_key = prov["api_key"]
