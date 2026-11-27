@@ -1069,11 +1069,8 @@ function renderSettings() {
                   <div class="mp-slot" id="mp-asr"></div>
                   <div class="probe-row">
                     <div class="probe-actions">
-                      <button id="cfg-refresh-asr" title="获取模型并检测哪些支持语音转写">↻ 获取并检测</button>
-                      <button id="cfg-probe-asr" title="忽略缓存，重新检测一遍">🔄 重新检测</button>
-                      <button id="cfg-clear-asr" class="probe-clear" title="删除这个 API 的语音转写检测缓存">清除缓存</button>
+                      <button id="cfg-refresh-asr" title="获取这个 API 的模型列表">↻ 获取模型</button>
                     </div>
-                    <span class="probe-hint" id="asr-probe-hint"></span>
                   </div>
                 </div>
                 <div class="role-block">
@@ -1082,11 +1079,8 @@ function renderSettings() {
                   <div class="mp-slot" id="mp-vision"></div>
                   <div class="probe-row">
                     <div class="probe-actions">
-                      <button id="cfg-refresh-vision" title="获取模型并检测哪些支持图片输入">↻ 获取并检测</button>
-                      <button id="cfg-probe-vision" title="忽略缓存，重新检测一遍">🔄 重新检测</button>
-                      <button id="cfg-clear-vision" class="probe-clear" title="删除这个 API 的 OCR 检测缓存">清除缓存</button>
+                      <button id="cfg-refresh-vision" title="获取这个 API 的模型列表">↻ 获取模型</button>
                     </div>
-                    <span class="probe-hint" id="vision-probe-hint"></span>
                   </div>
                 </div>
               </div>
@@ -1145,7 +1139,7 @@ function renderSettings() {
           <button id="run-log-clear" title="清空日志">清空</button>
         </div>
         <div class="run-log-body" id="run-log">
-          <div class="run-log-empty">测试连接 / 获取并检测模型时，这里会打印过程日志。</div>
+          <div class="run-log-empty">测试连接 / 获取模型时，这里会打印过程日志。</div>
         </div>
       </section>
     </div>`);
@@ -1419,18 +1413,6 @@ function renderSettings() {
     visSel.onchange = () => showSavedOrProbed("vision");
   }
 
-  /* ---- capability probe results (cached in config.probe_cache) ---- */
-  function normBase(url) { return (url || "").replace(/\/+$/, ""); }
-
-  function probeCacheFor(pid, role) {
-    const entry = (cfgCache?.probe_cache || {})[pid];
-    if (!entry) return null;
-    const prov = providers.find((p) => p.id === pid);
-    if (prov && normBase(prov.base_url) !== normBase(entry.base_url)) return null;
-    const r = entry[role];
-    return r && Array.isArray(r.models) ? r.models : null;
-  }
-
   /* ---- multi-select model picker (ordered list; first = primary) ---- */
   const picked = { chat: [], asr: [], vision: [] };   // working selection per role
   let browse = { chat: [], asr: [], vision: [] };     // models known for the current provider
@@ -1445,10 +1427,6 @@ function renderSettings() {
     picked[role] = [...new Set((list || []).filter(Boolean))];
   }
 
-  function roleTag(role) {
-    return role === "asr" ? "✓ 支持转写" : role === "vision" ? "✓ 支持看图" : "";
-  }
-
   function drawPicker(role) {
     const slot = document.getElementById(`mp-${role}`);
     if (!slot) return;
@@ -1457,12 +1435,10 @@ function renderSettings() {
     const avail = (browse[role] || []).filter((m) => !chosen.includes(m));
     const rows = chosen.length ? chosen.map((m, i) => {
       const bad = healthFor(pid, m);
-      const tag = roleTag(role);
       return `
         <div class="mp-item ${bad ? "bad" : ""}" data-role="${role}" data-model="${esc(m)}">
           <span class="mp-idx">${i + 1}</span>
           <span class="mp-name" title="${esc(m)}">${esc(m)}</span>
-          ${tag ? `<span class="mp-ok">${tag}</span>` : ""}
           ${bad ? `<span class="mp-bad" title="${esc(bad.message || "上次调用失败")}">⚠ 报错</span>` : ""}
           <button class="mp-up" data-up="${i}" title="上移" ${i === 0 ? "disabled" : ""}>▲</button>
           <button class="mp-del" data-del="${i}" title="移除">✕</button>
@@ -1517,7 +1493,7 @@ function renderSettings() {
     setPicked("vision", (cfgCache?.vision_models || []).length ? cfgCache.vision_models : [cfgCache?.vision_model]);
   }
 
-  // Fill the "add" list for a role: probe results, else the provider's models.
+  // Fill the "add" list for a role with the provider model list.
   // Models that last failed a real call are dropped so the list stays usable.
   function setBrowse(role, models) {
     const provSel = role === "asr" ? "role-asr" : role === "vision" ? "role-vision" : "role-chat";
@@ -1527,18 +1503,11 @@ function renderSettings() {
     drawPicker(role);
   }
 
-  // No probe results yet: keep the saved selection and clear the browse list.
+  // No cached list yet: keep the saved selection, browse starts empty until
+  // 获取模型 runs for the selected provider.
   function showSavedOrProbed(role) {
-    const provSel = role === "asr" ? "role-asr" : "role-vision";
-    const pid = document.getElementById(provSel)?.value;
-    const models = pid ? probeCacheFor(pid, role) : null;
-    if (models) {
-      setBrowse(role, models);
-      setProbeHint(role, `已使用上次检测结果：${models.length} 个模型（点「↻ 获取并检测」可更新）`);
-    } else {
-      setBrowse(role, []);
-      setProbeHint(role, "");
-    }
+    setBrowse(role, []);
+    setProbeHint(role, "");
   }
 
   function setProbeHint(role, text) {
@@ -1546,69 +1515,6 @@ function renderSettings() {
     if (!el) return;
     el.textContent = text || "";
     el.style.display = text ? "block" : "none";
-  }
-
-  // Poll a background probe job, streaming its progress into the run log.
-  async function runProbeJob(role, pid, force) {
-    const { job_id } = await api("/api/config/probe_start", {
-      method: "POST",
-      body: JSON.stringify({ provider_id: pid, roles: [role], force }),
-    });
-    let since = 0;
-    for (;;) {
-      await new Promise((r) => setTimeout(r, 600));
-      if (!document.getElementById("run-log")) throw new Error("页面已离开");
-      const st = await api(`/api/config/probe_status?job_id=${encodeURIComponent(job_id)}&since=${since}`);
-      for (const ev of st.events || []) {
-        logLine(ev.level, ev.text);
-        since = Math.max(since, ev.seq);
-      }
-      if (st.state === "done") return st.result || {};
-      if (st.state === "error") throw new Error(st.error || "检测失败");
-    }
-  }
-
-  async function probeRole(role, force) {
-    const pid = document.getElementById(role === "asr" ? "role-asr" : "role-vision").value
-      || document.getElementById("role-chat").value;
-    if (!pid) { toast("请先添加并保存 API"); return; }
-    const prov = providers.find((p) => p.id === pid);
-    const label = role === "asr" ? "语音转写" : "画面字幕 OCR";
-    const btnIds = role === "asr" ? ["cfg-refresh-asr", "cfg-clear-asr"] : ["cfg-refresh-vision", "cfg-clear-vision"];
-    btnIds.forEach((id) => { const b = document.getElementById(id); if (b) b.disabled = true; });
-    const refreshBtn = document.getElementById(role === "asr" ? "cfg-refresh-asr" : "cfg-refresh-vision");
-    if (refreshBtn) refreshBtn.disabled = true;
-    setProbeHint(role, force
-      ? "正在重新检测（忽略缓存）… 进度见下方运行日志"
-      : "正在获取模型并逐个检测… 进度见下方运行日志");
-    logLine("info", `—— ${force ? "重新检测" : "检测"} ${label} @ ${prov ? prov.name || pid : pid} ——`);
-    try {
-      const result = await runProbeJob(role, pid, force);
-      const r = result[role] || {};
-      const found = r.models || [];
-      // keep the local cache in sync so switching providers/tabs reuses it
-      cfgCache = cfgCache || {};
-      cfgCache.probe_cache = cfgCache.probe_cache || {};
-      const entry = cfgCache.probe_cache[pid] || {};
-      entry.base_url = normBase(prov ? prov.base_url : "");
-      entry[role] = { at: r.at, models: found };
-      cfgCache.probe_cache[pid] = entry;
-
-      setBrowse(role, found);
-      // keep the selection, but say so when something picked no longer passes
-      const dropped = picked[role].filter((m) => found.length && !found.includes(m));
-      setProbeHint(role, r.cached
-        ? `已使用上次检测结果：${found.length} 个模型（点「↻ 获取并检测」可更新）`
-        : `✓ 检出 ${found.length} 个支持模型（检测了 ${r.checked} 个，目录共 ${r.total} 个）`
-          + (dropped.length ? ` · 已选中有 ${dropped.length} 个未通过检测，仍会保留在列表里` : ""));
-      toast(found.length ? `检出 ${found.length} 个可用模型` : "没有检测到支持该功能的模型");
-    } catch (err) {
-      setProbeHint(role, "✗ 检测失败: " + err.message);
-      logLine("fail", "✗ " + err.message);
-    } finally {
-      btnIds.forEach((id) => { const b = document.getElementById(id); if (b) b.disabled = false; });
-      if (refreshBtn) refreshBtn.disabled = false;
-    }
   }
 
   async function fetchModels(providerId) {
@@ -1629,66 +1535,37 @@ function renderSettings() {
     };
   });
 
-  document.getElementById("cfg-refresh-asr").onclick = async () => {
-    await saveConfigQuiet();
-    await probeRole("asr", false);
-  };
-
-  document.getElementById("cfg-refresh-chat").onclick = async () => {
-    await saveConfigQuiet();
-    const pid = document.getElementById("role-chat").value;
+  // unified "获取模型" for all three roles: clear the session cache, fetch
+  // the provider's full model list, and fill the role's browse picker
+  async function refreshRoleModels(role) {
+    const sel = document.getElementById(role === "asr" ? "role-asr" : role === "vision" ? "role-vision" : "role-chat");
+    const pid = sel?.value;
     if (!pid) { toast("请先添加并保存 API"); return; }
-    toast("获取模型列表中…");
+    await saveConfigQuiet();
+    const btn = document.getElementById(role === "asr" ? "cfg-refresh-asr"
+      : role === "vision" ? "cfg-refresh-vision" : "cfg-refresh-chat");
+    if (btn) btn.disabled = true;
+    const prov = providers.find((p) => p.id === pid);
+    logLine("info", `—— 获取模型 @ ${prov ? prov.name || pid : pid} ——`);
     try {
+      delete modelCache[pid];   // always re-fetch; nothing is cached
       const res = await fetchModels(pid);
-      setBrowse("chat", res.models || []);
-      setProbeHint("chat", `共 ${(res.models || []).length} 个模型，从下方列表添加要用的`);
-      toast(`获取到 ${(res.models || []).length} 个模型`);
-    } catch (err) { toast("获取失败: " + err.message); }
-  };
-
-  document.getElementById("cfg-refresh-vision").onclick = async () => {
-    await saveConfigQuiet();
-    await probeRole("vision", false);
-  };
-
-  document.getElementById("cfg-probe-asr").onclick = async () => {
-    await saveConfigQuiet();
-    await probeRole("asr", true);
-  };
-
-  document.getElementById("cfg-probe-vision").onclick = async () => {
-    await saveConfigQuiet();
-    await probeRole("vision", true);
-  };
-
-  document.getElementById("cfg-clear-asr").onclick = () => clearProbeCache("asr");
-  document.getElementById("cfg-clear-vision").onclick = () => clearProbeCache("vision");
-
-  async function clearProbeCache(role) {
-    const pid = document.getElementById(role === "asr" ? "role-asr" : "role-vision").value
-      || document.getElementById("role-chat").value;
-    if (!pid) { toast("请先添加并保存 API"); return; }
-    const label = role === "asr" ? "语音转写" : "画面字幕 OCR";
-    try {
-      await api(`/api/config/probe_cache?provider_id=${encodeURIComponent(pid)}&role=${role}`, { method: "DELETE" });
-      cfgCache = cfgCache || {};
-      const entry = (cfgCache.probe_cache || {})[pid];
-      if (entry) {
-        delete entry[role];
-        if (!entry.vision && !entry.asr) delete cfgCache.probe_cache[pid];
-      }
-      // no detection results any more: the picker keeps the selection, the
-      // "add" list empties until the next detection run
-      setBrowse(role, []);
-      setProbeHint(role, "检测缓存已清除，下次点「↻ 获取并检测」会重新检测");
-      logLine("warn", `已清除 ${label} 的检测缓存`);
-      toast("缓存已清除");
+      setBrowse(role, res.models || []);
+      const n = (res.models || []).length;
+      setProbeHint(role, `共 ${n} 个模型，从下方列表添加要用的`);
+      logLine("ok", `✓ 获取到 ${n} 个模型`);
+      toast(`获取到 ${n} 个模型`);
     } catch (err) {
-      toast("清除失败: " + err.message);
-      logLine("fail", "✗ 清除缓存失败: " + err.message);
+      setProbeHint(role, "✗ 获取失败: " + err.message);
+      logLine("fail", "✗ " + err.message);
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
+
+  document.getElementById("cfg-refresh-asr").onclick = () => refreshRoleModels("asr");
+  document.getElementById("cfg-refresh-chat").onclick = () => refreshRoleModels("chat");
+  document.getElementById("cfg-refresh-vision").onclick = () => refreshRoleModels("vision");
 
   async function saveConfigQuiet() {
     collectProviders();

@@ -188,13 +188,9 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 }
 
 /* per-role model picker */
-/* multimodal probe (OCR role) */
 .probe-row { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: -4px; }
 .probe-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .probe-row button { font-size: 12px; padding: 5px 10px; }
-.probe-clear { color: var(--ink-3); }
-.probe-clear:hover { color: var(--red); border-color: var(--red); }
-.probe-hint { display: none; font-size: 11.5px; color: var(--ink-3); line-height: 1.5; }
 .switch-row { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; margin: 0; }
 .switch-row input { position: absolute; opacity: 0; pointer-events: none; }
 .switch-ui {

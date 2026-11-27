@@ -121,40 +121,6 @@ def _resolve_provider(cfg: dict[str, Any], provider_key: str) -> dict[str, Any]:
 
 
 # ---- model lists ----
-# models that one role can plausibly use
-_ROLE_EXCLUDE = ("embed", "tts", "whisper", "transcri", "asr", "speech", "rerank",
-                 "moderation", "dall-e", "stable-diffusion", "sdxl", "flux", "image", "ocr", "audio")
-_ROLE_MARKERS = {
-    "asr": ("whisper", "transcri", "asr", "audio", "speech", "sensevoice", "paraformer", "funasr", "vox", "omni"),
-    "vision": ("vl", "vision", "ocr", "omni", "gemini", "gpt-4o", "gpt-4.1", "gpt-5", "claude",
-               "pixtral", "llava", "internvl", "glm-4v", "qvq"),
-}
-# providers advertise hundreds of models; never walk more than a handful
-_MODEL_LIMIT = {"chat": 8, "asr": 6, "vision": 6}
-
-
-def filter_models_for_role(ids: list[str], role: str) -> list[str]:
-    """Name-based guess at which of `ids` can serve `role` (may be empty)."""
-    if not ids:
-        return []
-    if role in _ROLE_MARKERS:
-        return [m for m in ids if any(k in m.lower() for k in _ROLE_MARKERS[role])]
-    return [m for m in ids if not any(k in m.lower() for k in _ROLE_EXCLUDE)]
-
-
-def models_for_role(prov: dict[str, Any], role: str,
-                    cfg: dict[str, Any] | None = None) -> list[str]:
-    """Probed capability list for this provider+role (empty when not probed).
-
-    Kept for callers/tests that ask "what can this provider do"; failover itself
-    no longer uses it — the user's selection is authoritative.
-    """
-    if not cfg:
-        return []
-    entry = (cfg.get("probe_cache") or {}).get(prov.get("id") or "") or {}
-    if entry.get("base_url") != (prov.get("base_url") or "").rstrip("/"):
-        return []
-    return list((entry.get(role) or {}).get("models") or [])
 
 
 def ordered_models(cfg: dict[str, Any], model_key: str,
