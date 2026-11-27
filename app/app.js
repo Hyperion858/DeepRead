@@ -1146,14 +1146,6 @@ function renderSettings() {
                 <div class="tune-section-title">融合与精讲</div>
                 <div class="tune-rows">
                   <div class="tune-row">
-                    <div class="tune-label">融合比对基准：<small>文本不一致以谁为准</small></div>
-                    <div class="tune-ctl"><select id="cfg-align-base">
-                      <option value="asr">语音转写</option>
-                      <option value="ocr">OCR 字幕</option>
-                      <option value="embedded">内嵌字幕</option>
-                    </select></div>
-                  </div>
-                  <div class="tune-row">
                     <div class="tune-label">翻译并发数：<small>翻译批次并发（1-6）</small></div>
                     <div class="tune-ctl"><input type="number" id="cfg-tr-workers" min="1" max="8"></div>
                   </div>
