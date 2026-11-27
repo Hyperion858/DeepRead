@@ -59,21 +59,16 @@ body {
 .main { flex: 1; min-width: 0; overflow-y: visible; }
 /* tall pages scroll naturally with the document; sidebar stays pinned via sticky */
 .page {
-  width: 100%; max-width: min(1280px, 94%);
-  margin: 0 auto;
+  width: 100%; max-width: none;
+  margin: 0;
   padding: clamp(20px, 3.5vh, 40px) clamp(16px, 3vw, 44px) clamp(40px, 6vh, 72px);
 }
 /* form-centric pages keep readable line lengths but occupy the same frame width */
-.page-narrow { max-width: min(1280px, 94%) !important; }
+.page-narrow { max-width: none !important; }
 .page-narrow > * { max-width: 860px; margin-left: auto; margin-right: auto; }
 .page-narrow .page-head { max-width: 860px; }
 .page h1 { font-size: clamp(20px, 1.1vw + 14px, 27px); margin: 0 0 clamp(14px, 2.5vh, 24px); letter-spacing: -.4px; }
 .page > p { color: var(--ink-2); }
-
-/* wide screens: let tables/forms breathe */
-@media (min-width: 1400px) {
-  .page { max-width: min(1360px, 92%); }
-}
 
 /* ---------------- controls ---------------- */
 button {
@@ -252,7 +247,7 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .tune-row .tune-ctl input, .tune-row .tune-ctl select { width: 100%; text-align: left; }
 
 /* settings page: tabs on top, content below */
-.settings-split { max-width: min(1280px, 94%) !important; padding-top: clamp(10px, 2vh, 20px); }
+.settings-split { max-width: none !important; padding-top: clamp(10px, 2vh, 20px); }
 .settings-split > h1 { margin-bottom: 12px; }
 .set-tabs {
   display: flex; gap: 4px; margin-bottom: 16px; background: var(--panel);
@@ -287,7 +282,7 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 /* model config page: left provider list / right detail, run log spans full width below */
 .mc-layout {
   display: grid; grid-template-columns: minmax(210px, 300px) minmax(0, 1fr);
-  gap: 16px; align-items: start;
+  gap: 16px; align-items: stretch;
 }
 @media (max-width: 860px) { .mc-layout { grid-template-columns: 1fr; } }
 /* the detail card — subtle blue-tinted gradient with an accent top bar */
@@ -302,11 +297,13 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
   width: 4px; height: 15px; border-radius: 2px; background: var(--accent);
 }
 .mc-left {
-  display: flex; flex-direction: column; gap: 8px;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0;
   background: linear-gradient(180deg, var(--panel) 0%, #f2f6fd 100%);
   border: 1px solid var(--line); border-radius: var(--radius);
   padding: 10px; box-shadow: var(--shadow);
 }
+.mc-right { display: flex; flex-direction: column; min-width: 0; }
+.mc-right .cfg-card { flex: 1; }
 .prov-mini {
   background: linear-gradient(180deg, #ffffff 0%, #edf3fd 100%);
   border: 1px solid var(--line); border-radius: calc(var(--radius) * 2 / 3);
