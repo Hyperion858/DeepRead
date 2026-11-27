@@ -1429,12 +1429,17 @@ function renderSettings() {
     picked[role] = [...new Set((list || []).filter(Boolean))];
   }
 
+  const modelFilter = { chat: "", asr: "", vision: "" };   // per-role browse search
+
   function drawPicker(role) {
     const slot = document.getElementById(`mp-${role}`);
     if (!slot) return;
     const pid = document.getElementById(role === "chat" ? "role-chat" : role === "asr" ? "role-asr" : "role-vision")?.value || "";
     const chosen = picked[role];
-    const avail = (browse[role] || []).filter((m) => !chosen.includes(m));
+    const f = (modelFilter[role] || "").toLowerCase();
+    const avail = (browse[role] || [])
+      .filter((m) => !chosen.includes(m))
+      .filter((m) => !f || m.toLowerCase().includes(f));
     const rows = chosen.length ? chosen.map((m, i) => {
       const bad = healthFor(pid, m);
       return `
@@ -1447,13 +1452,15 @@ function renderSettings() {
         </div>`;
     }).join("") : `<div class="mp-empty">还没有选择模型 — 用下面的列表添加</div>`;
     const badCount = chosen.filter((m) => healthFor(pid, m)).length;
+    const shownTotal = (browse[role] || []).length - chosen.length;
     slot.innerHTML = `
       <div class="mp-list">${rows}</div>
       ${badCount ? `<div class="mp-warn">⚠ 有 ${badCount} 个已选模型上次调用报错，仍按顺序尝试；连续失败会继续换下一个</div>` : ""}
-      ${avail.length ? `
+      ${browse[role] && browse[role].length ? `
         <div class="mp-add-row">
+          <input type="text" class="mp-search" placeholder="搜索模型（${shownTotal} 个可选）" value="${esc(modelFilter[role] || "")}">
           <select class="mp-add-sel">
-            <option value="" selected>选择模型…</option>
+            <option value="" selected>${f ? `匹配 ${avail.length} 个` : "选择模型…"}</option>
             ${avail.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}
           </select>
           <button class="mp-add" disabled>＋ 添加</button>
@@ -1477,10 +1484,30 @@ function renderSettings() {
     });
     const addSel = slot.querySelector(".mp-add-sel");
     const addBtn = slot.querySelector(".mp-add");
+    const search = slot.querySelector(".mp-search");
+    if (search) {
+      // keep focus and caret position across redraws
+      const pos = search.selectionStart;
+      search.oninput = () => {
+        modelFilter[role] = search.value;
+        drawPicker(role);
+        const again = slot.querySelector(".mp-search");
+        if (again) { again.focus(); again.setSelectionRange(pos, pos); }
+      };
+      search.onkeydown = (e) => {
+        if (e.key === "Enter" && avail.length === 1) {
+          // quick add: exactly one match → add it
+          if (!chosen.includes(avail[0])) chosen.push(avail[0]);
+          modelFilter[role] = "";
+          drawPicker(role);
+        }
+      };
+    }
     if (addSel && addBtn) {
       addSel.onchange = () => { addBtn.disabled = !addSel.value; };
       addBtn.onclick = () => {
         if (addSel.value && !chosen.includes(addSel.value)) chosen.push(addSel.value);
+        modelFilter[role] = "";
         drawPicker(role);
       };
     }
