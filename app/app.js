@@ -1038,48 +1038,41 @@ function normBase(url) { return (url || "").replace(/\/+$/, ""); }
 function renderSettings() {
   document.title = "模型配置 · DeepRead";
   // state declared BEFORE the template — the template interpolates these
-  let selSection = "providers";   // "providers" | "roles" | "tuning"
-  let expandedProvider = -1;      // index of the provider row expanded inline; -1 = all collapsed
   let providers = [];
   let cfgCache = null;
   let modelCache = {};            // provider_id -> {models, asr_models}
   $app.innerHTML = shell("settings", `
     <div class="page settings-split">
       <h1>模型配置</h1>
-      <div class="set-tabs">
-        <button class="set-fixed ${selSection === "providers" ? "on" : ""}" data-sec="providers">API 提供商</button>
-        <button class="set-fixed ${selSection === "roles" ? "on" : ""}" data-sec="roles">全局模型</button>
-      </div>
-      <section class="set-main">
-          <div id="stab-providers" class="stab"></div>
-          <div id="stab-roles" class="stab" style="display:none">
-            <div class="cfg-card">
-              <div class="cfg-card-head"><span class="cfg-card-title">🌐 全局模型</span>
-                <span class="cfg-card-sub">勾选各提供商可用的模型；角色分配（哪些模型用于哪个环节）在「转写设置」页配置</span></div>
-              <div id="global-pool"></div>
+      <div class="mc-layout">
+        <aside class="mc-left" id="mc-provider-list"></aside>
+        <section class="mc-right">
+          <div class="cfg-card" id="mc-detail-card">
+            <div class="cfg-card-head"><span class="cfg-card-title" id="mc-detail-title">API 提供商</span>
+              <span class="cfg-card-sub" id="mc-detail-sub">从左侧选择一个提供商查看详情</span></div>
+            <div id="stab-providers" class="stab"></div>
+            <div id="stab-roles" class="stab" style="display:none">
               <div class="probe-row">
                 <div class="probe-actions">
-                  <select id="pool-provider" style="font-size:12.5px"></select>
                   <button id="cfg-refresh-pool" title="获取这个 API 的模型列表">↻ 获取模型</button>
+                  <button id="cfg-save-pool" class="primary" style="padding:5px 16px">保存勾选</button>
                 </div>
               </div>
+              <div id="global-pool"></div>
             </div>
           </div>
-          <div class="form-actions set-savebar" id="savebar">
-            <button class="primary" id="cfg-save" style="padding:9px 26px">保存配置</button>
-            <button id="cfg-test">测试连接</button>
-          </div>
           <div class="test-result" id="test-result"></div>
+          <section class="run-log">
+            <div class="run-log-head">
+              <span>运行日志</span>
+              <button id="run-log-clear" title="清空日志">清空</button>
+            </div>
+            <div class="run-log-body" id="run-log">
+              <div class="run-log-empty">测试连接 / 获取模型时，这里会打印过程日志。</div>
+            </div>
+          </section>
         </section>
-      <section class="run-log">
-        <div class="run-log-head">
-          <span>运行日志</span>
-          <button id="run-log-clear" title="清空日志">清空</button>
-        </div>
-        <div class="run-log-body" id="run-log">
-          <div class="run-log-empty">测试连接 / 获取模型时，这里会打印过程日志。</div>
-        </div>
-      </section>
+      </div>
     </div>`);
 
   /* ---- run log (bottom panel) ---- */
@@ -1130,93 +1123,50 @@ function renderSettings() {
     for (const [pid, models] of Object.entries(cfgCache.global_models || {})) {
       if (Array.isArray(models) && models.length) globalPool[pid] = [...models];
     }
+    selectedProvider = -1;
     drawProviders();
-    drawRoles();
-    selSection = "providers";
-    expandedProvider = -1;
-    drawProviders();
-    drawSection();
   }
 
-  function drawSection() {
-    document.getElementById("stab-providers").style.display = selSection === "providers" ? "block" : "none";
-    document.getElementById("stab-roles").style.display = selSection === "roles" ? "block" : "none";
-    // save bar only makes sense for roles/tuning (providers have per-card save)
-    document.getElementById("savebar").style.display = selSection === "providers" ? "none" : "flex";
-    document.querySelectorAll(".set-fixed").forEach((el) => {
-      el.classList.toggle("on", selSection === el.dataset.sec);
-    });
-  }
+  // Selected provider index for the left list / right detail layout
+  let selectedProvider = -1;
 
   function drawProviders() {
-    const wrap = document.getElementById("stab-providers");
-    if (!wrap) return;
+    drawProviderList();
+    drawProviderDetail();
+    drawRoles();
+  }
 
-    // ---- provider cards (collapsed by default; click to expand) ----
-    if (!providers.length) expandedProvider = -1;
-    const rolesFor = (i) => {
-      const pid = providers[i].id;
-      const n = (globalPool[pid] || []).length;
-      return n ? [`${n} 个模型`] : [];
-    };
+  // Left column: compact 2/3-size provider cards; click selects, ＋ adds.
+  function drawProviderList() {
+    const wrap = document.getElementById("mc-provider-list");
+    if (!wrap) return;
+    if (!providers.length) selectedProvider = -1;
+    else if (selectedProvider >= providers.length) selectedProvider = providers.length - 1;
     wrap.innerHTML = `
       <div class="prov-head">
-        <span class="prov-head-title">API 提供商</span>
-        <button id="prov-add" class="primary" style="padding:6px 16px">＋ 添加</button>
+        <span class="prov-head-title">提供商</span>
+        <button id="prov-add" class="primary" style="padding:4px 12px">＋</button>
       </div>
-      ${providers.length ? `<div class="prov-grid">${providers.map((p, i) => {
+      ${providers.length ? providers.map((p, i) => {
         const st = provStatus(p);
-        const roles = rolesFor(i);
-        const open = expandedProvider === i;
+        const n = (globalPool[p.id] || []).length;
         return `
-        <div class="prov-card ${open ? "open" : ""}" data-pi="${i}">
-          <div class="prov-card-hit" data-toggle="${i}">
-            <div class="prov-card-head">
-              <span class="prov-dot ${st.cls}" title="${st.cls === "ok" ? "上次测试通过" : st.cls === "fail" ? "上次测试失败" : "未测试"}"></span>
-              <span class="prov-card-name" title="${esc(p.name || `API ${i + 1}`)}">${esc(p.name || `API ${i + 1}`)}</span>
-              <span class="prov-status ${st.cls}" title="${st.text}">${st.text}</span>
-            </div>
-            <div class="prov-card-url" title="${esc(p.base_url)}">${esc((p.base_url || "").replace(/^https?:\/\//, ""))}</div>
-            <div class="prov-card-roles" title="${roles.length ? roles.join(" · ") : "未分配"}">用于：${roles.length ? roles.join(" · ") : "未分配"}</div>
+        <div class="prov-mini ${selectedProvider === i ? "on" : ""}" data-select="${i}" title="${esc(p.base_url)}">
+          <div class="prov-mini-head">
+            <span class="prov-dot ${st.cls}"></span>
+            <span class="prov-mini-name">${esc(p.name || `API ${i + 1}`)}</span>
+            <button class="p-del" data-del="${i}" title="删除">✕</button>
           </div>
-          <div class="prov-card-actions">
-            <button class="prov-test" data-test="${i}" title="测试这个 API 的连接">测试</button>
-            <button data-edit="${i}" title="编辑这个 API">编辑</button>
-            <button class="danger p-del" data-del="${i}" title="删除">✕</button>
-          </div>
-          <div class="prov-body" data-body="${i}">
-            <div class="form-row"><label>名称</label>
-              <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 阿里云百炼）"></div>
-            <div class="form-row"><label>Base URL</label>
-              <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
-            <div class="form-row"><label>API Key</label>
-              <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
-            <div class="cal-hint">Key 保存在服务器本地 data/config.json。转写 / Chat / OCR 可分别指向不同提供商（见上方「模型分配」）。</div>
-            <div class="form-actions">
-              <button class="primary prov-done" data-done="${i}" style="padding:8px 22px">确定</button>
-              <button class="prov-test" data-test="${i}">测试连接</button>
-            </div>
-          </div>
+          <div class="prov-mini-sub">${st.text}${n ? ` · ${n} 个模型` : ""}</div>
         </div>`;
-      }).join("")}</div>`
-        : `<div class="panel-empty" style="padding:24px">还没有 API，点击右上「＋ 添加」</div>`}`;
+      }).join("") : `<div class="panel-empty" style="padding:18px">还没有 API</div>`}`;
 
-    wrap.querySelectorAll("[data-toggle]").forEach((el) => {
-      el.onclick = () => {
-        const i = +el.dataset.toggle;
+    wrap.querySelectorAll("[data-select]").forEach((el) => {
+      el.onclick = (e) => {
+        if (e.target.closest("[data-del]")) return;
         collectProviders();
-        expandedProvider = expandedProvider === i ? -1 : i;
+        selectedProvider = +el.dataset.select;
         drawProviders();
-      };
-    });
-    wrap.querySelectorAll("[data-edit]").forEach((btn) => {
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        collectProviders();
-        expandedProvider = +btn.dataset.edit;
-        drawProviders();
-        const nameInput = wrap.querySelector(`.prov-body[data-body="${expandedProvider}"] .p-name`);
-        if (nameInput) nameInput.focus();
       };
     });
     wrap.querySelectorAll(".p-del").forEach((btn) => {
@@ -1225,39 +1175,85 @@ function renderSettings() {
         const i = +btn.dataset.del;
         if (!confirm(`删除 API「${providers[i].name}」？`)) return;
         providers.splice(i, 1);
-        if (expandedProvider === i) expandedProvider = -1;
-        else if (expandedProvider > i) expandedProvider -= 1;
-        drawProviders(); drawRoles();
+        if (selectedProvider >= providers.length) selectedProvider = providers.length - 1;
+        saveProviders().then(() => { drawProviders(); });
       };
     });
+    const addBtn = wrap.querySelector("#prov-add");
+    if (addBtn) addBtn.onclick = () => {
+      collectProviders();
+      providers.push({ id: "", name: "", base_url: "", api_key: "" });
+      selectedProvider = providers.length - 1;
+      drawProviders();
+      const nameInput = document.querySelector("#stab-providers .prov-detail .p-name");
+      if (nameInput) nameInput.focus();
+    };
+  }
+
+  // Right column: the selected provider's edit form, or the pool when nothing
+  // is selected. Edit form replaces the old expand-in-card interaction.
+  function drawProviderDetail() {
+    const wrap = document.getElementById("stab-providers");
+    const card = document.getElementById("mc-detail-card");
+    if (!wrap || !card) return;
+    const titleEl = document.getElementById("mc-detail-title");
+    const subEl = document.getElementById("mc-detail-sub");
+    const poolWrap = document.getElementById("stab-roles");
+    const isPool = selectedProvider < 0;
+
+    titleEl.textContent = isPool ? "全局模型" : (providers[selectedProvider]?.name || "编辑 API");
+    subEl.textContent = isPool
+      ? "勾选各提供商可用的模型；角色分配在「转写设置」页配置"
+      : "修改后点「确定」保存；「测试」验证连通性";
+    poolWrap.style.display = isPool ? "block" : "none";
+
+    if (isPool) {
+      wrap.innerHTML = `<div class="panel-empty" style="padding:18px">从左侧选择一个提供商管理它的配置，或点下方按钮查看全局模型池。</div>`;
+      drawRoles();
+      return;
+    }
+
+    const p = providers[selectedProvider];
+    const i = selectedProvider;
+    const st = provStatus(p);
+    wrap.innerHTML = `
+      <div class="prov-detail">
+        <div class="prov-detail-status"><span class="prov-dot ${st.cls}"></span><span class="prov-status ${st.cls}">${st.text}</span></div>
+        <div class="form-row"><label>名称</label>
+          <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 阿里云百炼）"></div>
+        <div class="form-row"><label>Base URL</label>
+          <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
+        <div class="form-row"><label>API Key</label>
+          <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
+        <div class="cal-hint">Key 保存在服务器本地 data/config.json。全局可用的模型在右侧「全局模型」里勾选（先保存提供商再获取）。</div>
+        <div class="form-actions">
+          <button class="primary prov-done" data-done="${i}" style="padding:8px 22px">确定</button>
+          <button class="prov-test" data-test="${i}">测试连接</button>
+        </div>
+      </div>`;
+
     wrap.querySelectorAll("[data-done]").forEach((btn) => {
       btn.onclick = async () => {
         collectProviders();
-        const p = providers[expandedProvider];
+        const p = providers[selectedProvider];
         if (p && !p.base_url) { toast("请填写 Base URL"); return; }
         const ok = await saveProviders();
         if (!ok) return;
-        expandedProvider = -1;
         drawProviders();
         logLine("ok", "✓ 已保存 API 配置");
         toast("已保存");
       };
     });
-    // per-provider connectivity check (uses the values currently in the fields)
     wrap.querySelectorAll("[data-test]").forEach((btn) => {
-      btn.onclick = async (e) => {
-        e.stopPropagation();
+      btn.onclick = async () => {
         collectProviders();
-        const i = +btn.dataset.test;
-        const p = providers[i];
+        const p = providers[selectedProvider];
         if (!p || !p.base_url) { toast("请填写 Base URL"); return; }
-        const label = p.name || `API ${i + 1}`;
-        const card = btn.closest(".prov-card");
-        const statusEl = card ? card.querySelector(".prov-status") : null;
-        const dotEl = card ? card.querySelector(".prov-dot") : null;
+        const statusEl = wrap.querySelector(".prov-status");
+        const dotEl = wrap.querySelector(".prov-dot");
         btn.disabled = true;
         if (statusEl) { statusEl.textContent = "测试中…"; statusEl.className = "prov-status"; }
-        logLine("info", `测试连接「${label}」 ${p.base_url}`);
+        logLine("info", `测试连接「${p.name || "API"}」 ${p.base_url}`);
         try {
           const res = await api("/api/config/test_provider", {
             method: "POST",
@@ -1281,16 +1277,6 @@ function renderSettings() {
         }
       };
     });
-    const addBtn = wrap.querySelector("#prov-add");
-    if (addBtn) addBtn.onclick = () => {
-      collectProviders();
-      providers.push({ id: "", name: "", base_url: "", api_key: "" });
-      expandedProvider = providers.length - 1;
-      drawProviders(); drawRoles();
-      const nameInput = wrap.querySelector(`.prov-body[data-body="${expandedProvider}"] .p-name`);
-      if (nameInput) nameInput.focus();
-    };
-    drawRoles();
   }
 
   // Persist just the provider list (ids for new entries come back from the server).
@@ -1307,18 +1293,18 @@ function renderSettings() {
   }
 
   function collectProviders() {
-    if (expandedProvider < 0 || !providers[expandedProvider]) return;
-    const body = document.querySelector(`#stab-providers .prov-body[data-body="${expandedProvider}"]`);
+    if (selectedProvider < 0 || !providers[selectedProvider]) return;
+    const body = document.querySelector("#stab-providers .prov-detail");
     if (!body) return;
-    providers[expandedProvider].name = body.querySelector(".p-name").value.trim() || `API ${expandedProvider + 1}`;
-    providers[expandedProvider].base_url = body.querySelector(".p-url").value.trim();
-    providers[expandedProvider].api_key = body.querySelector(".p-key").value.trim();
+    providers[selectedProvider].name = body.querySelector(".p-name").value.trim() || `API ${selectedProvider + 1}`;
+    providers[selectedProvider].base_url = body.querySelector(".p-url").value.trim();
+    providers[selectedProvider].api_key = body.querySelector(".p-key").value.trim();
   }
 
   /* ---- global model pool: which provider's which models are usable ---- */
   let globalPool = {};              // {provider_id: [models]} working copy
   let poolBrowse = [];              // models fetched for the selected provider
-  let poolPid = "";                 // provider currently shown in the pool tab
+  let poolPid = "";                 // provider currently shown in the pool panel
   let poolFilter = "";
   let poolFetched = false;          // has 获取模型 run for poolPid this session
 
@@ -1330,27 +1316,21 @@ function renderSettings() {
 
   function drawRoles() {
     collectProviders();
-    const sel = document.getElementById("pool-provider");
-    if (!sel) return;
-    const opts = () => providers.map((p) =>
-      `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`).join("");
-    const prev = sel.value || poolPid;
-    sel.innerHTML = opts() || `<option value="">（请先添加 API）</option>`;
-    if (prev && providers.some((p) => p.id === prev)) sel.value = prev;
-    else if (providers.length) sel.value = providers[0].id;
-    poolPid = sel.value;
-    sel.onchange = () => {
-      poolPid = sel.value;
-      poolBrowse = [];
-      poolFetched = false;
-      drawPool();
-    };
+    // pool follows the provider selected in the left list
+    poolPid = selectedProvider >= 0 && providers[selectedProvider]
+      ? providers[selectedProvider].id : "";
+    poolBrowse = [];
+    poolFetched = false;
     drawPool();
   }
 
   function drawPool() {
     const wrap = document.getElementById("global-pool");
     if (!wrap) return;
+    if (!poolPid) {
+      wrap.innerHTML = `<div class="mp-empty">请先在左侧选择一个提供商</div>`;
+      return;
+    }
     const chosen = globalPool[poolPid] || [];
     const f = (poolFilter || "").toLowerCase();
     const avail = poolBrowse
@@ -1468,17 +1448,6 @@ function renderSettings() {
     return res;
   }
 
-  // left-nav fixed sections (API 提供商 / 全局模型)
-  document.querySelectorAll(".set-fixed").forEach((el) => {
-    el.onclick = () => {
-      collectProviders();
-      selSection = el.dataset.sec;
-      expandedProvider = -1;
-      drawProviders();
-      drawSection();
-    };
-  });
-
   document.getElementById("cfg-refresh-pool").onclick = async () => {
     if (!poolPid) { toast("请先添加并保存 API"); return; }
     await saveModelsPage();
@@ -1518,32 +1487,12 @@ function renderSettings() {
     } catch (err) { toast(err.message); }
   }
 
-  document.getElementById("cfg-save").onclick = async () => {
+  // Save pool button lives in the pool panel; per-provider edit form has its own 确定.
+  document.getElementById("cfg-save-pool").onclick = async () => {
     if (!providers.length) { toast("请至少添加一个 API"); return; }
     await saveModelsPage();
+    drawProviders();
     toast("已保存");
-  };
-
-  document.getElementById("cfg-test").onclick = async () => {
-    const el = document.getElementById("test-result");
-    el.className = "test-result"; el.textContent = "测试中…";
-    logLine("info", "—— 测试连接（当前保存的配置）——");
-    await saveModelsPage();
-    try {
-      const res = await api("/api/config/test", { method: "POST", body: JSON.stringify({}) });
-      const parts = [];
-      parts.push(res.chat ? "✓ Chat 可用" : "✗ Chat 不可用");
-      parts.push(res.transcribe ? "✓ 转写端点可达" : "✗ 转写端点不可用");
-      el.className = "test-result " + (res.chat || res.transcribe ? "ok" : "fail");
-      el.textContent = parts.join("　") + (res.detail ? ` · ${res.detail}` : "");
-      logLine(res.chat ? "ok" : "fail", `Chat：${res.chat ? "可用" : "不可用"}`);
-      logLine(res.transcribe ? "ok" : "fail", `转写端点：${res.transcribe ? "可达" : "不可用"}`);
-      if (res.detail) logLine("warn", res.detail);
-    } catch (err) {
-      el.className = "test-result fail";
-      el.textContent = "连接失败: " + err.message;
-      logLine("fail", "✗ 连接失败: " + err.message);
-    }
   };
 
   init();
