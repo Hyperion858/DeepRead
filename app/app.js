@@ -1053,17 +1053,17 @@ function renderSettings() {
             <div id="stab-providers" class="stab"></div>
           </div>
           <div class="test-result" id="test-result"></div>
-          <section class="run-log">
-            <div class="run-log-head">
-              <span>运行日志</span>
-              <button id="run-log-clear" title="清空日志">清空</button>
-            </div>
-            <div class="run-log-body" id="run-log">
-              <div class="run-log-empty">测试连接 / 获取模型时，这里会打印过程日志。</div>
-            </div>
-          </section>
         </section>
       </div>
+      <section class="run-log">
+        <div class="run-log-head">
+          <span>运行日志</span>
+          <button id="run-log-clear" title="清空日志">清空</button>
+        </div>
+        <div class="run-log-body" id="run-log">
+          <div class="run-log-empty">测试连接 / 获取模型时，这里会打印过程日志。</div>
+        </div>
+      </section>
     </div>`);
 
   /* ---- run log (bottom panel) ---- */
@@ -1202,10 +1202,6 @@ function renderSettings() {
     titleEl.textContent = p.name || `API ${i + 1}`;
     subEl.textContent = "配置连接信息与该提供商可用的模型";
     const pool = globalPool[pid] || [];
-    const f = (poolFilter || "").toLowerCase();
-    const avail = poolBrowse
-      .filter((m) => !pool.includes(m))
-      .filter((m) => !f || m.toLowerCase().includes(f));
     const modelRows = (poolBrowse.length || pool.length) ? pool.map((m) => {
       const bad = healthFor(pid, m);
       return `
@@ -1217,25 +1213,31 @@ function renderSettings() {
           <button class="mp-del" data-uncheck="${esc(m)}" title="移除">✕</button>
         </div>`;
     }).join("") : `<div class="mp-empty">还没有获取模型 — 保存提供商后点「↻ 获取模型」拉取列表，或手动添加</div>`;
-    const searchPh = poolFetched ? `搜索模型（${poolBrowse.length} 个）` : "搜索或手动输入模型名";
+    const searchPh = poolFetched ? `搜索模型（${poolBrowse.length} 个）` : "先点「↻ 获取模型」拉取列表";
+    const comboList = (poolFetched && poolBrowse.length)
+      ? `<div class="mp-combo-list" hidden></div>` : "";
     const poolHtml = p.id ? `
       <div class="mp-divider"></div>
       <div class="probe-row">
         <div class="probe-actions">
           <button id="cfg-refresh-pool" title="获取这个 API 的模型列表">↻ 获取模型</button>
           <button id="cfg-save-pool" class="primary" style="padding:5px 16px">保存勾选</button>
+          <button class="mp-manual-add" title="手动输入模型名（官方目录滞后的新模型也能加）">＋ 手动添加</button>
         </div>
+      </div>
+      <div class="mp-manual-box" hidden>
+        <input type="text" class="mp-manual-input" placeholder="输入模型名称（按 API 文档的模型 Code）">
+        <button class="mp-manual-confirm primary">添加</button>
+        <button class="mp-manual-close">关闭</button>
       </div>
       <div id="global-pool">
         <div class="mp-list">${modelRows}</div>
         <div class="mp-add-row">
-          <input type="text" class="mp-search" placeholder="${searchPh}" value="${esc(poolFilter)}">
-          <select class="mp-add-sel">
-            <option value="" selected>${f ? `匹配 ${avail.length} 个` : "从获取的列表选择…"}</option>
-            ${avail.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}
-          </select>
+          <div class="mp-combo">
+            <input type="text" class="mp-combo-input" placeholder="${searchPh}" autocomplete="off">
+            ${comboList}
+          </div>
           <button class="mp-add" disabled>＋ 添加</button>
-          <button class="mp-manual-add" title="手动输入模型名（官方目录滞后的新模型也能加）">＋ 手动添加</button>
         </div>
         <div class="mp-hint">勾选 = 全局可用；各环节用哪些模型在「转写设置」页配置。</div>
       </div>` : `<div class="mp-hint" style="margin-top:10px">ⓘ 先点「确定」保存提供商，然后就可以在这里获取和勾选它的模型。</div>`;
@@ -1363,50 +1365,90 @@ function renderSettings() {
         toast("已保存");
       };
     }
-    const search = wrap.querySelector(".mp-search");
-    if (search) {
-      const pos = search.selectionStart;
-      search.oninput = () => {
-        poolFilter = search.value;
-        drawProviderDetail();
-        const again = wrap.querySelector(".mp-search");
-        if (again) { again.focus(); again.setSelectionRange(pos, pos); }
-      };
-      search.onkeydown = (e) => {
-        if (e.key === "Enter" && avail.length === 1) {
-          globalPool[pid] = [...new Set([...(globalPool[pid] || []), avail[0]])];
-          poolFilter = "";
-          drawProviderDetail();
-        } else if (e.key === "Enter" && search.value.trim() && !poolBrowse.length) {
-          const name = search.value.trim();
-          globalPool[pid] = [...new Set([...(globalPool[pid] || []), name])];
-          poolFilter = "";
-          drawProviderDetail();
-        }
-      };
-    }
-    const addSel = wrap.querySelector(".mp-add-sel");
+    // searchable combobox: type to filter the fetched list, pick one, add it
+    const comboInput = wrap.querySelector(".mp-combo-input");
+    const comboListEl = wrap.querySelector(".mp-combo-list");
     const addBtn = wrap.querySelector(".mp-add");
-    if (addSel && addBtn) {
-      addSel.onchange = () => { addBtn.disabled = !addSel.value; };
-      addBtn.onclick = () => {
-        if (addSel.value) {
-          globalPool[pid] = [...new Set([...(globalPool[pid] || []), addSel.value])];
-          poolFilter = "";
-          drawProviderDetail();
+    let picked = "";
+    const renderComboList = () => {
+      if (!comboListEl) return;
+      const q = (comboInput ? comboInput.value : "").toLowerCase();
+      const matches = poolBrowse
+        .filter((m) => !pool.includes(m))
+        .filter((m) => !q || m.toLowerCase().includes(q))
+        .slice(0, 60);
+      comboListEl.innerHTML = matches.length
+        ? matches.map((m) => `<div class="mp-combo-item" data-pick="${esc(m)}">${esc(m)}</div>`).join("")
+        : `<div class="mp-combo-none">无匹配模型</div>`;
+      comboListEl.hidden = false;
+      comboListEl.querySelectorAll("[data-pick]").forEach((el) => {
+        el.onclick = () => {
+          picked = el.dataset.pick;
+          comboInput.value = picked;
+          comboListEl.hidden = true;
+          if (addBtn) addBtn.disabled = false;
+        };
+      });
+    };
+    if (comboInput && addBtn) {
+      comboInput.oninput = () => {
+        picked = "";
+        addBtn.disabled = true;
+        if (comboListEl && poolBrowse.length) renderComboList();
+      };
+      comboInput.onfocus = () => { if (comboListEl && poolBrowse.length) renderComboList(); };
+      comboInput.onkeydown = (e) => {
+        if (e.key === "Escape" && comboListEl) { comboListEl.hidden = true; return; }
+        if (e.key !== "Enter") return;
+        // Enter: pick the first visible match, or add what's already picked
+        const first = comboListEl && !comboListEl.hidden && comboListEl.querySelector("[data-pick]");
+        if (first && !picked) {
+          picked = first.dataset.pick;
+          comboInput.value = picked;
+          comboListEl.hidden = true;
+          addBtn.disabled = false;
+        } else if (picked) {
+          addBtn.click();
         }
       };
     }
+    if (addBtn) {
+      addBtn.onclick = () => {
+        const name = picked || (comboInput ? comboInput.value.trim() : "");
+        if (!name) return;
+        globalPool[pid] = [...new Set([...(globalPool[pid] || []), name])];
+        poolFilter = "";
+        drawProviderDetail();
+      };
+    }
+    // click outside closes the dropdown
+    document.addEventListener("click", (e) => {
+      if (comboListEl && !comboListEl.hidden && !e.target.closest(".mp-combo")) {
+        comboListEl.hidden = true;
+      }
+    }, { once: true });
     const manualBtn = wrap.querySelector(".mp-manual-add");
-    if (manualBtn) {
+    const manualBox = wrap.querySelector(".mp-manual-box");
+    const manualInput = wrap.querySelector(".mp-manual-input");
+    if (manualBtn && manualBox) {
       manualBtn.onclick = () => {
-        const name = prompt("输入模型名称（按 API 文档的模型 Code）：");
-        const clean = (name || "").trim();
-        if (clean) {
-          globalPool[pid] = [...new Set([...(globalPool[pid] || []), clean])];
-          toast(`已添加 ${clean}（点「保存勾选」生效）`);
-          drawProviderDetail();
-        }
+        manualBox.hidden = !manualBox.hidden;
+        if (!manualBox.hidden && manualInput) manualInput.focus();
+      };
+      const confirmBtn = wrap.querySelector(".mp-manual-confirm");
+      const closeBtn = wrap.querySelector(".mp-manual-close");
+      const doAdd = () => {
+        const name = (manualInput ? manualInput.value : "").trim();
+        if (!name) { toast("请输入模型名称"); return; }
+        globalPool[pid] = [...new Set([...(globalPool[pid] || []), name])];
+        toast(`已添加 ${name}（点「保存勾选」生效）`);
+        drawProviderDetail();
+      };
+      if (confirmBtn) confirmBtn.onclick = doAdd;
+      if (manualInput) manualInput.onkeydown = (e) => { if (e.key === "Enter") doAdd(); };
+      if (closeBtn) closeBtn.onclick = () => {
+        manualBox.hidden = true;
+        if (manualInput) manualInput.value = "";
       };
     }
   }
