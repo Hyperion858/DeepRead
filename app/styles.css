@@ -401,6 +401,10 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .ch-base-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .ch-base-btn:disabled { opacity: .45; cursor: not-allowed; }
 
+/* centered confirm dialog */
+.confirm-panel { align-self: center; margin: auto; }
+.confirm-msg { color: var(--ink-2); font-size: 14px; line-height: 1.6; margin-top: 10px; }
+
 /* course generation status card */
 .gen-card {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);

@@ -8,9 +8,12 @@ Also merges fragmented ASR segments into sentence-level units.
 """
 from __future__ import annotations
 
+import json
 import re
 from difflib import SequenceMatcher
 from typing import Any
+
+import httpx
 
 
 def _norm(text: str) -> str:
@@ -192,7 +195,7 @@ def _split_bilingual(text: str) -> str:
 
 
 def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
-          align_base: str = "asr") -> list[dict[str, Any]]:
+          align_base: str = "asr", cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     # normalize + merge ASR fragments first
     asr = merge_asr_fragments(asr_segments)
     asr = [s for s in (split_long_segment(s) for s in asr) for s in s]
@@ -228,6 +231,7 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
 
     used_embedded: set[int] = set()
     results: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []   # handed to the LLM arbiter after the loop
 
     # the baseline channel wins text disagreements. Default asr: caption text
     # is usually human-authored so strong agreement takes it. ocr/embedded as
@@ -258,10 +262,11 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
             used_embedded.add(i)
 
         sim = _similarity(seg["text"], sub_text)
+        asr_n, sub_n = _norm(seg["text"]), _norm(sub_text)
         if base_is_caption:
             # caption is the authority: take its text whenever it carries
             # comparable content; flag when ASR disagrees noticeably
-            if len(_norm(sub_text)) >= len(_norm(seg["text"])) * 0.5 or sim > 0.5:
+            if len(sub_n) >= len(asr_n) * 0.5 or sim > 0.5:
                 results.append({
                     **seg,
                     "text": sub_text,
@@ -279,15 +284,30 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
                 "source": "embedded",
                 "uncertain": False,
             })
-        elif sim > 0.4 and len(_norm(sub_text)) >= len(_norm(seg["text"])) * 0.6:
-            # partial agreement AND the caption carries substantial text:
-            # prefer it but flag for review
+        elif sub_n and asr_n.startswith(sub_n):
+            # caption is a prefix of the ASR text: OCR caught the caption
+            # mid-fade or the caption summarizes — ASR is the full sentence
+            results.append({**seg, "source": "asr", "uncertain": False})
+        elif asr_n and sub_n.startswith(asr_n) and len(sub_n) > len(asr_n):
+            # ASR is a prefix of the caption: ASR missed the tail, the burned
+            # caption carries it — take the caption
             results.append({
                 **seg,
                 "text": sub_text,
                 "source": "embedded",
-                "uncertain": True,
+                "uncertain": False,
             })
+        elif sim > 0.4 and len(sub_n) >= len(asr_n) * 0.6:
+            # partial agreement: genuinely ambiguous — hand it to the LLM
+            # arbiter (batched after the loop); till then keep ASR, flag it
+            ambiguous.append({
+                "asr": seg["text"],
+                "caption": sub_text,
+                "index": len(results),
+                "seg": seg,
+                "sub_text": sub_text,
+            })
+            results.append({**seg, "source": "asr", "uncertain": True})
         else:
             # weak match: keep the ASR text (more complete) but BORROW the
             # caption's timing when the warp didn't anchor this segment —
@@ -319,4 +339,67 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
             })
 
     results.sort(key=lambda x: x["start"])
+
+    # LLM arbiter for the genuinely ambiguous middle band (0.4 < sim <= 0.75):
+    # one batched chat call merges ASR + caption per sentence with context —
+    # far better than char-level rules for homophone vs. typo errors
+    if ambiguous:
+        _arbiter_resolve(ambiguous, results, cfg)
+        results.sort(key=lambda x: x["start"])
     return results
+
+
+def _arbiter_prompt(ambiguous: list[dict[str, Any]]) -> str:
+    items = []
+    for k, a in enumerate(ambiguous):
+        items.append(f'{{"id": {k}, "asr": {json.dumps(a["asr"], ensure_ascii=False)}, '
+                     f'"caption": {json.dumps(a["caption"], ensure_ascii=False)}}}')
+    return (
+        "以下是同一段视频里两路识别结果不一致的句子。asr 是语音转写（完整但同音词易错），"
+        "caption 是画面烧录字幕（人工定稿但可能残缺/截断）。请逐条给出最可能的原始文本。\n"
+        "规则：两者高度重合时合并出最通顺的原文；caption 是 asr 的截断时取 asr；"
+        "asr 明显漏词时以 caption 为准补全；无法判断时取更完整、更符合语境的那个。\n"
+        '输出严格 JSON 数组：[{"id": 0, "text": "..."}, ...]，不要解释。\n\n'
+        "[" + ",\n".join(items) + "]"
+    )
+
+
+def _arbiter_resolve(ambiguous: list[dict[str, Any]], results: list[dict[str, Any]],
+                     cfg: dict[str, Any] | None = None) -> None:
+    """Merge ASR/caption for ambiguous sentences via one chat call (best-effort)."""
+    if not cfg:
+        return
+    try:
+        from pipeline.lesson import chat_with_failover, _extract_json
+    except ImportError:
+        return
+    prompt = _arbiter_prompt(ambiguous)
+    try:
+        with httpx.Client(timeout=httpx.Timeout(connect=15, read=120, write=30, pool=15)) as client:
+            reply, _used = chat_with_failover(cfg, [{"role": "user", "content": prompt}],
+                                              max_tokens=4000, temperature=0)
+    except Exception:  # noqa: BLE001 — arbiter is opportunistic; keep pre-arbitration text
+        return
+    try:
+        parsed = _extract_json(reply)
+        if not isinstance(parsed, list):
+            return
+        for item in parsed:
+            try:
+                k = int(item.get("id"))
+                text = str(item.get("text") or "").strip()
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if not text or k < 0 or k >= len(ambiguous):
+                continue
+            a = ambiguous[k]
+            merged = _similarity(text, a["asr"])
+            if merged >= 0.3:   # sanity: the arbiter shouldn't invent new content
+                results[a["index"]] = {
+                    **a["seg"],
+                    "text": text,
+                    "source": "arbitrated",
+                    "uncertain": False,
+                }
+    except Exception:  # noqa: BLE001
+        return

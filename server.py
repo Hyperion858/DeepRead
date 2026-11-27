@@ -320,7 +320,7 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
             log_event("runtime", f"通道结果：内嵌字幕 {len(embedded_lines)} 条 / OCR {len(ocr_lines)} 条 / ASR {len(asr_segments)} 段",
                       course_id=cid)
             set_stage(cid, "aligning", f"融合 {len(caption_lines)} 条字幕 + {len(asr_segments)} 段转写…", 0.9)
-            segments = align(asr_segments, caption_lines, align_base=align_base)
+            segments = align(asr_segments, caption_lines, align_base=align_base, cfg=cfg)
 
             write_json(cdir / "source.json", {"segments": segments})
 

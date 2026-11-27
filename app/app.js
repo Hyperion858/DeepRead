@@ -237,9 +237,11 @@ async function refreshMaterials() {
 
     wrap.querySelectorAll("[data-genc]").forEach((btn) => {
       btn.onclick = () => {
-        const m = list.find((x) => x.id === btn.dataset.genc) || {};
-        openChannelDialog({ mid: btn.dataset.genc, kind: "material",
-                            lastChannels: m.last_channels, lastAlignBase: m.last_align_base });
+        api(`/api/materials/${btn.dataset.genc}/generate`, {
+          method: "POST", body: JSON.stringify({ channels: ["embedded", "ocr", "asr"] }),
+        })
+          .then((res) => { toast("课程生成已开始"); location.hash = `#/course/${res.id}`; })
+          .catch((err) => toast(err.message));
       };
     });
     wrap.querySelectorAll("[data-play]").forEach((a) => {
@@ -247,9 +249,13 @@ async function refreshMaterials() {
     });
     wrap.querySelectorAll("[data-regen]").forEach((btn) => {
       btn.onclick = () => {
-        const m = list.find((x) => x.course_id === btn.dataset.regen) || {};
-        openChannelDialog({ mid: btn.dataset.regen, kind: "course",
-                            lastChannels: m.last_channels, lastAlignBase: m.last_align_base });
+        confirmDialog("重新生成课程", "将用当前配置重新转写并覆盖这门课程的精讲内容，继续？", () => {
+          api(`/api/courses/${btn.dataset.regen}/generate`, {
+            method: "POST", body: JSON.stringify({ channels: ["embedded", "ocr", "asr"] }),
+          })
+            .then(() => toast("重新生成已开始"))
+            .catch((err) => toast(err.message));
+        });
       };
     });
     wrap.querySelectorAll("[data-del]").forEach((btn) => {
@@ -1001,91 +1007,21 @@ function drawCoursePage() {
   }
 }
 
-/* ---------------- channel selection dialog ---------------- */
-async function openChannelDialog({ mid, kind, lastChannels, lastAlignBase }) {
+/* ---------------- centered confirm dialog ---------------- */
+function confirmDialog(title, message, onOk) {
   document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
-  // default baseline comes from the saved config; the dialog can override
-  let cfgAlignBase = "asr";
-  try { cfgAlignBase = (await api("/api/config")).align_base || "asr"; } catch {}  const CH = [
-    { key: "embedded", name: "📺 内嵌字幕", desc: "提取视频内封装的字幕轨（最准，有则强烈推荐）" },
-    { key: "asr", name: "🎙 语音转写", desc: "音频转文字（无字幕视频/纯音频必选；与字幕多选可交叉校验提升准确度）" },
-    { key: "ocr", name: "🖼 OCR 硬字幕", desc: "识别烧在画面上的字幕（抖音等平台），耗时较长" },
-  ];
-  const checked = new Set(lastChannels || ["embedded", "ocr", "asr"]);
-  // baseline: last choice for this material > saved default > first selected
-  let base = lastAlignBase || cfgAlignBase;
-  if (!checked.has(base)) base = (CH.find((c) => checked.has(c.key)) || CH[0]).key;
   const overlay = document.createElement("div");
   overlay.className = "cal-overlay";
   overlay.innerHTML = `
-    <div class="cal-panel" style="width:min(520px,100%)">
-      <div class="cal-head"><b>选择生成通道</b><button class="cal-close">✕</button></div>
-      <div class="cal-hint" style="margin:8px 0 12px">至少选一项，可多选 — 多选时各通道结果会融合比对，准确度更高。点「设为基准」决定文本不一致时以谁为准（基准未选时按顺序自动回退）。</div>
-      ${CH.map((c) => `
-        <label class="ch-row" data-row="${c.key}">
-          <input type="checkbox" data-ch="${c.key}" ${checked.has(c.key) ? "checked" : ""}>
-          <div class="ch-text"><b>${c.name}</b><small>${c.desc}</small></div>
-          <button class="ch-base-btn" data-base="${c.key}" title="把文本不一致时的基准设为此通道">基准</button>
-        </label>`).join("")}
-      <div class="ch-base-hint" style="margin:10px 0 0;color:var(--ink-2);font-size:12.5px"></div>
-      <div class="form-actions" style="margin-top:14px">
-        <button class="primary ch-go" style="flex:1">开始生成课程</button>
+    <div class="cal-panel confirm-panel" style="width:min(380px,92%)">
+      <div class="cal-head"><b>${esc(title)}</b><button class="cal-close">✕</button></div>
+      <div class="confirm-msg">${esc(message)}</div>
+      <div class="form-actions" style="margin-top:16px">
+        <button class="primary confirm-ok" style="flex:1">确定</button>
         <button class="cal-close" style="flex-shrink:0">取消</button>
       </div>
     </div>`;
-  const baseHint = overlay.querySelector(".ch-base-hint");
-  const drawBase = () => {
-    overlay.querySelectorAll(".ch-base-btn").forEach((b) => {
-      const active = b.dataset.base === base;
-      b.classList.toggle("on", active);
-      b.disabled = !overlay.querySelector(`[data-ch="${b.dataset.base}"]`)?.checked;
-    });
-    const name = CH.find((c) => c.key === base)?.name || "";
-    baseHint.textContent = `当前基准：${name}`;
-  };
-  overlay.querySelectorAll(".ch-base-btn").forEach((b) => {
-    b.onclick = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      base = b.dataset.base;
-      // a baseline must be a selected channel; tick it if it isn't
-      const cb = overlay.querySelector(`[data-ch="${base}"]`);
-      if (cb && !cb.checked) cb.checked = true;
-      drawBase();
-    };
-  });
-  overlay.querySelectorAll("[data-ch]").forEach((cb) => {
-    cb.onchange = () => {
-      if (!cb.checked && cb.dataset.ch === base) {
-        const next = overlay.querySelector("[data-ch]:checked");
-        base = next ? next.dataset.ch : "";
-      }
-      drawBase();
-    };
-  });
-  drawBase();
-  overlay.querySelector(".ch-go").onclick = async () => {
-    const channels = [...overlay.querySelectorAll("[data-ch]:checked")].map((el) => el.dataset.ch);
-    if (!channels.length) { toast("至少选择一个通道"); return; }
-    if (!channels.includes(base)) base = channels[0];
-    try {
-      let res;
-      if (kind === "material") {
-        res = await api(`/api/materials/${mid}/generate`, {
-          method: "POST", body: JSON.stringify({ channels, align_base: base }),
-        });
-        toast("课程生成已开始");
-        location.hash = `#/course/${res.id}`;
-      } else if (kind === "course") {
-        await api(`/api/courses/${mid}/generate`, {
-          method: "POST", body: JSON.stringify({ channels, align_base: base }),
-        });
-        toast("重新生成已开始");
-        refreshCourses();
-      }
-      overlay.remove();
-    } catch (err) { toast(err.message); }
-  };
+  overlay.querySelector(".confirm-ok").onclick = () => { overlay.remove(); onOk(); };
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay || e.target.closest(".cal-close")) overlay.remove();
   });
@@ -1298,7 +1234,6 @@ function renderSettings() {
     setBrowse("chat", []);
     drawAllPickers();
     // pipeline tuning
-    document.getElementById("cfg-align-base").value = cfgCache.align_base || "asr";
     document.getElementById("cfg-seg-min").value = cfgCache.segment_minutes || 5;
     document.getElementById("cfg-ocr-workers").value = cfgCache.ocr_workers || 6;
     document.getElementById("cfg-ocr-interval").value = cfgCache.ocr_interval || 1;
@@ -1800,7 +1735,6 @@ function renderSettings() {
           chat_model: picked.chat[0] || "",
           vision_model: picked.vision[0] || "",
           segment_minutes: parseInt(document.getElementById("cfg-seg-min").value, 10) || 5,
-          align_base: document.getElementById("cfg-align-base").value || "asr",
           ocr_workers: parseInt(document.getElementById("cfg-ocr-workers").value, 10) || 6,
           ocr_interval: parseFloat(document.getElementById("cfg-ocr-interval").value) || 1,
           asr_workers: parseInt(document.getElementById("cfg-asr-workers").value, 10) || 4,
