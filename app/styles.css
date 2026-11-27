@@ -247,10 +247,10 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .tune-section { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
 .tune-section-title { font-size: 12.5px; font-weight: 600; color: var(--ink-2); margin-bottom: 10px; }
 .tune-rows { display: flex; flex-direction: column; gap: 10px; }
-.tune-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.tune-row .tune-label { flex: 1; min-width: 0; font-size: 13px; color: var(--ink); text-align: right; }
-.tune-row .tune-label small { display: block; color: var(--ink-3); font-size: 11px; margin-top: 2px; text-align: right; }
-.tune-row .tune-ctl { flex-shrink: 0; width: 130px; }
+.tune-row { display: flex; align-items: center; gap: 16px; }
+.tune-row .tune-label { flex: 1; min-width: 0; font-size: 13px; color: var(--ink); text-align: left; }
+.tune-row .tune-label small { display: block; color: var(--ink-3); font-size: 11px; margin-top: 2px; text-align: left; }
+.tune-row .tune-ctl { flex: 1; min-width: 0; }
 .tune-row .tune-ctl input, .tune-row .tune-ctl select { width: 100%; text-align: left; }
 
 /* settings page: tabs on top, content below */
