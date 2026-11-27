@@ -1557,86 +1557,65 @@ function renderTranscribeSettings() {
   const rolePicked = { chat: [], asr: [], vision: [] };
   const roleFilter = { chat: "", asr: "", vision: "" };
   const ROLE_META = [
-    { key: "chat", name: "📝 翻译与精讲", tag: "Chat", provKey: "chat_provider" },
     { key: "asr", name: "🎙 语音转写", tag: "ASR", provKey: "asr_provider" },
     { key: "vision", name: "🖼 画面字幕 OCR", tag: "Vision", provKey: "vision_provider" },
+    { key: "chat", name: "📝 翻译与精讲", tag: "Chat", provKey: "chat_provider" },
   ];
 
   $app.innerHTML = shell("transcribe", `
     <div class="page settings-split">
       <h1>转写设置</h1>
       <section class="set-main">
-        <div class="cfg-card">
-          <div class="cfg-card-head"><span class="cfg-card-title">🔁 转写方式</span>
-            <span class="cfg-card-sub">两种方式互斥，由「模型分配」里语音转写的提供商下拉切换；下面的说明解释各自的差异与配置项</span></div>
-          <div class="engine-note">
-            <div class="engine-note-item"><b>分段转写</b>（语音转写的提供商选 <b>omni / qwen-audio 等 chat 音频模型</b> 所在的提供商时生效）：音频切 60 秒段逐段转写，时间按行数平摊估算；OCR 按语音时间线定向采样；融合比对 + LLM 仲裁。可多选模型按顺序 failover。</div>
-            <div class="engine-note-item"><b>filetrans 云端整文件转写</b>（语音转写的提供商选 <b>filetrans</b> 时生效）：整个文件提交阿里云异步转写，返回<b>原生毫秒级时间戳</b>（更准），支持 ≤2GB / ≤12 小时，单模型无 failover；需配置下方公网地址。后续 OCR / 翻译 / 精讲流程完全相同。</div>
-          </div>
-        </div>
 
         <div class="cfg-card">
-          <div class="cfg-card-head"><span class="cfg-card-title">🎯 模型分配</span>
-            <span class="cfg-card-sub">从「模型配置」页勾选的全局模型池中为每个环节选择模型；可多选按顺序尝试</span></div>
-          <div class="role-grid">
-            ${ROLE_META.map((r) => `
-            <div class="role-block">
-              <div class="role-name">${r.name} <i>${r.tag}</i></div>
-              <div class="form-row"><select id="tr-prov-${r.key}"></select></div>
-              <div class="mp-slot" id="tr-mp-${r.key}"></div>
-            </div>`).join("")}
-          </div>
-        </div>
-
-        <div class="cfg-card">
-          <div class="cfg-card-head"><span class="cfg-card-title">🎛 生成参数</span></div>
-          <div class="tune-grid">
-            <div class="tune-section">
-              <div class="tune-section-title">字幕识别（OCR）</div>
-              <div class="tune-rows">
-                <div class="tune-row">
-                  <div class="tune-label">字幕区域高度：<small>画面底部保留比例（0.05-0.5）</small></div>
-                  <div class="tune-ctl"><input type="number" id="cfg-ocr-crop" min="0.05" max="0.5" step="0.01"></div>
-                </div>
-                <div class="tune-row">
-                  <div class="tune-label">OCR 并发数：<small>每帧图片识别并发（3-8）</small></div>
-                  <div class="tune-ctl"><input type="number" id="cfg-ocr-workers" min="1" max="12"></div>
-                </div>
-              </div>
-            </div>
-            <div class="tune-section">
-              <div class="tune-section-title">语音转写（ASR · 分段转写生效）</div>
-              <div class="tune-rows">
-                <div class="tune-row">
-                  <div class="tune-label">转写并发数：<small>分段转写并发，filetrans 模式不适用（2-6）</small></div>
-                  <div class="tune-ctl"><input type="number" id="cfg-asr-workers" min="1" max="8"></div>
-                </div>
-              </div>
-            </div>
-            <div class="tune-section">
-              <div class="tune-section-title">融合与精讲</div>
-              <div class="tune-rows">
-                <div class="tune-row">
-                  <div class="tune-label">翻译并发数：<small>翻译批次并发（1-6）</small></div>
-                  <div class="tune-ctl"><input type="number" id="cfg-tr-workers" min="1" max="8"></div>
-                </div>
-              </div>
+          <div class="cfg-card-head"><span class="cfg-card-title">🎙 语音转写</span></div>
+          <div class="form-row"><select id="tr-engine"></select></div>
+          <div class="mp-hint" style="margin:6px 0 12px">两种方式互斥：
+            <b>分段转写</b> — 音频切 60 秒段逐段转写，时间按行数平摊估算，可多选模型按顺序 failover；
+            <b>云端转写</b> — 整个文件提交阿里云异步转写，返回原生毫秒级时间戳（更准），支持 ≤2GB / ≤12 小时，单模型无 failover。后续 OCR / 翻译 / 精讲流程完全相同。</div>
+          <div id="asr-chat-block" style="display:none">
+            <div class="form-row"><select id="tr-prov-asr"></select></div>
+            <div class="mp-slot" id="tr-mp-asr"></div>
+            <div class="tune-row" style="margin-top:10px">
+              <div class="tune-label">转写并发数：<small>分段转写并发（2-6）</small></div>
+              <div class="tune-ctl"><input type="number" id="cfg-asr-workers" min="1" max="8"></div>
             </div>
           </div>
-        </div>
-
-        <div class="cfg-card">
-          <div class="cfg-card-head"><span class="cfg-card-title">☁️ filetrans 设置</span>
-            <span class="cfg-card-sub">语音转写的提供商下拉选「filetrans」时生效；鉴权与端点沿用该提供商的 API Key</span></div>
-          <div class="tune-rows">
+          <div id="asr-ft-block" style="display:none">
+            <div class="form-row"><select id="tr-prov-ft"></select></div>
+            <div class="mp-hint" style="margin:6px 0">鉴权与端点沿用所选提供商的 API Key；N1 需一次性把 /ft 路径暴露到公网（Tailscale funnel），腾讯云等有公网 IP 的环境默认可用。</div>
             <div class="tune-row">
               <div class="tune-label">公网地址：<small>能从公网访问本服务 /ft/ 路径的基址（换部署环境只改这里）</small></div>
               <div class="tune-ctl" style="flex:1"><input type="text" id="ft-public-base" placeholder="https://dr.tail632d9e.ts.net/ft"></div>
             </div>
-            <div class="tune-row">
-              <div class="tune-label">转写模型：<small>阿里云异步文件转写模型 Code；N1 需一次性把 /ft 暴露到公网（Tailscale funnel）</small></div>
+            <div class="tune-row" style="margin-top:8px">
+              <div class="tune-label">转写模型：<small>阿里云异步文件转写模型 Code</small></div>
               <div class="tune-ctl" style="flex:1"><input type="text" id="ft-model" placeholder="qwen-audio-3.1-asr-flash-filetrans"></div>
             </div>
+          </div>
+        </div>
+
+        <div class="cfg-card">
+          <div class="cfg-card-head"><span class="cfg-card-title">🖼 画面字幕 OCR</span></div>
+          <div class="form-row"><select id="tr-prov-vision"></select></div>
+          <div class="mp-slot" id="tr-mp-vision"></div>
+          <div class="tune-row" style="margin-top:10px">
+            <div class="tune-label">字幕区域高度：<small>画面底部保留比例，字幕不在底部时调大（0.05-0.5）</small></div>
+            <div class="tune-ctl"><input type="number" id="cfg-ocr-crop" min="0.05" max="0.5" step="0.01"></div>
+          </div>
+          <div class="tune-row" style="margin-top:8px">
+            <div class="tune-label">OCR 并发数：<small>每帧图片识别并发（3-8）</small></div>
+            <div class="tune-ctl"><input type="number" id="cfg-ocr-workers" min="1" max="12"></div>
+          </div>
+        </div>
+
+        <div class="cfg-card">
+          <div class="cfg-card-head"><span class="cfg-card-title">📝 翻译与精讲</span></div>
+          <div class="form-row"><select id="tr-prov-chat"></select></div>
+          <div class="mp-slot" id="tr-mp-chat"></div>
+          <div class="tune-row" style="margin-top:10px">
+            <div class="tune-label">翻译并发数：<small>翻译批次并发（1-6）</small></div>
+            <div class="tune-ctl"><input type="number" id="cfg-tr-workers" min="1" max="8"></div>
           </div>
         </div>
 
@@ -1654,15 +1633,18 @@ function renderTranscribeSettings() {
     return (cfgCache?.model_health || {})[`${pid || ""}||${model || ""}`] || null;
   }
 
-  const FT_PROVIDER = "filetrans";   // special provider choice = engine 2
+  function currentEngine() {
+    return document.getElementById("tr-engine")?.value || "chat";
+  }
 
   function drawRolePicker(role) {
     const meta = ROLE_META.find((r) => r.key === role);
     const slot = document.getElementById(`tr-mp-${role}`);
     if (!slot) return;
-    const provSel = document.getElementById(`tr-prov-${role}`);
-    const pid = provSel?.value || "";
-    const ftMode = role === "asr" && pid === FT_PROVIDER;
+    const pid = role === "asr" && currentEngine() === "filetrans"
+      ? document.getElementById("tr-prov-ft")?.value || ""
+      : document.getElementById(`tr-prov-${role}`)?.value || "";
+    const ftMode = role === "asr" && currentEngine() === "filetrans";
     const chosen = rolePicked[role];
     const pool = globalPoolFor(pid);
     const f = (roleFilter[role] || "").toLowerCase();
@@ -1679,12 +1661,10 @@ function renderTranscribeSettings() {
           <button class="mp-up" data-up="${i}" title="上移" ${i === 0 ? "disabled" : ""}>▲</button>
           <button class="mp-del" data-del="${i}" title="移除">✕</button>
         </div>`;
-    }).join("") : ftMode
-      ? `<div class="mp-empty">filetrans 已启用 — 转写由下方「filetrans 设置」的模型执行</div>`
-      : `<div class="mp-empty">还没有选择模型 — 先在「模型配置」页勾选该 API 的全局模型，再从下方添加</div>`;
+    }).join("") : `<div class="mp-empty">还没有选择模型 — 先在「模型配置」页勾选该 API 的全局模型，再从下方添加</div>`;
     slot.innerHTML = `
       <div class="mp-list">${rows}</div>
-      ${!ftMode && pool.length ? `
+      ${pool.length ? `
       <div class="mp-add-row">
         <input type="text" class="mp-search" placeholder="搜索模型（${pool.filter((m) => !chosen.includes(m)).length} 个可选）" value="${esc(roleFilter[role] || "")}">
         <select class="mp-add-sel">
@@ -1694,9 +1674,7 @@ function renderTranscribeSettings() {
         <button class="mp-add" disabled>＋ 添加</button>
         <button class="mp-manual-add" title="手动输入模型名">＋ 手动添加</button>
       </div>` : ""}
-      ${ftMode
-        ? `<div class="mp-hint">ⓘ filetrans 已启用：转写由「filetrans 设置」的模型执行（原生时间戳），此列表不参与转写；API Key 沿用所选提供商。</div>`
-        : `<div class="mp-hint">可多选，按顺序尝试：第一个是主模型，报错时自动换下一个。</div>`}`;
+      <div class="mp-hint">可多选，按顺序尝试：第一个是主模型，报错时自动换下一个。</div>`;
 
     slot.querySelectorAll("[data-up]").forEach((btn) => {
       btn.onclick = () => {
@@ -1755,26 +1733,52 @@ function renderTranscribeSettings() {
   function drawRoleProviders() {
     const opts = () => providers.map((p) =>
       `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`).join("");
-    ROLE_META.forEach((r) => {
+    // engine dropdown: 分段转写 / 云端转写（阿里云）
+    const engSel = document.getElementById("tr-engine");
+    if (engSel) {
+      const engine = cfgCache?.asr_engine || "chat";
+      engSel.innerHTML = `
+        <option value="chat" ${engine === "chat" ? "selected" : ""}>分段转写（omni 等 chat 音频模型）</option>
+        <option value="filetrans" ${engine === "filetrans" ? "selected" : ""}>云端转写（阿里云整文件异步转写）</option>`;
+      engSel.onchange = () => {
+        syncAsrBlocks();
+        drawRolePicker("asr");
+      };
+    }
+    // ASR blocks share one provider select value (chat block shown in 分段 mode,
+    // ft block shown in 云端 mode — keep both selects in sync)
+    const asrPrev = cfgCache?.asr_provider || "";
+    const asrOpts = opts() || `<option value="">（请先在模型配置页添加 API）</option>`;
+    const chatSel = document.getElementById("tr-prov-asr");
+    const ftSel = document.getElementById("tr-prov-ft");
+    for (const sel of [chatSel, ftSel]) {
+      if (!sel) continue;
+      sel.innerHTML = asrOpts;
+      if (asrPrev && providers.some((p) => p.id === asrPrev)) sel.value = asrPrev;
+      sel.onchange = () => {
+        if (chatSel) chatSel.value = sel.value;
+        if (ftSel) ftSel.value = sel.value;
+      };
+    }
+    ROLE_META.filter((r) => r.key !== "asr").forEach((r) => {
       const sel = document.getElementById(`tr-prov-${r.key}`);
       if (!sel) return;
       const prev = sel.value || cfgCache?.[r.provKey] || "";
-      // the ASR role carries a special "filetrans" choice = engine 2
-      sel.innerHTML = (r.key === "asr" ? `<option value="${FT_PROVIDER}" ${prev === FT_PROVIDER ? "selected" : ""}>filetrans（云端整文件转写）</option>` : "")
-        + (opts() || (r.key === "asr" ? "" : `<option value="">（请先在模型配置页添加 API）</option>`));
-      if (prev && prev !== FT_PROVIDER && providers.some((p) => p.id === prev)) sel.value = prev;
-      sel.onchange = () => {
-        if (r.key === "asr") {
-          const ft = sel.value === FT_PROVIDER;
-          document.getElementById("ft-public-base").closest(".cfg-card").style.display = ft ? "block" : "block";
-        }
-        drawRolePicker(r.key);
-      };
+      sel.innerHTML = opts() || `<option value="">（请先在模型配置页添加 API）</option>`;
+      if (prev && providers.some((p) => p.id === prev)) sel.value = prev;
+      sel.onchange = () => drawRolePicker(r.key);
     });
+  }
+
+  function syncAsrBlocks() {
+    const ft = currentEngine() === "filetrans";
+    document.getElementById("asr-chat-block").style.display = ft ? "none" : "block";
+    document.getElementById("asr-ft-block").style.display = ft ? "block" : "none";
   }
 
   async function init() {
     cfgCache = await api("/api/config");
+    providers = (cfgCache.providers || []).map((p) => ({ ...p }));
     ROLE_META.forEach((r) => {
       const models = (cfgCache[`${r.key}_models`] || []).length
         ? cfgCache[`${r.key}_models`]
@@ -1788,16 +1792,18 @@ function renderTranscribeSettings() {
     document.getElementById("cfg-asr-workers").value = cfgCache.asr_workers || 4;
     document.getElementById("cfg-tr-workers").value = cfgCache.translate_workers || 3;
     drawRoleProviders();
+    syncAsrBlocks();
     drawAllRolePickers();
   }
 
   document.getElementById("tr-save").onclick = async () => {
-    const asrProv = document.getElementById("tr-prov-asr").value;
-    const engine = asrProv === FT_PROVIDER ? "filetrans" : "chat";
+    const engine = currentEngine();
+    const asrProv = document.getElementById(engine === "filetrans" ? "tr-prov-ft" : "tr-prov-asr").value;
     if (engine === "filetrans" && !document.getElementById("ft-public-base").value.trim()) {
-      toast("filetrans 模式需要填写公网地址"); return;
+      toast("云端转写需要填写公网地址"); return;
     }
     if (!rolePicked.chat.length) { toast("请为「翻译与精讲」选择至少一个模型"); return; }
+    if (engine !== "filetrans" && !rolePicked.asr.length) { toast("请为「语音转写」选择至少一个模型"); return; }
     const body = {
       asr_engine: engine,
       filetrans_public_base: document.getElementById("ft-public-base").value.trim(),
@@ -1806,7 +1812,7 @@ function renderTranscribeSettings() {
       asr_models: engine === "filetrans" ? [] : rolePicked.asr,
       vision_models: rolePicked.vision,
       chat_provider: document.getElementById("tr-prov-chat").value,
-      asr_provider: asrProv === FT_PROVIDER ? (providers[0]?.id || "") : asrProv,
+      asr_provider: asrProv,
       vision_provider: document.getElementById("tr-prov-vision").value,
       ocr_workers: parseInt(document.getElementById("cfg-ocr-workers").value, 10) || 6,
       ocr_bottom_crop: parseFloat(document.getElementById("cfg-ocr-crop").value) || 0.22,
