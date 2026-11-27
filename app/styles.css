@@ -401,10 +401,6 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .ch-base-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .ch-base-btn:disabled { opacity: .45; cursor: not-allowed; }
 
-/* centered confirm dialog */
-.confirm-panel { align-self: center; margin: auto; }
-.confirm-msg { color: var(--ink-2); font-size: 14px; line-height: 1.6; margin-top: 10px; }
-
 /* course generation status card */
 .gen-card {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
@@ -527,10 +523,9 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 }
 .speak-btn:hover { opacity: 1; transform: scale(1.15); }
 
-/* native (non-target-language) clip block at the bottom of the read tab */
-.native-block { margin-top: 18px; border-top: 1px dashed var(--line); padding-top: 10px; }
-.native-head { color: var(--ink-3); font-size: 13px; cursor: pointer; user-select: none; }
-.native-head:hover { color: var(--ink-2); }
+/* centered confirm dialog */
+.confirm-panel { align-self: center; margin: auto; }
+.confirm-msg { color: var(--ink-2); font-size: 14px; line-height: 1.6; margin-top: 10px; }
 .lcard .phon { color: var(--ink-3); font-size: 12.5px; }
 .lcard .pos { color: var(--accent); font-size: 11.5px; margin-left: 6px; }
 .lcard .def { margin-top: 6px; font-size: 13.5px; }

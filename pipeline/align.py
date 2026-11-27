@@ -15,6 +15,8 @@ from typing import Any
 
 import httpx
 
+from pipeline.transcribe import detect_lang
+
 
 def _norm(text: str) -> str:
     """Lowercase, strip punctuation/whitespace — for fuzzy comparison."""
@@ -162,12 +164,13 @@ def _warp_asr_to_cues(asr: list[dict[str, Any]], cues: list[dict[str, Any]]) -> 
     return result
 
 
-def _split_bilingual(text: str) -> str:
-    """Strip the second language from bilingual captions.
+def _split_bilingual(text: str) -> tuple[str, str]:
+    """Split a bilingual caption into (main_text, secondary_text).
 
-    Douyin vlogs burn EN+ZH two-line subtitles; OCR grabs both lines and the
-    mixed text is useless for study. Keep the dominant-language run only:
-    split into consecutive same-script runs and return the longest one.
+    Douyin vlogs burn EN+ZH two-line subtitles; the two languages must be
+    separated for study (main) and free translation (secondary). Runs of the
+    same script are grouped; the dominant script is the main text, everything
+    of the other script joins the secondary text. Either side may be empty.
     """
     runs: list[tuple[str, str]] = []   # (lang, text)
     cur_lang, cur = None, ""
@@ -184,14 +187,16 @@ def _split_bilingual(text: str) -> str:
     if cur_lang and cur.strip():
         runs.append((cur_lang, cur))
     if not runs:
-        return text.strip()
+        return text.strip(), ""
     # dominant language = most text overall; keep ALL its runs in order
     # (English often gets split by the Chinese translation line)
     totals: dict[str, int] = {}
     for lang, run in runs:
         totals[lang] = totals.get(lang, 0) + len(run.strip())
     best_lang = max(totals, key=totals.get)
-    return " ".join(run.strip() for lang, run in runs if lang == best_lang)
+    main = " ".join(run.strip() for lang, run in runs if lang == best_lang)
+    secondary = " ".join(run.strip() for lang, run in runs if lang != best_lang)
+    return main, secondary
 
 
 def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
@@ -206,9 +211,16 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
         return asr
 
     # bilingual burned-in captions (EN+ZH douyin style) poison every
-    # comparison and the study text — keep only the dominant-language run
-    embedded = [{**sub, "text": _split_bilingual(sub["text"])} for sub in embedded]
-    embedded = [sub for sub in embedded if _norm(sub["text"])]
+    # comparison — split into (main, secondary); secondary doubles as the
+    # free translation so the translate step can skip the LLM
+    split_subs = []
+    for sub in embedded:
+        main, secondary = _split_bilingual(sub["text"])
+        if not _norm(main):
+            continue
+        split_subs.append({**sub, "text": main, "caption_translation": secondary,
+                           "lang": detect_lang(main)})
+    embedded = split_subs
 
     # caption-only path: no ASR at all, cues ARE the timeline (accurate times)
     if not asr:
@@ -333,7 +345,8 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
                 "start": sub["start"],
                 "end": sub["end"],
                 "text": sub["text"],
-                "lang": sub.get("lang") or "en",
+                "lang": sub.get("lang") or detect_lang(sub["text"]),
+                "caption_translation": sub.get("caption_translation", ""),
                 "source": "embedded",
                 "uncertain": False,
             })
@@ -345,7 +358,15 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
     # far better than char-level rules for homophone vs. typo errors
     if ambiguous:
         _arbiter_resolve(ambiguous, results, cfg)
-        results.sort(key=lambda x: x["start"])
+
+    # keep the caption-provided translation when a sentence carries one and
+    # re-derive lang from the final text (post-split / post-merge)
+    for seg in results:
+        ct = seg.pop("caption_translation", "") or ""
+        if ct and not seg.get("translation"):
+            seg["translation"] = ct
+        seg["lang"] = detect_lang(seg["text"])
+    results.sort(key=lambda x: x["start"])
     return results
 
 

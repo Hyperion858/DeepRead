@@ -781,17 +781,14 @@ function drawCoursePage() {
 
   function renderReadTab() {
     const panel = document.getElementById("tab-panel");
-    // minority-language sentences (creator speaking their own language) sit in
-    // a collapsed "原声片段" block below the study track, not inline
-    const nativeIds = new Set(lesson.native_ids || []);
-    const isNative = (s) => nativeIds.has(s.id);
-    const sentHtml = (s) => {
+    panel.innerHTML = sentences.map((s) => {
       const read = state.progress.read.includes(s.id);
       const flags = [];
       if (s.edited) flags.push(`<span class="s-flags flag-embedded" title="已手动修正">✎ 已修正</span>`);
       if (s.uncertain) flags.push(`<span class="s-flags flag-uncertain" title="字幕轨与转写不一致，建议对照原声确认">⚠ 不确定</span>`);
       if (s.source === "embedded" && !s.uncertain) flags.push(`<span class="s-flags flag-embedded" title="取自内嵌字幕轨">内嵌字幕</span>`);
       if (s.source === "OCR" && !s.uncertain) flags.push(`<span class="s-flags flag-embedded" title="取自画面 OCR 字幕">OCR 字幕</span>`);
+      if (s.source === "arbitrated" && !s.uncertain) flags.push(`<span class="s-flags flag-embedded" title="字幕与转写由模型仲裁合并">已仲裁</span>`);
       return `
       <div class="sent ${s.lang === "zh" ? "zh" : ""}" data-idx="${s.id}">
         <span class="s-time">${fmtTime(s.start)} → ${fmtTime(s.end)}${flags.join("")}${read ? " ✓" : ""}</span>
@@ -800,24 +797,7 @@ function drawCoursePage() {
         ${s.grammar ? `<div class="s-grammar">语法: ${esc(s.grammar)}</div>` : ""}
         ${sentenceActionsHtml(s.id)}
       </div>`;
-    };
-    const study = sentences.filter((s) => !isNative(s));
-    const native = sentences.filter(isNative);
-    panel.innerHTML = study.map(sentHtml).join("") +
-      (native.length ? `
-      <div class="native-block">
-        <div class="native-head" id="native-toggle">🗣 原声片段（${native.length} 句非目标语言，点击展开）</div>
-        <div class="native-list" id="native-list" style="display:none">${native.map(sentHtml).join("")}</div>
-      </div>` : "");
-    const toggle = document.getElementById("native-toggle");
-    if (toggle) {
-      toggle.onclick = () => {
-        const list = document.getElementById("native-list");
-        const open = list.style.display !== "none";
-        list.style.display = open ? "none" : "block";
-        toggle.textContent = `🗣 原声片段（${native.length} 句非目标语言，点击${open ? "展开" : "收起"}）`;
-      };
-    }
+    }).join("");
 
     panel.querySelectorAll(".sent").forEach((el) => {
       el.onclick = (e) => {

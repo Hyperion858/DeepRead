@@ -87,10 +87,11 @@ def split_audio(wav_path: Path, out_dir: Path, seg_seconds: int,
     boundaries = sorted(set(round(b, 2) for b in boundaries))
 
     parts: list[Path] = []
+    part_starts: list[float] = []
     for i in range(len(boundaries) - 1):
         start, end = boundaries[i], boundaries[i + 1]
         if end - start < 5:
-            continue
+            continue   # skipped here means skipped in the offsets below
         part = out_dir / f"seg_{i:04d}.wav"
         r = _run([
             "ffmpeg", "-y", "-i", str(wav_path), "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}",
@@ -104,7 +105,8 @@ def split_audio(wav_path: Path, out_dir: Path, seg_seconds: int,
             if r.returncode != 0:
                 raise RuntimeError(f"音频分段失败 seg_{i}: {r.stderr.decode(errors='replace')[-300:]}")
         parts.append(part)
-    return parts, boundaries[:-1]  # part start times for offset math
+        part_starts.append(start)
+    return parts, part_starts  # start times aligned 1:1 with the returned parts
 
 
 def _transcribe_via_chat(
@@ -357,6 +359,12 @@ def transcribe(
             if progress_cb:
                 progress_cb(done / len(parts), f"转写分段 {done}/{len(parts)}…")
 
+    # guard against offset misalignment: any segment that lands past the
+    # media duration is garbage from a bad offset and would poison the
+    # timeline (sentences "at 52 minutes" in a 3-minute video)
+    duration = probe_duration(wav)
+    if duration > 0:
+        all_segments = [s for s in all_segments if s["start"] < duration + 5]
     all_segments.sort(key=lambda s: s["start"])
     if progress_cb:
         progress_cb(1.0, f"转写完成，共 {len(all_segments)} 段")

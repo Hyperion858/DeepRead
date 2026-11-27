@@ -428,23 +428,35 @@ def translate_segments(
 ) -> list[str]:
     """Return one translation per segment. zh sentences -> en; en -> zh.
 
+    Sentences that already carry a caption-provided translation (from a
+    bilingual burned-in subtitle) skip the LLM entirely.
     Chunks run concurrently (3 workers) — translation batches are independent
     and the relay handles parallel requests fine.
     """
     translations: dict[int, str] = {}
-    chunks = _chunk(segments)
+    # prefill with caption translations; only the rest go to the LLM
+    todo: list[tuple[int, dict[str, Any]]] = []
+    for i, s in enumerate(segments):
+        pre = (s.get("translation") or "").strip()
+        if pre:
+            translations[i] = pre
+        else:
+            todo.append((i, s))
+    chunks = [todo[i:i + 40] for i in range(0, len(todo), 40)]
     import concurrent.futures as _futures
 
     def _translate_chunk(ci: int) -> None:
         if should_cancel and should_cancel():
             raise PipelineCancelled()
         chunk = chunks[ci]
-        lines = [f"[{i}] {s['text']}" for i, s in enumerate(chunk)]
+        # chunk entries are (global_index, segment) pairs
+        lines = [f"[{k}] {s['text']}" for k, s in chunk]
         prompt = (
             "你是专业字幕翻译。下面是视频逐句文本（中英混合）。逐句翻译成另一种语言："
             "英文句子翻译成简体中文，中文句子翻译成英文。保留编号，输出 JSON 数组，"
             '形如 [{"i": 编号, "t": "译文"}]，不要输出其他内容。\n\n' + "\n".join(lines)
         )
+        ids = [k for k, _ in chunk]
         with httpx.Client() as client:
             for attempt in range(3):
                 try:
@@ -454,24 +466,30 @@ def translate_segments(
                         raise ValueError("expected JSON array")
                     for item in parsed:
                         if isinstance(item, dict) and "i" in item:
-                            translations[ci * 40 + int(item["i"])] = str(item.get("t", "")).strip()
+                            k = int(item["i"])
+                            if 0 <= k < len(ids):
+                                translations[ids[k]] = str(item.get("t", "")).strip()
                         elif isinstance(item, str):
                             m = re.match(r"^\[?(\d+)\]?\s*[.、:：]?\s*(.*)$", item.strip())
                             if m:
-                                translations[ci * 40 + int(m.group(1))] = m.group(2).strip()
+                                k = int(m.group(1))
+                                if 0 <= k < len(ids):
+                                    translations[ids[k]] = m.group(2).strip()
                         elif isinstance(item, dict):
                             idx = item.get("id", item.get("index", item.get("n")))
                             if idx is not None:
-                                translations[ci * 40 + int(idx)] = str(
-                                    item.get("t", item.get("translation", item.get("text", "")))
-                                ).strip()
+                                k = int(idx)
+                                if 0 <= k < len(ids):
+                                    translations[ids[k]] = str(
+                                        item.get("t", item.get("translation", item.get("text", "")))
+                                    ).strip()
                     break
                 except PipelineCancelled:
                     raise
                 except (ValueError, KeyError, RuntimeError, httpx.HTTPError) as exc:
                     if attempt == 2:
-                        for i in range(len(chunk)):
-                            translations.setdefault(ci * 40 + i, "")
+                        for k in ids:
+                            translations.setdefault(k, "")
                     else:
                         time.sleep(2 * (attempt + 1))
 
@@ -520,33 +538,14 @@ def generate_lesson(
     translations = translate_segments(segments, cfg, progress_cb, should_cancel,
                                       workers=max(1, int(cfg.get("translate_workers") or 3)))
 
-    # group by language: the dominant language is the study track, the
-    # minority language is a "native clip" side list (a douyin vlog where the
-    # creator occasionally speaks Chinese shouldn't flood the study text)
-    en_count = sum(1 for s in segments if s.get("lang") == "en")
-    zh_count = sum(1 for s in segments if s.get("lang") == "zh")
-    primary = "en" if en_count >= zh_count else "zh"
-    primary_idx = [i for i, s in enumerate(segments) if s.get("lang") == primary]
-    native_idx = [i for i, s in enumerate(segments) if s.get("lang") != primary]
-
     # build numbered transcript with translations for the lesson layer
     lines = []
-    for i in primary_idx:
-        seg = segments[i]
+    for i, seg in enumerate(segments):
         lang = "中" if seg["lang"] == "zh" else "EN"
         tr = translations[i]
         tr_line = f"\n   译: {tr}" if tr else ""
         lines.append(f"[{i}] ({lang}) {seg['text']}{tr_line}")
     full_text = "\n".join(lines)
-    native_text = ""
-    if native_idx:
-        nlines = []
-        for i in native_idx:
-            seg = segments[i]
-            tr = translations[i]
-            tr_line = f" 译: {tr}" if tr else ""
-            nlines.append(f"[{i}] ({'中' if seg['lang'] == 'zh' else 'EN'}) {seg['text']}{tr_line}")
-        native_text = "\n".join(nlines)
 
     prompt = (
         "你是英语精读课程的资深讲师。以下是一段视频的逐句文本（含翻译），只包含主语言（学习目标语言）句子。"
@@ -563,8 +562,6 @@ def generate_lesson(
         "8. 全部解释用简体中文，例子保留英文原文。\n\n"
         "逐句文本：\n" + full_text
     )
-    if native_text:
-        prompt += "\n\n以下句子不是学习目标语言，不要纳入精讲（仅供参考）：\n" + native_text
 
     if progress_cb:
         progress_cb(0.5, "生成精讲内容…")
@@ -604,10 +601,6 @@ def generate_lesson(
         progress_cb(1.0, "精讲生成完成")
     return {
         "sentences": sent,
-        # minority-language sentences are kept out of the study track; the UI
-        # shows them as a "原声片段" list (they still exist in sentences[])
-        "primary_lang": primary,
-        "native_ids": native_idx,
         "vocabulary": lesson.get("vocabulary", []),
         "hardSentences": lesson.get("hardSentences", []),
         "expressions": lesson.get("expressions", []),
