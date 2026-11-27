@@ -306,7 +306,6 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
   background: linear-gradient(180deg, var(--panel) 0%, #f2f6fd 100%);
   border: 1px solid var(--line); border-radius: var(--radius);
   padding: 10px; box-shadow: var(--shadow);
-  position: sticky; top: 12px; max-height: calc(100vh - 90px); overflow-y: auto;
 }
 .prov-mini {
   background: linear-gradient(180deg, #ffffff 0%, #edf3fd 100%);
