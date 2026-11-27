@@ -1031,6 +1031,8 @@ function openMaterialPlayer(mid) {
 }
 
 /* ================= Settings (model config) ================= */
+function normBase(url) { return (url || "").replace(/\/+$/, ""); }
+
 function renderSettings() {
   document.title = "模型配置 · DeepRead";
   // state declared BEFORE the template — the template interpolates these
@@ -1507,14 +1509,6 @@ function renderSettings() {
   // 获取模型 runs for the selected provider.
   function showSavedOrProbed(role) {
     setBrowse(role, []);
-    setProbeHint(role, "");
-  }
-
-  function setProbeHint(role, text) {
-    const el = document.getElementById(role === "asr" ? "asr-probe-hint" : "vision-probe-hint");
-    if (!el) return;
-    el.textContent = text || "";
-    el.style.display = text ? "block" : "none";
   }
 
   async function fetchModels(providerId) {
@@ -1552,12 +1546,11 @@ function renderSettings() {
       const res = await fetchModels(pid);
       setBrowse(role, res.models || []);
       const n = (res.models || []).length;
-      setProbeHint(role, `共 ${n} 个模型，从下方列表添加要用的`);
       logLine("ok", `✓ 获取到 ${n} 个模型`);
       toast(`获取到 ${n} 个模型`);
     } catch (err) {
-      setProbeHint(role, "✗ 获取失败: " + err.message);
-      logLine("fail", "✗ " + err.message);
+      logLine("fail", "✗ 获取失败: " + err.message);
+      toast("获取失败: " + err.message);
     } finally {
       if (btn) btn.disabled = false;
     }
