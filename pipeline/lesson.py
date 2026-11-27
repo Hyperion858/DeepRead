@@ -520,17 +520,36 @@ def generate_lesson(
     translations = translate_segments(segments, cfg, progress_cb, should_cancel,
                                       workers=max(1, int(cfg.get("translate_workers") or 3)))
 
+    # group by language: the dominant language is the study track, the
+    # minority language is a "native clip" side list (a douyin vlog where the
+    # creator occasionally speaks Chinese shouldn't flood the study text)
+    en_count = sum(1 for s in segments if s.get("lang") == "en")
+    zh_count = sum(1 for s in segments if s.get("lang") == "zh")
+    primary = "en" if en_count >= zh_count else "zh"
+    primary_idx = [i for i, s in enumerate(segments) if s.get("lang") == primary]
+    native_idx = [i for i, s in enumerate(segments) if s.get("lang") != primary]
+
     # build numbered transcript with translations for the lesson layer
     lines = []
-    for i, seg in enumerate(segments):
+    for i in primary_idx:
+        seg = segments[i]
         lang = "中" if seg["lang"] == "zh" else "EN"
         tr = translations[i]
         tr_line = f"\n   译: {tr}" if tr else ""
         lines.append(f"[{i}] ({lang}) {seg['text']}{tr_line}")
     full_text = "\n".join(lines)
+    native_text = ""
+    if native_idx:
+        nlines = []
+        for i in native_idx:
+            seg = segments[i]
+            tr = translations[i]
+            tr_line = f" 译: {tr}" if tr else ""
+            nlines.append(f"[{i}] ({'中' if seg['lang'] == 'zh' else 'EN'}) {seg['text']}{tr_line}")
+        native_text = "\n".join(nlines)
 
     prompt = (
-        "你是英语精读课程的资深讲师。以下是一段中英混合采访视频的逐句文本（含翻译）。"
+        "你是英语精读课程的资深讲师。以下是一段视频的逐句文本（含翻译），只包含主语言（学习目标语言）句子。"
         "请为英语学习者生成精读课程内容，输出严格 JSON（不要 markdown 代码块），结构如下：\n"
         + LESSON_SCHEMA_HINT +
         "\n\n要求：\n"
@@ -544,6 +563,8 @@ def generate_lesson(
         "8. 全部解释用简体中文，例子保留英文原文。\n\n"
         "逐句文本：\n" + full_text
     )
+    if native_text:
+        prompt += "\n\n以下句子不是学习目标语言，不要纳入精讲（仅供参考）：\n" + native_text
 
     if progress_cb:
         progress_cb(0.5, "生成精讲内容…")
@@ -583,6 +604,10 @@ def generate_lesson(
         progress_cb(1.0, "精讲生成完成")
     return {
         "sentences": sent,
+        # minority-language sentences are kept out of the study track; the UI
+        # shows them as a "原声片段" list (they still exist in sentences[])
+        "primary_lang": primary,
+        "native_ids": native_idx,
         "vocabulary": lesson.get("vocabulary", []),
         "hardSentences": lesson.get("hardSentences", []),
         "expressions": lesson.get("expressions", []),

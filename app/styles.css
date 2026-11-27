@@ -522,6 +522,11 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
   padding: 2px 4px; vertical-align: middle; opacity: .75;
 }
 .speak-btn:hover { opacity: 1; transform: scale(1.15); }
+
+/* native (non-target-language) clip block at the bottom of the read tab */
+.native-block { margin-top: 18px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.native-head { color: var(--ink-3); font-size: 13px; cursor: pointer; user-select: none; }
+.native-head:hover { color: var(--ink-2); }
 .lcard .phon { color: var(--ink-3); font-size: 12.5px; }
 .lcard .pos { color: var(--accent); font-size: 11.5px; margin-left: 6px; }
 .lcard .def { margin-top: 6px; font-size: 13.5px; }

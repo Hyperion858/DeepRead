@@ -775,7 +775,11 @@ function drawCoursePage() {
 
   function renderReadTab() {
     const panel = document.getElementById("tab-panel");
-    panel.innerHTML = sentences.map((s) => {
+    // minority-language sentences (creator speaking their own language) sit in
+    // a collapsed "原声片段" block below the study track, not inline
+    const nativeIds = new Set(lesson.native_ids || []);
+    const isNative = (s) => nativeIds.has(s.id);
+    const sentHtml = (s) => {
       const read = state.progress.read.includes(s.id);
       const flags = [];
       if (s.edited) flags.push(`<span class="s-flags flag-embedded" title="已手动修正">✎ 已修正</span>`);
@@ -790,7 +794,24 @@ function drawCoursePage() {
         ${s.grammar ? `<div class="s-grammar">语法: ${esc(s.grammar)}</div>` : ""}
         ${sentenceActionsHtml(s.id)}
       </div>`;
-    }).join("");
+    };
+    const study = sentences.filter((s) => !isNative(s));
+    const native = sentences.filter(isNative);
+    panel.innerHTML = study.map(sentHtml).join("") +
+      (native.length ? `
+      <div class="native-block">
+        <div class="native-head" id="native-toggle">🗣 原声片段（${native.length} 句非目标语言，点击展开）</div>
+        <div class="native-list" id="native-list" style="display:none">${native.map(sentHtml).join("")}</div>
+      </div>` : "");
+    const toggle = document.getElementById("native-toggle");
+    if (toggle) {
+      toggle.onclick = () => {
+        const list = document.getElementById("native-list");
+        const open = list.style.display !== "none";
+        list.style.display = open ? "none" : "block";
+        toggle.textContent = `🗣 原声片段（${native.length} 句非目标语言，点击${open ? "展开" : "收起"}）`;
+      };
+    }
 
     panel.querySelectorAll(".sent").forEach((el) => {
       el.onclick = (e) => {
