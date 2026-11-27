@@ -1051,15 +1051,6 @@ function renderSettings() {
             <div class="cfg-card-head"><span class="cfg-card-title" id="mc-detail-title">API 提供商</span>
               <span class="cfg-card-sub" id="mc-detail-sub">从左侧选择一个提供商查看详情</span></div>
             <div id="stab-providers" class="stab"></div>
-            <div id="stab-roles" class="stab" style="display:none">
-              <div class="probe-row">
-                <div class="probe-actions">
-                  <button id="cfg-refresh-pool" title="获取这个 API 的模型列表">↻ 获取模型</button>
-                  <button id="cfg-save-pool" class="primary" style="padding:5px 16px">保存勾选</button>
-                </div>
-              </div>
-              <div id="global-pool"></div>
-            </div>
           </div>
           <div class="test-result" id="test-result"></div>
           <section class="run-log">
@@ -1133,7 +1124,6 @@ function renderSettings() {
   function drawProviders() {
     drawProviderList();
     drawProviderDetail();
-    drawRoles();
   }
 
   // Left column: compact 2/3-size provider cards; click selects, ＋ adds.
@@ -1190,32 +1180,66 @@ function renderSettings() {
     };
   }
 
-  // Right column: the selected provider's edit form, or the pool when nothing
-  // is selected. Edit form replaces the old expand-in-card interaction.
+  // Right column: the selected provider's edit form + its model list in one card.
   function drawProviderDetail() {
     const wrap = document.getElementById("stab-providers");
     const card = document.getElementById("mc-detail-card");
     if (!wrap || !card) return;
     const titleEl = document.getElementById("mc-detail-title");
     const subEl = document.getElementById("mc-detail-sub");
-    const poolWrap = document.getElementById("stab-roles");
-    const isPool = selectedProvider < 0;
 
-    titleEl.textContent = isPool ? "全局模型" : (providers[selectedProvider]?.name || "编辑 API");
-    subEl.textContent = isPool
-      ? "勾选各提供商可用的模型；角色分配在「转写设置」页配置"
-      : "修改后点「确定」保存；「测试」验证连通性";
-    poolWrap.style.display = isPool ? "block" : "none";
-
-    if (isPool) {
-      wrap.innerHTML = `<div class="panel-empty" style="padding:18px">从左侧选择一个提供商管理它的配置，或点下方按钮查看全局模型池。</div>`;
-      drawRoles();
+    if (selectedProvider < 0 || !providers[selectedProvider]) {
+      titleEl.textContent = "API 提供商";
+      subEl.textContent = "";
+      wrap.innerHTML = `<div class="panel-empty" style="padding:32px">还没有提供商 — 点击左侧「＋」添加第一个 API</div>`;
       return;
     }
 
     const p = providers[selectedProvider];
     const i = selectedProvider;
     const st = provStatus(p);
+    const pid = p.id || "";
+    titleEl.textContent = p.name || `API ${i + 1}`;
+    subEl.textContent = "配置连接信息与该提供商可用的模型";
+    const pool = globalPool[pid] || [];
+    const f = (poolFilter || "").toLowerCase();
+    const avail = poolBrowse
+      .filter((m) => !pool.includes(m))
+      .filter((m) => !f || m.toLowerCase().includes(f));
+    const modelRows = (poolBrowse.length || pool.length) ? pool.map((m) => {
+      const bad = healthFor(pid, m);
+      return `
+        <div class="mp-item ${bad ? "bad" : ""}" data-model="${esc(m)}">
+          <input type="checkbox" checked data-uncheck="${esc(m)}" title="取消勾选即从全局池移除">
+          <span class="mp-name" title="${esc(m)}">${esc(m)}</span>
+          ${bad ? `<span class="mp-bad" title="${esc(bad.message || "上次调用失败")}">⚠ 报错</span>` : ""}
+          <button class="mp-test" data-mtest="${esc(m)}" title="发一次真实请求测试这个模型">测试</button>
+          <button class="mp-del" data-uncheck="${esc(m)}" title="移除">✕</button>
+        </div>`;
+    }).join("") : `<div class="mp-empty">还没有获取模型 — 保存提供商后点「↻ 获取模型」拉取列表，或手动添加</div>`;
+    const searchPh = poolFetched ? `搜索模型（${poolBrowse.length} 个）` : "搜索或手动输入模型名";
+    const poolHtml = p.id ? `
+      <div class="mp-divider"></div>
+      <div class="probe-row">
+        <div class="probe-actions">
+          <button id="cfg-refresh-pool" title="获取这个 API 的模型列表">↻ 获取模型</button>
+          <button id="cfg-save-pool" class="primary" style="padding:5px 16px">保存勾选</button>
+        </div>
+      </div>
+      <div id="global-pool">
+        <div class="mp-list">${modelRows}</div>
+        <div class="mp-add-row">
+          <input type="text" class="mp-search" placeholder="${searchPh}" value="${esc(poolFilter)}">
+          <select class="mp-add-sel">
+            <option value="" selected>${f ? `匹配 ${avail.length} 个` : "从获取的列表选择…"}</option>
+            ${avail.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}
+          </select>
+          <button class="mp-add" disabled>＋ 添加</button>
+          <button class="mp-manual-add" title="手动输入模型名（官方目录滞后的新模型也能加）">＋ 手动添加</button>
+        </div>
+        <div class="mp-hint">勾选 = 全局可用；各环节用哪些模型在「转写设置」页配置。</div>
+      </div>` : `<div class="mp-hint" style="margin-top:10px">ⓘ 先点「确定」保存提供商，然后就可以在这里获取和勾选它的模型。</div>`;
+
     wrap.innerHTML = `
       <div class="prov-detail">
         <div class="prov-detail-status"><span class="prov-dot ${st.cls}"></span><span class="prov-status ${st.cls}">${st.text}</span></div>
@@ -1225,11 +1249,11 @@ function renderSettings() {
           <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
         <div class="form-row"><label>API Key</label>
           <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
-        <div class="cal-hint">Key 保存在服务器本地 data/config.json。全局可用的模型在右侧「全局模型」里勾选（先保存提供商再获取）。</div>
         <div class="form-actions">
           <button class="primary prov-done" data-done="${i}" style="padding:8px 22px">确定</button>
           <button class="prov-test" data-test="${i}">测试连接</button>
         </div>
+        ${poolHtml}
       </div>`;
 
     wrap.querySelectorAll("[data-done]").forEach((btn) => {
@@ -1277,6 +1301,114 @@ function renderSettings() {
         }
       };
     });
+    // pool actions (model list lives inside the provider detail card)
+    wrap.querySelectorAll("[data-uncheck]").forEach((el) => {
+      const m = el.dataset.uncheck;
+      const handler = () => {
+        globalPool[pid] = (globalPool[pid] || []).filter((x) => x !== m);
+        if (!(globalPool[pid] || []).length) delete globalPool[pid];
+        drawProviderDetail();
+      };
+      if (el.tagName === "INPUT") el.onchange = handler;
+      else el.onclick = handler;
+    });
+    wrap.querySelectorAll("[data-mtest]").forEach((btn) => {
+      btn.onclick = async () => {
+        const model = btn.dataset.mtest;
+        btn.disabled = true;
+        logLine("info", `—— 测试模型 ${model} @ ${p.name || pid} ——`);
+        try {
+          const res = await api("/api/config/test_model", {
+            method: "POST",
+            body: JSON.stringify({ provider_id: pid, model, kind: "chat" }),
+          });
+          logLine(res.ok ? "ok" : "fail",
+            `${res.ok ? "✓" : "✗"} ${model}：${res.ok ? `可用（${res.elapsed_ms}ms）` : res.detail}`);
+        } catch (err) {
+          logLine("fail", "✗ 测试失败: " + err.message);
+        }
+        btn.disabled = false;
+        drawProviderDetail();
+      };
+    });
+    const refreshBtn = wrap.querySelector("#cfg-refresh-pool");
+    if (refreshBtn) {
+      refreshBtn.onclick = async () => {
+        if (!p.id) { toast("请先点「确定」保存提供商"); return; }
+        await saveModelsPage();
+        refreshBtn.disabled = true;
+        logLine("info", `—— 获取模型 @ ${p.name || pid} ——`);
+        try {
+          delete modelCache[pid];
+          const res = await fetchModels(pid);
+          poolBrowse = res.models || [];
+          poolFetched = true;
+          poolFilter = "";
+          logLine("ok", `✓ 获取到 ${poolBrowse.length} 个模型`);
+          toast(`获取到 ${poolBrowse.length} 个模型`);
+        } catch (err) {
+          logLine("fail", "✗ 获取失败: " + err.message);
+          toast("获取失败: " + err.message);
+        } finally {
+          refreshBtn.disabled = false;
+        }
+        drawProviderDetail();
+      };
+    }
+    const savePoolBtn = wrap.querySelector("#cfg-save-pool");
+    if (savePoolBtn) {
+      savePoolBtn.onclick = async () => {
+        await saveModelsPage();
+        drawProviderDetail();
+        toast("已保存");
+      };
+    }
+    const search = wrap.querySelector(".mp-search");
+    if (search) {
+      const pos = search.selectionStart;
+      search.oninput = () => {
+        poolFilter = search.value;
+        drawProviderDetail();
+        const again = wrap.querySelector(".mp-search");
+        if (again) { again.focus(); again.setSelectionRange(pos, pos); }
+      };
+      search.onkeydown = (e) => {
+        if (e.key === "Enter" && avail.length === 1) {
+          globalPool[pid] = [...new Set([...(globalPool[pid] || []), avail[0]])];
+          poolFilter = "";
+          drawProviderDetail();
+        } else if (e.key === "Enter" && search.value.trim() && !poolBrowse.length) {
+          const name = search.value.trim();
+          globalPool[pid] = [...new Set([...(globalPool[pid] || []), name])];
+          poolFilter = "";
+          drawProviderDetail();
+        }
+      };
+    }
+    const addSel = wrap.querySelector(".mp-add-sel");
+    const addBtn = wrap.querySelector(".mp-add");
+    if (addSel && addBtn) {
+      addSel.onchange = () => { addBtn.disabled = !addSel.value; };
+      addBtn.onclick = () => {
+        if (addSel.value) {
+          globalPool[pid] = [...new Set([...(globalPool[pid] || []), addSel.value])];
+          poolFilter = "";
+          drawProviderDetail();
+        }
+      };
+    }
+    const manualBtn = wrap.querySelector(".mp-manual-add");
+    if (manualBtn) {
+      manualBtn.onclick = () => {
+        const name = prompt("输入模型名称（按 API 文档的模型 Code）：");
+        const clean = (name || "").trim();
+        if (clean) {
+          globalPool[pid] = [...new Set([...(globalPool[pid] || []), clean])];
+          toast(`已添加 ${clean}（点「保存勾选」生效）`);
+          drawProviderDetail();
+        }
+      };
+    }
   }
 
   // Persist just the provider list (ids for new entries come back from the server).
@@ -1304,141 +1436,13 @@ function renderSettings() {
   /* ---- global model pool: which provider's which models are usable ---- */
   let globalPool = {};              // {provider_id: [models]} working copy
   let poolBrowse = [];              // models fetched for the selected provider
-  let poolPid = "";                 // provider currently shown in the pool panel
   let poolFilter = "";
-  let poolFetched = false;          // has 获取模型 run for poolPid this session
+  let poolFetched = false;          // has 获取模型 run this session
 
   function healthKey(pid, model) { return `${pid || ""}||${model || ""}`; }
 
   function healthFor(pid, model) {
     return (cfgCache?.model_health || {})[healthKey(pid, model)] || null;
-  }
-
-  function drawRoles() {
-    collectProviders();
-    // pool follows the provider selected in the left list
-    poolPid = selectedProvider >= 0 && providers[selectedProvider]
-      ? providers[selectedProvider].id : "";
-    poolBrowse = [];
-    poolFetched = false;
-    drawPool();
-  }
-
-  function drawPool() {
-    const wrap = document.getElementById("global-pool");
-    if (!wrap) return;
-    if (!poolPid) {
-      wrap.innerHTML = `<div class="mp-empty">请先在左侧选择一个提供商</div>`;
-      return;
-    }
-    const chosen = globalPool[poolPid] || [];
-    const f = (poolFilter || "").toLowerCase();
-    const avail = poolBrowse
-      .filter((m) => !chosen.includes(m))
-      .filter((m) => !f || m.toLowerCase().includes(f));
-    const rows = (poolBrowse.length || chosen.length) ? chosen.map((m) => {
-      const bad = healthFor(poolPid, m);
-      return `
-        <div class="mp-item ${bad ? "bad" : ""}" data-model="${esc(m)}">
-          <input type="checkbox" checked data-uncheck="${esc(m)}" title="取消勾选即从全局池移除">
-          <span class="mp-name" title="${esc(m)}">${esc(m)}</span>
-          ${bad ? `<span class="mp-bad" title="${esc(bad.message || "上次调用失败")}">⚠ 报错</span>` : ""}
-          <button class="mp-test" data-mtest="${esc(m)}" title="发一次真实请求测试这个模型">测试</button>
-          <button class="mp-del" data-uncheck="${esc(m)}" title="移除">✕</button>
-        </div>`;
-    }).join("") : `<div class="mp-empty">还没有获取模型 — 点下方「↻ 获取模型」拉取列表，或手动添加</div>`;
-    const searchPh = poolFetched
-      ? `搜索模型（${poolBrowse.length} 个）`
-      : "搜索或手动输入模型名";
-    wrap.innerHTML = `
-      <div class="mp-list">${rows}</div>
-      <div class="mp-add-row">
-        <input type="text" class="mp-search" placeholder="${searchPh}" value="${esc(poolFilter)}">
-        <select class="mp-add-sel">
-          <option value="" selected>${f ? `匹配 ${avail.length} 个` : "从获取的列表选择…"}</option>
-          ${avail.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}
-        </select>
-        <button class="mp-add" disabled>＋ 添加</button>
-        <button class="mp-manual-add" title="手动输入模型名（官方目录滞后的新模型也能加）">＋ 手动添加</button>
-      </div>
-      <div class="mp-hint">勾选 = 全局可用。具体哪个环节用哪些模型、按什么顺序，在「转写设置」页配置。</div>`;
-
-    wrap.querySelectorAll("[data-uncheck]").forEach((el) => {
-      const m = el.dataset.uncheck;
-      const handler = () => {
-        globalPool[poolPid] = (globalPool[poolPid] || []).filter((x) => x !== m);
-        if (!(globalPool[poolPid] || []).length) delete globalPool[poolPid];
-        drawPool();
-      };
-      if (el.tagName === "INPUT") el.onchange = handler;
-      else el.onclick = handler;
-    });
-    wrap.querySelectorAll("[data-mtest]").forEach((btn) => {
-      btn.onclick = async () => {
-        const model = btn.dataset.mtest;
-        btn.disabled = true;
-        logLine("info", `—— 测试模型 ${model} @ ${poolPid}（类型: 通用）——`);
-        try {
-          const res = await api("/api/config/test_model", {
-            method: "POST",
-            body: JSON.stringify({ provider_id: poolPid, model, kind: "chat" }),
-          });
-          logLine(res.ok ? "ok" : "fail",
-            `${res.ok ? "✓" : "✗"} ${model}：${res.ok ? `可用（${res.elapsed_ms}ms）` : res.detail}`);
-        } catch (err) {
-          logLine("fail", "✗ 测试失败: " + err.message);
-        }
-        btn.disabled = false;
-        drawPool();
-      };
-    });
-    const search = wrap.querySelector(".mp-search");
-    if (search) {
-      const pos = search.selectionStart;
-      search.oninput = () => {
-        poolFilter = search.value;
-        drawPool();
-        const again = wrap.querySelector(".mp-search");
-        if (again) { again.focus(); again.setSelectionRange(pos, pos); }
-      };
-      search.onkeydown = (e) => {
-        if (e.key === "Enter" && avail.length === 1) {
-          globalPool[poolPid] = [...new Set([...(globalPool[poolPid] || []), avail[0]])];
-          poolFilter = "";
-          drawPool();
-        } else if (e.key === "Enter" && search.value.trim() && !poolBrowse.length) {
-          // manual add via Enter when no list fetched
-          const name = search.value.trim();
-          globalPool[poolPid] = [...new Set([...(globalPool[poolPid] || []), name])];
-          poolFilter = "";
-          drawPool();
-        }
-      };
-    }
-    const addSel = wrap.querySelector(".mp-add-sel");
-    const addBtn = wrap.querySelector(".mp-add");
-    if (addSel && addBtn) {
-      addSel.onchange = () => { addBtn.disabled = !addSel.value; };
-      addBtn.onclick = () => {
-        if (addSel.value) {
-          globalPool[poolPid] = [...new Set([...(globalPool[poolPid] || []), addSel.value])];
-          poolFilter = "";
-          drawPool();
-        }
-      };
-    }
-    const manualBtn = wrap.querySelector(".mp-manual-add");
-    if (manualBtn) {
-      manualBtn.onclick = () => {
-        const name = prompt("输入模型名称（按 API 文档的模型 Code，如 qwen-audio-3.1-asr-flash-message）：");
-        const clean = (name || "").trim();
-        if (clean) {
-          globalPool[poolPid] = [...new Set([...(globalPool[poolPid] || []), clean])];
-          toast(`已添加 ${clean}（保存配置后生效）`);
-          drawPool();
-        }
-      };
-    }
   }
 
   async function fetchModels(providerId) {
@@ -1448,30 +1452,7 @@ function renderSettings() {
     return res;
   }
 
-  document.getElementById("cfg-refresh-pool").onclick = async () => {
-    if (!poolPid) { toast("请先添加并保存 API"); return; }
-    await saveModelsPage();
-    const btn = document.getElementById("cfg-refresh-pool");
-    btn.disabled = true;
-    const prov = providers.find((p) => p.id === poolPid);
-    logLine("info", `—— 获取模型 @ ${prov ? prov.name || poolPid : poolPid} ——`);
-    try {
-      delete modelCache[poolPid];
-      const res = await fetchModels(poolPid);
-      poolBrowse = res.models || [];
-      poolFetched = true;
-      poolFilter = "";
-      logLine("ok", `✓ 获取到 ${poolBrowse.length} 个模型`);
-      toast(`获取到 ${poolBrowse.length} 个模型`);
-    } catch (err) {
-      logLine("fail", "✗ 获取失败: " + err.message);
-      toast("获取失败: " + err.message);
-    } finally {
-      btn.disabled = false;
-    }
-    drawPool();
-  };
-
+  // Save the provider list + the working global model pool in one PUT.
   async function saveModelsPage() {
     collectProviders();
     try {
@@ -1484,16 +1465,9 @@ function renderSettings() {
       });
       cfgCache = await api("/api/config");
       providers = (cfgCache.providers || []).map((p) => ({ ...p }));
-    } catch (err) { toast(err.message); }
+      return true;
+    } catch (err) { toast(err.message); return false; }
   }
-
-  // Save pool button lives in the pool panel; per-provider edit form has its own 确定.
-  document.getElementById("cfg-save-pool").onclick = async () => {
-    if (!providers.length) { toast("请至少添加一个 API"); return; }
-    await saveModelsPage();
-    drawProviders();
-    toast("已保存");
-  };
 
   init();
 }

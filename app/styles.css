@@ -313,6 +313,14 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .prov-mini .p-del:hover { color: var(--red); }
 .prov-detail-status { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .prov-detail .form-row { margin-bottom: 10px; }
+.mp-divider { border-top: 1px dashed var(--line); margin: 14px 0 12px; }
+.pm-up, .pm-down {
+  border: none; background: none; color: var(--ink-3); padding: 0 1px; font-size: 10px;
+}
+.pm-up:hover:not(:disabled), .pm-down:hover:not(:disabled) { color: var(--accent); }
+.pm-up:disabled, .pm-down:disabled { opacity: .25; }
+.prov-mini-order { font-size: 10.5px; color: var(--ink-3); width: 12px; text-align: right; flex-shrink: 0; }
+.prov-mini-order-btns { display: flex; gap: 1px; flex-shrink: 0; }
 .prov-card-hit { cursor: pointer; display: flex; flex-direction: column; gap: 3px; min-width: 0; min-height: 0; }
 .prov-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .prov-dot { width: 8px; height: 8px; border-radius: 50%; background: #c7cdd6; flex-shrink: 0; }
