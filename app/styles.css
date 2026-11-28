@@ -279,28 +279,38 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .prov-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); border-color: var(--accent); }
 .prov-card.open { grid-column: 1 / -1; transform: none; border-color: var(--accent); }
 
-/* model config page: fill the viewport, pin the run log to the bottom */
-@media (min-width: 761px) {
+/* model config page: three columns — providers / config / run log.
+   On wide screens the page is one viewport tall and each column scrolls alone. */
+@media (min-width: 1181px) {
   .mc-page {
     height: 100vh; height: 100dvh; display: flex; flex-direction: column;
     overflow: hidden; padding-bottom: clamp(12px, 2vh, 20px);
   }
   .mc-page > h1 { flex-shrink: 0; }
-  .mc-page .mc-layout { flex: 1; min-height: 0; overflow-y: auto; }
-  .mc-page .run-log { flex-shrink: 0; margin-top: 12px; }
-  .mc-page .run-log-body { max-height: 24vh; }
+  .mc-page .mc-layout {
+    flex: 1; min-height: 0;
+    grid-template-columns: minmax(190px, 250px) minmax(0, 1fr) minmax(250px, 340px);
+  }
+  .mc-page .mc-left, .mc-page .mc-right, .mc-page .mc-log { overflow-y: auto; min-height: 0; }
+  /* the log fills its column instead of growing downward */
+  .mc-page .mc-log { margin-top: 0; display: flex; flex-direction: column; }
+  .mc-page .mc-log .run-log-body { flex: 1; max-height: none; min-height: 0; }
 }
-/* model config page: left provider list / right detail, run log spans full width below */
 .mc-layout {
   display: grid; grid-template-columns: minmax(210px, 300px) minmax(0, 1fr);
   gap: 16px; align-items: stretch;
 }
 @media (max-width: 860px) { .mc-layout { grid-template-columns: 1fr; } }
+/* below the 3-column breakpoint the run log sits under the grid, full width */
+@media (max-width: 1180px) {
+  .mc-page .mc-log { grid-column: 1 / -1; }
+}
+.mc-page .mc-log { margin-top: 0; }
 /* the detail card — subtle blue-tinted gradient with an accent top bar */
 .mc-right .cfg-card {
   background: linear-gradient(180deg, var(--panel) 0%, #f2f6fd 100%);
   border-top: 3px solid var(--accent);
-  overflow: hidden;
+  /* no overflow:hidden — it clipped the model-search dropdown near the card bottom */
 }
 .cfg-card-title { position: relative; padding-left: 12px; }
 .cfg-card-title::before {

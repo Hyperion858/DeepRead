@@ -1054,16 +1054,16 @@ function renderSettings() {
           </div>
           <div class="test-result" id="test-result"></div>
         </section>
+        <section class="run-log mc-log">
+          <div class="run-log-head">
+            <span>运行日志</span>
+            <button id="run-log-clear" title="清空日志">清空</button>
+          </div>
+          <div class="run-log-body" id="run-log">
+            <div class="run-log-empty">测试连接 / 获取模型时，这里会打印过程日志。</div>
+          </div>
+        </section>
       </div>
-      <section class="run-log">
-        <div class="run-log-head">
-          <span>运行日志</span>
-          <button id="run-log-clear" title="清空日志">清空</button>
-        </div>
-        <div class="run-log-body" id="run-log">
-          <div class="run-log-empty">测试连接 / 获取模型时，这里会打印过程日志。</div>
-        </div>
-      </section>
     </div>`);
 
   /* ---- run log (bottom panel) ---- */
@@ -1591,6 +1591,7 @@ function renderSettings() {
 function renderTranscribeSettings() {
   document.title = "转写设置 · DeepRead";
   let cfgCache = null;
+  let providers = [];             // filled by init() — the provider <select>s read it
   // per-role ordered selection (first = primary, failover order)
   const rolePicked = { chat: [], asr: [], vision: [] };
   const roleFilter = { chat: "", asr: "", vision: "" };
