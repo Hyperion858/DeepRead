@@ -1127,6 +1127,9 @@ def material_payload(mat: dict[str, Any]) -> dict[str, Any]:
         "filename": mat.get("filename", ""),
         "source_url": mat.get("source_url", ""),
         "kind": mat.get("kind", "video"),
+        # import lifecycle: downloading → ready | error (with reason)
+        "status": mat.get("status", "ready"),
+        "error": mat.get("error", ""),
         "duration": mat.get("duration", 0),
         "size_mb": round(media.stat().st_size / 1024 / 1024, 1) if media else 0,
         "media_exists": bool(media),
@@ -1247,6 +1250,29 @@ def _download_material(mid: str, url: str) -> None:
         log_event("material", "素材下载失败", detail=f"{url} · {exc}", level="error")
     finally:
         MATERIAL_JOBS.pop(mid, None)
+
+
+@app.post("/api/materials/{mid}/reimport")
+def material_reimport(mid: str, request: Request):
+    """Retry a failed link import using the material's stored source_url."""
+    user = _user(request)
+    if not auth.can_view_material(user, mid):
+        raise HTTPException(403, "无权访问该素材")
+    mdir = material_dir(mid)
+    mat = read_json(mdir / "material.json", {}) or {}
+    if not mat:
+        raise HTTPException(404, "素材不存在")
+    url = (mat.get("source_url") or "").strip()
+    if not url:
+        raise HTTPException(400, "该素材是上传文件，没有可重试的链接")
+    if mat.get("status") == "downloading":
+        raise HTTPException(409, "该素材正在下载中")
+    mat.update({"status": "downloading", "error": "", "title": "正在获取视频信息…",
+                "filename": "", "media_path": "", "duration": 0})
+    write_json(mdir / "material.json", mat)
+    threading.Thread(target=_download_material, args=(mid, url), daemon=True).start()
+    log_event("material", "重试导入素材", detail=url)
+    return {"ok": True}
 
 
 @app.post("/api/materials/{mid}/rename")

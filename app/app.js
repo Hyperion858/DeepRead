@@ -309,10 +309,11 @@ async function refreshMaterials() {
         <td>${m.size_mb} MB</td>
         <td>${fmtCNTime(m.created_at)}</td>
         <td>${m.source_url ? `<a href="${esc(m.source_url)}" target="_blank" rel="noopener" style="color:var(--accent)">链接</a>` : "上传"}</td>
-        <td>${downloading ? '<span class="spinner"></span> ' : ""}<span class="${m.status === "error" ? "flag-uncertain" : ""}">${statusLabel}${m.error ? " · " + esc(m.error.slice(0, 40)) : ""}</span></td>
+        <td>${downloading ? '<span class="spinner"></span> ' : ""}<span class="${m.status === "error" ? "flag-uncertain" : ""}" title="${esc(m.error || "")}">${statusLabel}${m.error ? " · " + esc(m.error.slice(0, 60)) : ""}</span></td>
         <td>
           ${m.course_id && m.media_exists ? `<a class="badge ready" style="text-decoration:none" href="#/course/${esc(m.course_id)}?hl=material">查看课程 →</a>` : ""}
-          ${!m.course_id && !downloading ? `<button class="primary" data-genc="${esc(m.id)}" ${m.media_exists ? "" : "disabled"}>生成课程</button>` : ""}
+          ${!m.course_id && !downloading && m.status !== "error" ? `<button class="primary" data-genc="${esc(m.id)}" ${m.media_exists ? "" : "disabled"}>生成课程</button>` : ""}
+          ${m.status === "error" ? `<button data-reimport="${esc(m.id)}" title="用原链接重新导入">↻ 重试导入</button>` : ""}
           ${m.media_exists && m.course_id ? `<button data-regen="${esc(m.course_id)}" title="重新生成课程">↻</button>` : ""}
           <button class="danger" data-del="${esc(m.id)}">删除</button>
         </td>
@@ -340,6 +341,19 @@ async function refreshMaterials() {
             .then(() => toast("重新生成已开始"))
             .catch((err) => toast(err.message));
         });
+      };
+    });
+    wrap.querySelectorAll("[data-reimport]").forEach((btn) => {
+      btn.onclick = async () => {
+        btn.disabled = true;
+        try {
+          await api(`/api/materials/${btn.dataset.reimport}/reimport`, { method: "POST" });
+          toast("已重新导入，请稍候");
+          refreshMaterials();
+        } catch (err) {
+          btn.disabled = false;
+          toast(err.message);
+        }
       };
     });
     wrap.querySelectorAll("[data-del]").forEach((btn) => {
