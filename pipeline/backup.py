@@ -4,8 +4,11 @@ restored deployment can prompt for re-upload and match by name."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import time
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,16 +20,45 @@ MATERIAL_FILES = ("material.json", "embedded.srt")
 
 MEDIA_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
 
+STALE_PART_SECONDS = 6 * 3600
+
+
+def _sweep_stale_parts(backups_dir: Path) -> None:
+    """Delete leftover .part archives from a crashed or killed backup.
+
+    They are invisible to list_backups (the glob only matches *.zip) but they
+    hold a full copy of the data on disk. Only old ones go: a .part touched in
+    the last few hours may belong to a backup that is still being written.
+    """
+    cutoff = time.time() - STALE_PART_SECONDS
+    try:
+        for f in backups_dir.glob("*.part"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+            except OSError:
+                continue  # locked or already gone — next run will retry
+    except OSError:
+        pass
+
 
 def create_backup(data_dir: Path, backups_dir: Path, note: str = "",
                   include_media: bool = True) -> Path:
     """Zip config + course data (+ optionally media files) into backups_dir."""
     backups_dir.mkdir(parents=True, exist_ok=True)
+    _sweep_stale_parts(backups_dir)
     ts = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     out = backups_dir / f"deepread-backup-{ts}.zip"
+    # Write to "<name>.zip.<rand>.part" and rename at the end: a half-written
+    # archive must never be visible as a real backup (list_backups used to pick
+    # it up mid-write and report "(损坏的备份) 0MB"). The glob only matches
+    # *.zip, so ".part" files stay invisible; the random suffix keeps two
+    # same-second backups from clobbering each other's part file.
+    part = out.with_name(f"{out.name}.{uuid.uuid4().hex[:8]}.part")
     media_manifest = []
     archived_media: set[str] = set()  # dedupe: same media file only archived once
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+    zf = zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED)
+    try:
         config = data_dir / "config.json"
         if config.exists():
             zf.write(config, "config.json")
@@ -101,28 +133,67 @@ def create_backup(data_dir: Path, backups_dir: Path, note: str = "",
             "version": 2,
         }
         zf.writestr("backup_info.json", json.dumps(info, ensure_ascii=False, indent=2))
+        zf.close()
+        _publish(part, out)  # atomic publish: readers see it complete or not at all
+    finally:
+        zf.close()  # no-op when already closed
+        part.unlink(missing_ok=True)
     return out
+
+
+def _publish(part: Path, out: Path, tries: int = 40, delay: float = 0.05) -> None:
+    """os.replace with a short Windows retry: a concurrent list_backups() read
+    handle on the target can make replace fail with PermissionError."""
+    for i in range(tries):
+        try:
+            os.replace(part, out)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(delay)
+
+
+def _read_backup_info(f: Path, attempts: int = 4, delay: float = 0.03) -> dict[str, Any] | None:
+    """Read backup_info.json, retrying briefly before giving up.
+
+    Publishing a backup is an os.replace() onto the final name; on Windows a
+    reader that opened the old file at that instant can fail with
+    FileNotFoundError/PermissionError. Retrying keeps a perfectly good backup
+    from being labelled "(损坏的备份)"; a truly broken archive fails every try."""
+    for i in range(attempts):
+        try:
+            with zipfile.ZipFile(f) as zf:
+                return json.loads(zf.read("backup_info.json"))
+        except Exception:
+            if i == attempts - 1:
+                return None
+            time.sleep(delay)
+    return None
 
 
 def list_backups(backups_dir: Path) -> list[dict[str, Any]]:
     backups_dir.mkdir(parents=True, exist_ok=True)
     items = []
+    # only real archives: a half-written "*.zip.<rand>.part" never matches
     for f in sorted(backups_dir.glob("deepread-backup-*.zip"), reverse=True):
-        try:
-            with zipfile.ZipFile(f) as zf:
-                info = json.loads(zf.read("backup_info.json"))
-            size_mb = f.stat().st_size / 1024 / 1024
-            items.append({
-                "file": f.name,
-                "created_at": info.get("created_at", ""),
-                "note": info.get("note", ""),
-                "size_mb": round(size_mb, 1),
-                "auto": bool(info.get("note") == "auto"),
-                "has_media": bool(info.get("include_media")),
-            })
-        except Exception:
+        info = _read_backup_info(f)
+        if info is None:
             items.append({"file": f.name, "created_at": "", "note": "(损坏的备份)",
                           "size_mb": 0, "auto": False, "has_media": False})
+            continue
+        try:
+            size_mb = f.stat().st_size / 1024 / 1024
+        except OSError:
+            size_mb = 0
+        items.append({
+            "file": f.name,
+            "created_at": info.get("created_at", ""),
+            "note": info.get("note", ""),
+            "size_mb": round(size_mb, 1),
+            "auto": bool(info.get("note") == "auto"),
+            "has_media": bool(info.get("include_media")),
+        })
     return items
 
 

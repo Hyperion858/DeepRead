@@ -14,6 +14,10 @@ const state = {
 
 const isAdmin = () => state.user?.role === "admin";
 
+// Pipeline stages that never advance on their own. Polling must stop here and
+// the page must re-render: ready -> study view, error/cancelled -> failure card.
+const TERMINAL_STAGES = ["ready", "error", "cancelled"];
+
 /* ---------------- utils ---------------- */
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -287,6 +291,9 @@ function highlightFromHash() {
 async function refreshMaterials() {
   const wrap = document.getElementById("material-list");
   if (!wrap) return;
+  // the 3s poll rewrites the whole table; doing that while an inline rename
+  // input is open destroys it mid-typing and onblur then commits half a title
+  if (wrap.querySelector("input.mat-rename-input")) return;
   try {
     const list = await api("/api/materials");
     if (!list.length) {
@@ -373,19 +380,32 @@ async function refreshMaterials() {
         const cur = span.textContent;
         const input = document.createElement("input");
         input.type = "text";
+        input.className = "mat-rename-input";  // refreshMaterials() skips while present
         input.value = cur;
-        input.style.cssText = "max-width:280px";
         span.replaceWith(input);
         input.focus();
+        let cancelled = false;
         const commit = async () => {
+          // drop the marker FIRST: refreshMaterials() skips while a
+          // .mat-rename-input exists, and this very handler ends by calling it
+          input.classList.remove("mat-rename-input");
+          // Esc: drop the edit silently, just restore the normal row
+          if (cancelled) { refreshMaterials(); return; }
           const title = input.value.trim();
-          if (title && title !== cur) {
+          if (!title || title === cur) { refreshMaterials(); return; }
+          try {
             await api(`/api/materials/${mid}/rename`, { method: "POST", body: JSON.stringify({ title }) });
+            toast("已重命名");
+          } catch (err) {
+            toast(err.message);
           }
           refreshMaterials();
         };
         input.onblur = commit;
-        input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); };
+        input.onkeydown = (e) => {
+          if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+          else if (e.key === "Escape") { e.preventDefault(); cancelled = true; input.blur(); }
+        };
       };
     });
   } catch (err) {
@@ -410,6 +430,13 @@ async function importUrl() {
   const input = document.getElementById("url-input");
   const url = input.value.trim();
   if (!url) { toast("请先粘贴链接"); return; }
+  // pre-check before hitting the server: a bad link must not even be sent
+  let valid = false;
+  try {
+    const u = new URL(url);
+    valid = u.protocol === "http:" || u.protocol === "https:";
+  } catch { valid = false; }
+  if (!valid) { toast("请输入合法链接（需以 http:// 或 https:// 开头）"); return; }
   toast("开始下载素材…");
   try {
     await api("/api/materials/import", { method: "POST", body: JSON.stringify({ url }) });
@@ -454,7 +481,7 @@ async function refreshCourses() {
       // no retry / delete. Undefined (older backend) means "assume yes".
       const canManage = c.manageable !== false;
       return `
-      <div class="course-card" data-id="${c.id}" data-mid="${esc(c.material_id || "")}">
+      <div class="course-card${canManage ? " cc-manage" : ""}" data-id="${c.id}" data-mid="${esc(c.material_id || "")}">
         <div class="cc-title">${esc(c.title)}</div>
         <div class="cc-meta">
           <span class="badge ${badgeCls}">${stageLabel}</span>
@@ -469,17 +496,25 @@ async function refreshCourses() {
         ${c.stage === "uploaded" && canManage ? `<button class="primary" data-gen="${c.id}">开始生成</button>` : ""}
         ${c.stage === "error" ? `<div class="cc-detail" style="color:var(--red)">${esc(c.detail || "")}</div>` : ""}
         ${c.stage === "error" && canManage ? `<button class="primary" data-gen="${c.id}">重试</button>` : ""}
-        ${c.material_id ? `<a class="cc-viewmat" href="#/library?hl=${esc(c.material_id)}" title="查看素材" onclick="event.stopPropagation()">📥 素材</a>` : ""}
+        ${c.material_id && canManage ? `<a class="cc-viewmat" href="#/library?hl=${esc(c.material_id)}" title="查看素材" onclick="event.stopPropagation()">📥 素材</a>` : ""}
         ${canManage
-          ? `<button class="cc-del" data-del="${c.id}" title="删除">✕</button>`
-          : `<span class="badge" style="position:absolute;top:10px;right:10px;background:var(--line);color:var(--ink-3)">只读</span>`}
+          ? `<button class="cc-share" data-share="${c.id}" title="共享给别人">共享</button>
+             <button class="cc-del" data-del="${c.id}" title="删除">✕</button>`
+          : `<span class="badge cc-readonly" style="position:absolute;top:10px;right:10px;background:var(--line);color:var(--ink-3)">只读${c.shared_by ? " · 来自 " + esc(c.shared_by) : ""}</span>`}
       </div>`;
     }).join("");
 
     grid.querySelectorAll(".course-card").forEach((card) => {
       card.onclick = (e) => {
-        if (e.target.closest("[data-gen],[data-del]")) return;
+        if (e.target.closest("[data-gen],[data-del],[data-share]")) return;
         location.hash = `#/course/${card.dataset.id}`;
+      };
+    });
+    grid.querySelectorAll("[data-share]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();  // the card itself opens the course
+        const title = btn.closest(".course-card")?.querySelector(".cc-title")?.textContent || "";
+        openShareDialog(btn.dataset.share, title);
       };
     });
     grid.querySelectorAll("[data-gen]").forEach((btn) => {
@@ -524,6 +559,15 @@ async function renderCourse(cid) {
   } catch (err) {
     $app.innerHTML = shell("", `<div class="page" style="color:var(--red)">${esc(err.message)}</div>`);
     return;
+  }
+  // `manageable` only exists in the list payload; a failed-generation page needs
+  // it to decide whether to offer 重试生成 (a shared course must not show it and
+  // then eat a 403). Only fetched for non-ready courses, so study pages pay nothing.
+  state.courseManageable = true;
+  if (state.course?.status && state.course.status.stage !== "ready") {
+    const list = await api("/api/courses").catch(() => []);
+    const mine = Array.isArray(list) ? list.find((c) => c.id === cid) : null;
+    state.courseManageable = !!mine && mine.manageable !== false;
   }
   drawCoursePage();
 }
@@ -574,14 +618,56 @@ async function saveCalibration() {
 
 function drawCoursePage() {
   const { meta, status, lesson } = state.course;
+  const stageNames = {
+    downloading: "下载视频", uploaded: "等待生成", transcribing: "语音转写",
+    subtitles: "内嵌字幕", ocr: "OCR 硬字幕", channels: "通道处理",
+    aligning: "对齐融合", generating: "翻译与精讲",
+    error: "生成失败", cancelled: "已取消",
+  };
   if (status.stage !== "ready") {
+    // error / cancelled never advance by themselves: no spinner, no polling —
+    // show the reason plus a way out (retry for owners, back to library for all)
+    const failed = TERMINAL_STAGES.includes(status.stage);  // i.e. error / cancelled
+    if (failed) {
+      const cancelled = status.stage === "cancelled";
+      const canManage = state.courseManageable !== false;
+      $app.innerHTML = shell("", `
+      <div class="page" style="max-width:640px;margin:0 auto;padding-top:clamp(40px,10vh,100px)">
+        <div class="gen-card">
+          <h2 style="margin:0 0 6px;text-align:left">${esc(meta.title)}</h2>
+          <div class="gen-sub">${meta.kind === "audio" ? "音频" : "视频"}课程</div>
+          <div class="gen-fail">
+            <b>${cancelled ? "已取消" : "生成失败"}</b>
+            ${status.detail ? `<div class="gen-fail-detail">${esc(status.detail)}</div>` : ""}
+          </div>
+          <div class="form-actions" style="justify-content:center">
+            ${canManage ? `<button class="primary" id="btn-retry">重试生成</button>` : ""}
+            <a href="#/courses" class="gen-back" style="align-self:center">← 返回课程库</a>
+          </div>
+        </div>
+      </div>`);
+      const retry = document.getElementById("btn-retry");
+      if (retry) {
+        retry.onclick = async () => {
+          retry.disabled = true;
+          try {
+            // empty object body: the backend requires JSON and picks the
+            // channels / align base from meta + material defaults
+            await api(`/api/courses/${meta.id}/generate`, {
+              method: "POST", body: JSON.stringify({}),
+            });
+            toast("已开始重新生成");
+            renderCourse(meta.id);
+          } catch (err) {
+            retry.disabled = false;
+            toast(err.message);
+          }
+        };
+      }
+      return;
+    }
     const working = ["downloading", "transcribing", "subtitles", "ocr", "aligning", "generating", "channels"].includes(status.stage);
     const pct = Math.round((status.progress || 0) * 100);
-    const stageNames = {
-      downloading: "下载视频", uploaded: "等待生成", transcribing: "语音转写",
-      subtitles: "内嵌字幕", ocr: "OCR 硬字幕", channels: "通道处理",
-      aligning: "对齐融合", generating: "翻译与精讲",
-    };
     const stageOrder = ["downloading", "uploaded", "transcribing", "subtitles", "ocr", "channels", "aligning", "generating"];
     const cur = stageNames[status.stage] || status.stage;
     const curIdx = stageOrder.indexOf(status.stage);
@@ -607,18 +693,24 @@ function drawCoursePage() {
         </div>
       </div>`);
     if (working) {
+      clearInterval(state.pollTimer);
       state.pollTimer = setInterval(async () => {
         const st = await api(`/api/courses/${meta.id}`).catch(() => null);
-        if (st && st.status.stage === "ready") { clearInterval(state.pollTimer); renderCourse(meta.id); }
-        else if (st) {
-          // live-update in place without re-rendering the whole shell
-          const bar = document.querySelector(".gen-bar > div");
-          const pctEl = document.querySelector(".gen-pct");
-          const stEl = document.querySelector(".gen-status span:last-child");
-          if (bar) bar.style.width = Math.round((st.status.progress || 0) * 100) + "%";
-          if (pctEl) pctEl.textContent = Math.round((st.status.progress || 0) * 100) + "%";
-          if (stEl) stEl.innerHTML = `<b>${stageNames[st.status.stage] || st.status.stage}</b> — ${esc(st.status.detail || "")} <b class="gen-pct">${Math.round((st.status.progress || 0) * 100)}%</b>`;
+        if (!st || !st.status) return;
+        if (TERMINAL_STAGES.includes(st.status.stage)) {
+          // stop the timer and re-render: ready -> study view,
+          // error/cancelled -> the failure card above (no endless spinner)
+          clearInterval(state.pollTimer);
+          renderCourse(meta.id);
+          return;
         }
+        // live-update in place without re-rendering the whole shell
+        const bar = document.querySelector(".gen-bar > div");
+        const pctEl = document.querySelector(".gen-pct");
+        const stEl = document.querySelector(".gen-status span:last-child");
+        if (bar) bar.style.width = Math.round((st.status.progress || 0) * 100) + "%";
+        if (pctEl) pctEl.textContent = Math.round((st.status.progress || 0) * 100) + "%";
+        if (stEl) stEl.innerHTML = `<b>${stageNames[st.status.stage] || st.status.stage}</b> — ${esc(st.status.detail || "")} <b class="gen-pct">${Math.round((st.status.progress || 0) * 100)}%</b>`;
       }, 3000);
     }
     return;
@@ -1112,6 +1204,84 @@ function confirmDialog(title, message, onOk) {
     if (e.target === overlay || e.target.closest(".cal-close")) overlay.remove();
   });
   document.body.appendChild(overlay);
+}
+
+/* ---------------- course sharing dialog (owner side) ---------------- */
+function openShareDialog(cid, title) {
+  document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
+  const overlay = document.createElement("div");
+  overlay.className = "cal-overlay";
+  overlay.innerHTML = `
+    <div class="cal-panel share-panel" style="width:min(460px,94%)">
+      <div class="cal-head"><b>共享课程</b><button class="cal-close" title="关闭">✕</button></div>
+      <div class="share-sub" title="${esc(title)}">${esc(title)}</div>
+      <div class="share-hint">被共享的人可以学习这门课，但不能删除、重新生成或再次共享。</div>
+      <div class="share-add">
+        <input class="share-input" type="text" placeholder="输入对方的用户名" autocomplete="off">
+        <button class="primary share-add-btn">添加</button>
+      </div>
+      <div class="share-list"><div class="share-empty">加载中…</div></div>
+    </div>`;
+
+  const input = overlay.querySelector(".share-input");
+  const addBtn = overlay.querySelector(".share-add-btn");
+  const listEl = overlay.querySelector(".share-list");
+
+  // repaint the grantee list in place — the dialog stays open after add/remove
+  const loadShares = async () => {
+    try {
+      const data = await api(`/api/courses/${encodeURIComponent(cid)}/shares`);
+      const rows = data.grantees || [];
+      listEl.innerHTML = rows.length ? rows.map((g) => `
+        <div class="share-row">
+          <span class="share-name">${g.display_name ? `${esc(g.display_name)}（${esc(g.username)}）` : esc(g.username)}</span>
+          ${g.disabled ? `<span class="share-dis">已禁用</span>` : ""}
+          <button class="share-remove" data-uid="${esc(g.user_id)}" title="移除">移除</button>
+        </div>`).join("") : `<div class="share-empty">还没有共享给任何人</div>`;
+      listEl.querySelectorAll(".share-remove").forEach((btn) => {
+        btn.onclick = async () => {
+          btn.disabled = true;
+          try {
+            await api(`/api/courses/${encodeURIComponent(cid)}/shares/${encodeURIComponent(btn.dataset.uid)}`,
+                      { method: "DELETE" });
+            toast("已移除");
+          } catch (err) {
+            toast(err.message);
+          }
+          loadShares();
+        };
+      });
+    } catch (err) {
+      listEl.innerHTML = `<div class="share-empty">加载失败：${esc(err.message)}</div>`;
+    }
+  };
+
+  const addShare = async () => {
+    addBtn.disabled = true;
+    try {
+      await api(`/api/courses/${encodeURIComponent(cid)}/shares`, {
+        method: "POST", body: JSON.stringify({ username: input.value.trim() }),
+      });
+      input.value = "";
+      toast("已共享");
+      loadShares();
+    } catch (err) {
+      toast(err.message);  // backend returns the Chinese reason (400/404)
+    } finally {
+      addBtn.disabled = false;
+      input.focus();
+    }
+  };
+
+  addBtn.onclick = addShare;
+  input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); addShare(); } };
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay || e.target.closest(".cal-close")) overlay.remove();
+  });
+
+  document.body.appendChild(overlay);
+  input.focus();
+  loadShares();
 }
 
 /* ---------------- material video player dialog ---------------- */

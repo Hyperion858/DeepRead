@@ -20,6 +20,15 @@ COOKIE_NAME = "deepread_session"
 SESSION_TTL = 7 * 24 * 3600
 PBKDF2_ROUNDS = 240_000
 
+# (uid, course_id) -> True when uid uploaded the material the course was built
+# from. Installed by server.py via set_course_owner().
+_course_owner = None
+
+
+def set_course_owner(fn) -> None:
+    global _course_owner
+    _course_owner = fn
+
 
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
@@ -95,7 +104,18 @@ def can_view_material(user: dict[str, Any], material_id: str) -> bool:
 
 
 def can_view_course(user: dict[str, Any], course_id: str) -> bool:
-    return is_admin(user) or user["id"] in db.course_grantees(course_id)
+    if is_admin(user):
+        return True
+    if user["id"] in db.course_grantees(course_id):
+        return True
+    # Ownership is NOT recorded as a grant. Creating a course does write one,
+    # but that row can be removed (share dialog, admin panel), and losing it
+    # must never lock the creator out of their own course. server.py installs
+    # the resolver, since only it knows where course metadata lives.
+    try:
+        return bool(_course_owner and _course_owner(user["id"], course_id))
+    except Exception:  # noqa: BLE001 — authorization must not 500 on a bad json
+        return False
 
 
 def require_material(request: Request, material_id: str) -> dict[str, Any]:

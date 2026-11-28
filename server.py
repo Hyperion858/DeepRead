@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -116,14 +117,28 @@ def _owned_material_ids(user_id: str) -> set[str]:
     return set(db.owned_material_ids(user_id))
 
 
-def _can_manage_course(user: dict[str, Any], cid: str) -> bool:
-    """Manage = delete / regenerate / cancel. Admin, or the owner of the
-    material the course was built from. Viewers (grants) may only study."""
-    if auth.is_admin(user):
-        return True
+def _owns_course(uid: str, cid: str) -> bool:
+    """True when uid uploaded the material this course was built from.
+
+    Kept separate from `_can_manage_course` because `auth.can_view_course`
+    needs exactly this half: visibility must survive the grant row being
+    deleted, while admin-ness is already handled inside auth.
+    """
     meta = read_json(course_dir(cid) / "meta.json", {}) or {}
     mid = meta.get("material_id") or ""
-    return bool(mid) and db.material_owner(mid) == user["id"]
+    return bool(mid) and db.material_owner(mid) == uid
+
+
+def _can_manage_course(user: dict[str, Any], cid: str) -> bool:
+    """Manage = delete / regenerate / cancel / share. Admin, or the owner of
+    the material the course was built from. Viewers (grants) may only study."""
+    if auth.is_admin(user):
+        return True
+    return _owns_course(user["id"], cid)
+
+
+# let auth decide "can this user see the course" without importing server
+auth.set_course_owner(_owns_course)
 
 
 # ---------------------------------------------------------------- API: auth
@@ -1044,7 +1059,9 @@ def create_backup_now():
 
 @app.get("/api/backups/{name}/download")
 def download_backup(name: str):
-    if "/" in name or "\\" in name or not name.startswith("deepread-backup-"):
+    # .zip only: a half-written ".zip.part" must never be served as a backup
+    if "/" in name or "\\" in name or not name.startswith("deepread-backup-") \
+            or not name.endswith(".zip"):
         raise HTTPException(400, "无效的备份名")
     path = BACKUPS_DIR / name
     if not path.exists():
@@ -1054,7 +1071,9 @@ def download_backup(name: str):
 
 @app.delete("/api/backups/{name}")
 def delete_backup(name: str):
-    if "/" in name or "\\" in name or not name.startswith("deepread-backup-"):
+    # .zip only: deleting an in-flight ".zip.part" would corrupt that backup
+    if "/" in name or "\\" in name or not name.startswith("deepread-backup-") \
+            or not name.endswith(".zip"):
         raise HTTPException(400, "无效的备份名")
     path = BACKUPS_DIR / name
     if path.exists():
@@ -1204,6 +1223,18 @@ async def material_upload(request: Request, file: UploadFile = File(...)):
     return {"id": mid, "title": title, "kind": kind}
 
 
+def _valid_source_url(url: str) -> bool:
+    """A downloadable link must be absolute http(s) with a host.
+
+    Guards both entry points before anything touches the disk, so a typo like
+    "not a url" can never leave a 0MB phantom material behind."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
 @app.post("/api/materials/import")
 async def material_import(request: Request):
     """Import a material from a share URL (douyin etc.): download only."""
@@ -1212,6 +1243,9 @@ async def material_import(request: Request):
     url = (body.get("url") or "").strip()
     if not url:
         raise HTTPException(400, "缺少链接")
+    # validate BEFORE new_id()/mkdir(): a rejected link leaves no disk traces
+    if not _valid_source_url(url):
+        raise HTTPException(400, "请输入合法链接（需以 http:// 或 https:// 开头）")
     mid = new_id()
     mdir = material_dir(mid)
     mdir.mkdir(parents=True)
@@ -1281,6 +1315,9 @@ def material_reimport(mid: str, request: Request):
     url = (mat.get("source_url") or "").strip()
     if not url:
         raise HTTPException(400, "该素材是上传文件，没有可重试的链接")
+    # legacy rows may hold a garbage URL: reject it instead of retrying forever
+    if not _valid_source_url(url):
+        raise HTTPException(400, "请输入合法链接（需以 http:// 或 https:// 开头）")
     if mat.get("status") == "downloading":
         raise HTTPException(409, "该素材正在下载中")
     mat.update({"status": "downloading", "error": "", "title": "正在获取视频信息…",
@@ -1482,6 +1519,94 @@ def download_logs(category: str):
     return FileResponse(path, media_type="application/octet-stream", filename=f"deepread-{category}.jsonl")
 
 
+# ---------------------------------------------------------------- API: course sharing
+#
+# Owner-facing sharing. Admins are covered by _can_manage_course (always true),
+# so the old /api/admin/courses/{cid}/grants endpoints keep working unchanged.
+
+def _share_guard(request: Request, cid: str) -> dict[str, Any]:
+    """Uniform guard for the share endpoints: logged in, course exists, and the
+    caller may manage it (owner of the source material, or admin)."""
+    user = _user(request)
+    if not course_dir(cid).exists():
+        raise HTTPException(404, "课程不存在")
+    if not _can_manage_course(user, cid):
+        raise HTTPException(403, "只有课程创建者或管理员可以执行此操作")
+    return user
+
+
+def _grantee_rows(cid: str) -> list[dict[str, Any]]:
+    """Grantees of a course as display rows, sorted by username.
+
+    The material owner is filtered out: creating a course grants the creator,
+    so without this they would see themselves as "shared to" and could revoke
+    their own only grant (POST rejects self-share for the same reason).
+    Users are resolved through one list_users() call; ids with no user row
+    (deleted user, stale grant) are skipped instead of blowing up."""
+    users = {u["id"]: u for u in db.list_users()}
+    meta = read_json(course_dir(cid) / "meta.json", {}) or {}
+    owner_id = db.material_owner(meta.get("material_id") or "") or ""
+    rows = []
+    for uid in db.course_grantees(cid):
+        if uid == owner_id:
+            continue
+        u = users.get(uid)
+        if not u:
+            continue
+        rows.append({
+            "user_id": uid,
+            "username": u["username"],
+            "display_name": u.get("display_name", ""),
+            "disabled": bool(u.get("disabled")),
+        })
+    rows.sort(key=lambda r: r["username"])
+    return rows
+
+
+@app.get("/api/courses/{cid}/shares")
+def get_course_shares(cid: str, request: Request):
+    _share_guard(request, cid)
+    return {"grantees": _grantee_rows(cid)}
+
+
+@app.post("/api/courses/{cid}/shares")
+async def add_course_share(cid: str, request: Request):
+    user = _share_guard(request, cid)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    username = (body.get("username") or "").strip()
+    if not username:
+        raise HTTPException(400, "请输入用户名")
+    target = db.get_user_by_name(username)
+    if not target:
+        raise HTTPException(404, "没有这个用户")
+    if target["id"] == user["id"]:
+        raise HTTPException(400, "不能共享给自己")
+    if target.get("disabled"):
+        raise HTTPException(400, "该用户已被禁用")
+    if target["id"] not in db.course_grantees(cid):  # idempotent: no dup, no log
+        db.grant_course(cid, target["id"])
+        log_event("action", f"共享课程给用户「{username}」", course_id=cid)
+    return {"ok": True, "grantees": _grantee_rows(cid)}
+
+
+@app.delete("/api/courses/{cid}/shares/{uid}")
+def remove_course_share(cid: str, uid: str, request: Request):
+    _share_guard(request, cid)
+    if _owns_course(uid, cid):
+        # the owner is never a "share"; their grant row is what the creator's
+        # own library entry hangs on, so removing it looks like losing a course
+        raise HTTPException(400, "不能移除课程所有者")
+    if uid in db.course_grantees(cid):  # idempotent: revoking twice is fine
+        db.revoke_course(cid, uid)
+        target = db.get_user(uid)
+        log_event("action", f"撤销用户「{target['username'] if target else uid}」的课程共享",
+                  course_id=cid)
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- API: courses
 
 @app.get("/api/courses")
@@ -1492,15 +1617,29 @@ def list_courses(request: Request):
     # resolved once for the whole list: "manageable" needs the caller's owned
     # material ids, and a per-card query would hammer the DB
     owned = set() if is_admin else _owned_material_ids(user["id"])
+    # id -> username, also resolved once: read-only cards show who shared them
+    usernames = {u["id"]: u["username"] for u in db.list_users()}
     items = []
     for cdir in sorted(COURSES_DIR.iterdir(), reverse=True):
         if not cdir.is_dir():
             continue
-        if not is_admin and cdir.name not in allowed:
-            continue
         meta = read_json(cdir / "meta.json", {}) or {}
+        mid = meta.get("material_id") or ""
+        # visibility must mirror auth.can_view_course(): admin, an explicit
+        # grant, or having uploaded the material. Without the last arm a
+        # deleted grant row hides the course from its creator's library even
+        # though GET /api/courses/{id} still lets them in.
+        if not is_admin and cdir.name not in allowed and mid not in owned:
+            continue
         status = read_json(cdir / "status.json", {}) or {}
         progress = _load_progress(cdir.name, user["id"])
+        # delete / regenerate / cancel allowed; a grantee is read-only
+        manageable = True if is_admin else mid in owned
+        # a shared (read-only) card names the material owner so the learner
+        # knows where it came from; manageable cards leave it empty
+        shared_by = ""
+        if not manageable and mid:
+            shared_by = usernames.get(db.material_owner(mid) or "", "")
         items.append({
             "id": cdir.name,
             "title": meta.get("title") or cdir.name,
@@ -1513,9 +1652,9 @@ def list_courses(request: Request):
             "progress": status.get("progress", 0),
             "sentence_count": len((read_json(cdir / "source.json", {}) or {}).get("segments", []) or []),
             "learned_percent": progress.get("learned_percent", 0),
-            "material_id": meta.get("material_id", ""),
-            # delete / regenerate / cancel allowed; a grantee is read-only
-            "manageable": True if is_admin else (meta.get("material_id") or "") in owned,
+            "material_id": mid,
+            "manageable": manageable,
+            "shared_by": shared_by,
         })
     return items
 
