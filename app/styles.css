@@ -583,6 +583,15 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .cp-controls .speed-group { display: flex; gap: 3px; margin-left: auto; }
 .cp-controls .speed-group button { padding: 5px 8px; }
 .cp-right { flex: 1; display: flex; flex-direction: column; background: var(--bg); min-width: 0; }
+.cp-splitter {
+  width: 7px; flex-shrink: 0; cursor: col-resize; display: flex; align-items: center;
+  justify-content: center; touch-action: none; user-select: none; position: relative;
+}
+.cp-splitter::after {
+  content: ""; width: 3px; height: 44px; border-radius: 3px; background: var(--line);
+  transition: background 0.15s;
+}
+.cp-splitter:hover::after, .cp-splitter.dragging::after { background: var(--accent); }
 .tabs {
   display: flex; gap: 2px; padding: 8px clamp(8px, 1.2vw, 14px) 0;
   border-bottom: 1px solid var(--line); background: var(--panel); flex-shrink: 0; overflow-x: auto;
@@ -840,7 +849,8 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 
   /* course page stacks vertically */
   .cp-body { flex-direction: column; overflow-y: auto; }
-  .cp-left { width: 100%; max-width: none; }
+  .cp-left { width: 100% !important; max-width: none; }
+  .cp-splitter { display: none; }
   .player-wrap { min-height: 32vh; }
   .cp-right { min-height: 58vh; }
 
@@ -1010,4 +1020,61 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
   .cap-chip.cap-image { color: #f0abfc; border-color: #86198f; background: #4a044e; }
   .cap-chip.cap-video { color: #fca5a5; border-color: #7f1d1d; background: #450a0a; }
   .cap-chip.cap-multimodal { color: #93c5fd; border-color: #1e40af; background: #172554; }
+}
+
+/* ---------------- generate page: progress left + run log right ---------------- */
+.gen-split {
+  display: flex; gap: 18px; align-items: flex-start;
+  max-width: none !important; padding-top: clamp(24px, 6vh, 64px) !important;
+}
+.gen-split .gen-left { flex: 0 0 min(460px, 42%); min-width: 0; }
+.gen-split .gen-right {
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  background: #0f1115; border: 1px solid var(--line); border-radius: 12px;
+  overflow: hidden; height: min(62vh, 560px);
+}
+.gen-log-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 14px; background: #161920; border-bottom: 1px solid #262b36;
+  color: #cbd5e1; font-size: 13px; font-weight: 600; flex-shrink: 0;
+}
+.gen-log-head .gen-log-hint { font-size: 11.5px; font-weight: 400; color: #64748b; }
+.gen-log {
+  flex: 1; overflow-y: auto; padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.7; color: #a8b3c4;
+}
+.gen-log-line { white-space: pre-wrap; word-break: break-all; }
+.gen-log-line.lv-error { color: #f87171; }
+.gen-log-line.lv-warn { color: #fbbf24; }
+@media (max-width: 860px) {
+  .gen-split { flex-direction: column; }
+  .gen-split .gen-left { flex: none; width: 100%; }
+  .gen-split .gen-right { width: 100%; height: 40vh; }
+}
+
+/* ---------------- logs page: detail + per-course modals ---------------- */
+.log-row .log-more, .log-row .log-cid {
+  border: 1px solid var(--line); background: none; color: var(--accent);
+  font-size: 11.5px; padding: 2px 8px; border-radius: 6px; cursor: pointer;
+  margin-left: auto; flex-shrink: 0;
+}
+.log-row .log-cid { margin-left: 0; margin-right: 8px; }
+.log-row .log-more:hover, .log-row .log-cid:hover { background: var(--accent-soft); }
+.log-detail-grid {
+  display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12.5px;
+  color: var(--ink-2); margin-top: 10px;
+}
+.log-detail-grid .log-dk {
+  display: inline-block; color: var(--ink-3); background: var(--accent-soft);
+  border-radius: 5px; padding: 1px 7px; margin-right: 7px; font-size: 11.5px;
+}
+.log-detail-msg {
+  margin-top: 12px; font-size: 14px; font-weight: 600; white-space: pre-wrap;
+  word-break: break-all;
+}
+.log-detail-pre {
+  margin: 10px 0 0; padding: 10px 12px; background: #0f1115; color: #a8b3c4;
+  border-radius: 8px; font-size: 12px; line-height: 1.6; overflow-x: auto;
+  white-space: pre-wrap; word-break: break-all; max-height: 40vh; overflow-y: auto;
 }

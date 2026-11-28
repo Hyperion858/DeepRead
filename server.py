@@ -30,7 +30,14 @@ from fastapi.staticfiles import StaticFiles
 import auth
 import db
 from pipeline.lesson import generate_lesson
-from pipeline.transcribe import transcribe, PipelineCancelled
+from pipeline.transcribe import (
+    transcribe,
+    PipelineCancelled,
+    probe_duration,
+    sanitize_segments,
+    normalize_media_duration,
+    validate_timeline,
+)
 from pipeline.align import align
 from pipeline import backup as backup_mod
 from pipeline import health as health_mod
@@ -254,7 +261,13 @@ def me(request: Request):
 @app.get("/api/admin/users")
 def admin_list_users(request: Request):
     _admin(request)
-    return db.list_users()
+    users = db.list_users()
+    # the bootstrap admin (env-configurable, default Jeffrey) owns the legacy
+    # data migration and must never be demoted/deleted from the UI
+    builtin = auth.admin_username()
+    for u in users:
+        u["builtin_admin"] = u.get("username") == builtin
+    return users
 
 
 @app.post("/api/admin/users")
@@ -539,6 +552,55 @@ def course_dir(cid: str) -> Path:
     return COURSES_DIR / cid
 
 
+# ---- per-course runlog -----------------------------------------------------
+# runlog.jsonl: one JSONL entry per pipeline stage transition for THIS course.
+# Every new generation run rotates the previous file to runlog.1.jsonl ... .9
+# (10 runs kept: current + 9 archives); the incremental read API keys off seq.
+
+_RUNLOG_LOCK = threading.Lock()
+_RUNLOG_KEEP = 9   # archives .1-.9; plus the current file = 10 runs
+
+
+def rotate_runlog(cid: str) -> None:
+    """Start-of-run rotation: runlog.jsonl -> runlog.1.jsonl -> ... -> .9."""
+    d = course_dir(cid)
+    try:
+        with _RUNLOG_LOCK:
+            current = d / "runlog.jsonl"
+            if not current.exists():
+                return
+            for i in range(_RUNLOG_KEEP, 0, -1):
+                older = d / f"runlog.{i}.jsonl"
+                newer = (d / f"runlog.{i - 1}.jsonl") if i > 1 else current
+                if newer.exists():
+                    os.replace(newer, older)
+    except Exception:
+        pass  # logging must never break the pipeline
+
+
+def append_runlog(cid: str, entry: dict[str, Any]) -> None:
+    """Append one entry to runlog.jsonl. seq is the 1-based line number within
+    the current run — the incremental read API (?after=<seq>) keys off it."""
+    try:
+        with _RUNLOG_LOCK:
+            path = course_dir(cid) / "runlog.jsonl"
+            seq = 0
+            if path.exists():
+                try:
+                    with path.open("r", encoding="utf-8") as fh:
+                        for _ in fh:
+                            seq += 1
+                except OSError:
+                    seq = 0
+            entry["seq"] = seq + 1
+            entry.setdefault("ts", datetime.now().astimezone().isoformat(timespec="seconds"))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # logging must never break the pipeline
+
+
 def _calibration_path(cid: str, uid: str) -> Path:
     """Per-user calibration file: corrections stay private to each learner."""
     return course_dir(cid) / f"calibration_{uid}.json"
@@ -628,6 +690,15 @@ def set_stage(cid: str, stage: str, detail: str = "", progress: float | None = N
         if progress is not None:
             status["progress"] = round(max(0.0, min(1.0, progress)), 3)
         write_json(course_dir(cid) / "status.json", status)
+    # per-course runlog: every stage transition lands here too (separate lock —
+    # the course lock is not reentrant and is already held above)
+    append_runlog(cid, {
+        "stage": stage,
+        "message": detail or stage,
+        "detail": detail,
+        "progress": status.get("progress"),
+        "level": "error" if stage == "error" else ("warn" if stage == "cancelled" else "info"),
+    })
 
 
 def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = None,
@@ -648,6 +719,8 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
     media_path = Path(meta.get("media_path", ""))
     started = _time.time()
     _result: dict[str, Any] = {"done": False}
+    # new run -> archive the previous run's per-course log (10 runs kept)
+    rotate_runlog(cid)
 
     def _watchdog() -> None:
         while not _result["done"] and _time.time() - started < timeout_sec:
@@ -665,6 +738,20 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
     try:
         try:
             cfg = load_config()
+
+            # A2: normalize A/V stream duration mismatch BEFORE anything reads
+            # the media clock. An mp4 muxed with a longer audio stream made
+            # every derived timeline drift past the real picture (observed:
+            # 1481 s of "timeline" on a 760 s video).
+            set_stage(cid, "preparing", "校验媒体 A/V 时长一致性…", 0.02)
+            try:
+                norm_dur = normalize_media_duration(media_path)
+            except Exception as norm_exc:  # noqa: BLE001 — best-effort guard
+                set_stage(cid, "preparing", f"媒体时长校验失败: {norm_exc}", 0.02)
+                norm_dur = 0.0
+            if norm_dur > 0:
+                meta["duration"] = norm_dur
+                write_json(cdir / "meta.json", meta)
 
             # weight per channel: embedded (human-authored) > ocr (frame-sampled)
             # > asr (audio-derived). Fusion prefers higher-weight text.
@@ -729,6 +816,20 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
             set_stage(cid, "aligning", f"融合 {len(caption_lines)} 条字幕 + {len(asr_segments)} 段转写…", 0.9)
             segments = align(asr_segments, caption_lines, align_base=align_base, cfg=cfg)
 
+            # final timeline guard: the fused segments must sit on the real
+            # media clock. Never trust sum-of-durations here — overlapping
+            # sentences once inflated meta.duration to ~2x the real length
+            # (observed: 1481 s "duration" for a 12:40 video).
+            media_dur = probe_duration(media_path) or float(meta.get("duration") or 0)
+            segments = sanitize_segments(segments, media_dur)
+
+            # A4 end-to-end gate: the LAST check before anything touches disk.
+            # A broken timeline (negative starts, over-length sentences,
+            # collapsed/overlapping order, <80% coverage) fails the course
+            # loudly instead of shipping garbage to the UI.
+            gate_ok, gate_reason = validate_timeline(segments, media_dur)
+            if not gate_ok:
+                raise RuntimeError(f"时间戳终检未通过，课程不落盘: {gate_reason}")
             write_json(cdir / "source.json", {"segments": segments})
 
             # 3. lesson generation
@@ -740,7 +841,12 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
             )
             write_json(cdir / "lesson.json", lesson)
 
-            meta["duration"] = sum((s.get("end", 0) - s.get("start", 0)) for s in segments) or meta.get("duration")
+            # keep the probed media duration — it is the playback clock the
+            # frontend uses; summing sentence durations double-counts overlaps
+            if media_dur <= 0:
+                media_dur = sum((s.get("end", 0) - s.get("start", 0)) for s in segments)
+            if media_dur > 0:
+                meta["duration"] = media_dur
             write_json(cdir / "meta.json", meta)
             set_stage(cid, "ready", "课程生成完成", 1.0)
             # success is a terminal state: reclaim the regenerable intermediates
@@ -1640,6 +1746,77 @@ def query_logs(category: str = "all", keyword: str = "", level: str = "", limit:
             "material": ["material"]}.get(category,
             ["runtime", "pipeline", "action", "material"])
     return logs_mod.query_logs(DATA_DIR, cats, keyword=keyword, limit=min(limit, 1000), level=level)
+
+
+@app.get("/api/courses/{cid}/runlog")
+def get_course_runlog(cid: str, request: Request, after: int = 0):
+    """Incremental per-course runlog: entries with seq > after, capped at 500."""
+    user = _user(request)
+    if not auth.can_view_course(user, cid):
+        raise HTTPException(403, "无权访问该课程")
+    path = course_dir(cid) / "runlog.jsonl"
+    entries: list[dict[str, Any]] = []
+    if path.exists():
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                if int(e.get("seq") or 0) <= after:
+                    continue
+                entries.append(e)
+        except OSError:
+            pass
+    entries.sort(key=lambda e: int(e.get("seq") or 0))
+    entries = entries[:500]
+    last_seq = int(entries[-1]["seq"]) if entries else after
+    return {"entries": entries, "last_seq": last_seq}
+
+
+@app.get("/api/logs/course/{cid}")
+def logs_for_course(cid: str, request: Request, limit: int = 500):
+    """All log lines for one course: runlog (current run) + runtime/pipeline/
+    action entries tagged with this course_id, merged and time-sorted."""
+    user = _user(request)
+    if not auth.can_view_course(user, cid):
+        raise HTTPException(403, "无权访问该课程")
+    limit = max(1, min(limit, 1000))
+    merged: list[dict[str, Any]] = []
+
+    path = course_dir(cid) / "runlog.jsonl"
+    if path.exists():
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                e["category"] = "runlog"
+                merged.append(e)
+        except OSError:
+            pass
+
+    for cat in ("runtime", "pipeline", "action"):
+        p = DATA_DIR / "logs" / f"{cat}.jsonl"
+        if not p.exists():
+            continue
+        try:
+            lines = p.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            if e.get("course_id") != cid:
+                continue
+            e["category"] = cat
+            merged.append(e)
+
+    merged.sort(key=lambda e: (e.get("ts", ""), int(e.get("seq") or 0)))
+    return {"entries": merged[-limit:]}
 
 
 @app.get("/api/logs/{category}/download")

@@ -24,9 +24,14 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({
 }[c]));
 
 function fmtTime(sec) {
-  sec = Math.max(0, Math.floor(sec || 0));
-  const m = Math.floor(sec / 60), s = sec % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
+  sec = Number(sec);
+  if (!isFinite(sec) || sec <= 0) sec = 0;
+  sec = Math.floor(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  const mm = String(m).padStart(2, "0"), ss = String(s).padStart(2, "0");
+  // corrupt/beyond-media timestamps used to render as "1444:50" — show an
+  // explicit hours segment instead of runaway minutes
+  return h ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
 function fmtDuration(sec) {
@@ -177,6 +182,7 @@ window.addEventListener("hashchange", route);
 function route() {
   if (!state.user) return renderLogin();
   clearInterval(state.pollTimer);
+  clearInterval(state.runlogTimer);   // per-course runlog poll (generate page)
   const hash = location.hash || "#/";
   const m = hash.match(/^#\/course\/([\w-]+)/);
   if (m) return renderCourse(m[1]);
@@ -365,11 +371,12 @@ async function refreshMaterials() {
     });
     wrap.querySelectorAll("[data-del]").forEach((btn) => {
       btn.onclick = async () => {
-        if (!confirm("删除这个素材？媒体文件会一并删除。")) return;
-        try {
-          await api(`/api/materials/${btn.dataset.del}`, { method: "DELETE" });
-          refreshMaterials();
-        } catch (err) { toast(err.message); }
+        confirmDialog("删除素材", "删除这个素材？媒体文件会一并删除。", async () => {
+          try {
+            await api(`/api/materials/${btn.dataset.del}`, { method: "DELETE" });
+            refreshMaterials();
+          } catch (err) { toast(err.message); }
+        });
       };
     });
     wrap.querySelectorAll("[data-rename]").forEach((btn) => {
@@ -530,11 +537,12 @@ async function refreshCourses() {
     grid.querySelectorAll("[data-del]").forEach((btn) => {
       btn.onclick = async (e) => {
         e.stopPropagation();
-        if (!confirm("确定删除这门课程？\n只删除课程的学习内容（转写/精讲/进度），原始素材仍保留在素材库。")) return;
-        try {
-          await api(`/api/courses/${btn.dataset.del}`, { method: "DELETE" });
-          refreshCourses();
-        } catch (err) { toast(err.message); }
+        confirmDialog("删除课程", "删除这门课程？\n只删除课程的学习内容（转写/精讲/进度），原始素材仍保留在素材库。", async () => {
+          try {
+            await api(`/api/courses/${btn.dataset.del}`, { method: "DELETE" });
+            refreshCourses();
+          } catch (err) { toast(err.message); }
+        });
       };
     });
   } catch (err) {
@@ -672,24 +680,33 @@ function drawCoursePage() {
     const cur = stageNames[status.stage] || status.stage;
     const curIdx = stageOrder.indexOf(status.stage);
     $app.innerHTML = shell("", `
-      <div class="page" style="max-width:640px;margin:0 auto;padding-top:clamp(40px,10vh,100px)">
-        <div class="gen-card">
-          <h2 style="margin:0 0 6px;text-align:left">${esc(meta.title)}</h2>
-          <div class="gen-sub">${meta.kind === "audio" ? "音频" : "视频"}课程 · 生成中</div>
-          <div class="progressbar gen-bar"><div style="width:${pct}%"></div></div>
-          <div class="gen-status">
-            <span class="spinner"></span>
-            <span><b>${cur}</b> — ${esc(status.detail || "")} <b class="gen-pct">${pct}%</b></span>
+      <div class="page gen-split">
+        <div class="gen-left">
+          <div class="gen-card">
+            <h2 style="margin:0 0 6px;text-align:left">${esc(meta.title)}</h2>
+            <div class="gen-sub">${meta.kind === "audio" ? "音频" : "视频"}课程 · 生成中</div>
+            <div class="progressbar gen-bar"><div style="width:${pct}%"></div></div>
+            <div class="gen-status">
+              <span class="spinner"></span>
+              <span><b>${cur}</b> — ${esc(status.detail || "")} <b class="gen-pct">${pct}%</b></span>
+            </div>
+            ${working ? `
+            <div class="gen-steps">
+              ${stageOrder.filter((s) => s !== "uploaded").map((s, i) => `
+                <span class="gen-step ${i < curIdx ? "done" : s === status.stage ? "now" : ""}">${stageNames[s]}</span>`).join(" → ")}
+            </div>` : `
+            <div class="form-actions" style="justify-content:center">
+              <button class="primary" onclick="location.reload()">刷新状态</button>
+            </div>`}
+            <div style="text-align:center;margin-top:18px"><a href="#/courses" class="gen-back">← 返回课程库</a></div>
           </div>
-          ${working ? `
-          <div class="gen-steps">
-            ${stageOrder.filter((s) => s !== "uploaded").map((s, i) => `
-              <span class="gen-step ${i < curIdx ? "done" : s === status.stage ? "now" : ""}">${stageNames[s]}</span>`).join(" → ")}
-          </div>` : `
-          <div class="form-actions" style="justify-content:center">
-            <button class="primary" onclick="location.reload()">刷新状态</button>
-          </div>`}
-          <div style="text-align:center;margin-top:18px"><a href="#/courses" class="gen-back">← 返回课程库</a></div>
+        </div>
+        <div class="gen-right">
+          <div class="gen-log-head">
+            <span>运行日志</span>
+            <span class="gen-log-hint">每 2.5s 增量刷新 · 自动滚到底部</span>
+          </div>
+          <div class="gen-log" id="gen-log"><div class="gen-log-line">加载中…</div></div>
         </div>
       </div>`);
     if (working) {
@@ -701,6 +718,7 @@ function drawCoursePage() {
           // stop the timer and re-render: ready -> study view,
           // error/cancelled -> the failure card above (no endless spinner)
           clearInterval(state.pollTimer);
+          clearInterval(state.runlogTimer);
           renderCourse(meta.id);
           return;
         }
@@ -712,6 +730,32 @@ function drawCoursePage() {
         if (pctEl) pctEl.textContent = Math.round((st.status.progress || 0) * 100) + "%";
         if (stEl) stEl.innerHTML = `<b>${stageNames[st.status.stage] || st.status.stage}</b> — ${esc(st.status.detail || "")} <b class="gen-pct">${Math.round((st.status.progress || 0) * 100)}%</b>`;
       }, 3000);
+      // ---- run log: incremental poll (after=<seq>), auto-stick to bottom ----
+      const logEl = document.getElementById("gen-log");
+      let lastSeq = 0;
+      const pollRunlog = async () => {
+        if (!logEl.isConnected) { clearInterval(state.runlogTimer); return; }
+        try {
+          const data = await api(`/api/courses/${meta.id}/runlog?after=${lastSeq}`);
+          const entries = data.entries || [];
+          if (!entries.length) return;
+          const stick = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+          for (const e of entries) {
+            const div = document.createElement("div");
+            div.className = `gen-log-line lv-${e.level || "info"}`;
+            const t = (e.ts || "").slice(11, 19);
+            const pct = e.progress != null ? ` (${Math.round(e.progress * 100)}%)` : "";
+            div.textContent = `[${t}] ${e.message || ""}${pct}`;
+            logEl.appendChild(div);
+          }
+          while (logEl.children.length > 1000) logEl.removeChild(logEl.firstChild);
+          lastSeq = data.last_seq || lastSeq;
+          if (stick) logEl.scrollTop = logEl.scrollHeight;
+        } catch (err) { /* transient — next tick retries */ }
+      };
+      clearInterval(state.runlogTimer);
+      state.runlogTimer = setInterval(pollRunlog, 2500);
+      pollRunlog();
     }
     return;
   }
@@ -746,6 +790,7 @@ function drawCoursePage() {
           </div>
         </div>
       </div>
+      <div class="cp-splitter" id="cp-splitter" title="拖动调整左右宽度（25%~70%），双击恢复默认"></div>
       <div class="cp-right">
         <div class="tabs">
           <button data-tab="read" class="active">精读全文</button>
@@ -761,6 +806,49 @@ function drawCoursePage() {
 
   const player = document.getElementById("player");
   player.preload = "metadata";
+
+  // ---- split-pane drag (25%~70%, persisted, dblclick resets) ----
+  const splitter = document.getElementById("cp-splitter");
+  if (splitter) {
+    const cpLeft = document.querySelector(".cp-left");
+    const cpBody = document.querySelector(".cp-body");
+    const SPLIT_KEY = "cp_split_ratio";
+    const savedRatio = parseFloat(localStorage.getItem(SPLIT_KEY) || "0");
+    if (savedRatio >= 0.25 && savedRatio <= 0.7) {
+      cpLeft.style.width = (savedRatio * 100).toFixed(2) + "%";
+    }
+    let dragging = false;
+    const applyDrag = (clientX) => {
+      const rect = cpBody.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      const ratio = Math.min(0.7, Math.max(0.25, (clientX - rect.left) / rect.width));
+      cpLeft.style.width = (ratio * 100).toFixed(2) + "%";
+    };
+    splitter.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      splitter.classList.add("dragging");
+      splitter.setPointerCapture(e.pointerId);
+      document.body.style.cursor = "col-resize";
+      e.preventDefault();
+    });
+    splitter.addEventListener("pointermove", (e) => {
+      if (dragging) applyDrag(e.clientX);
+    });
+    const endDrag = () => {
+      if (!dragging) return;
+      dragging = false;
+      splitter.classList.remove("dragging");
+      document.body.style.cursor = "";
+      const ratio = parseFloat(cpLeft.style.width) / 100;
+      if (ratio >= 0.25 && ratio <= 0.7) localStorage.setItem(SPLIT_KEY, String(ratio));
+    };
+    splitter.addEventListener("pointerup", endDrag);
+    splitter.addEventListener("pointercancel", endDrag);
+    splitter.addEventListener("dblclick", () => {
+      cpLeft.style.width = "";           // back to the CSS clamp() default
+      localStorage.removeItem(SPLIT_KEY);
+    });
+  }
 
   const vocabIndex = buildVocabIndex(lesson);
 
@@ -1134,7 +1222,14 @@ function drawCoursePage() {
       </div>`;
     }).join("");
     panel.querySelectorAll(".jump").forEach((a) => {
-      a.onclick = (e) => { e.preventDefault(); window.__jumpTo(sentences[+a.dataset.sid].start); };
+      a.onclick = (e) => {
+        e.preventDefault();
+        // hard-tab playback stays inside the sentence: stop at its end instead
+        // of streaming into the rest of the video (express/vocab cards keep
+        // plain __jumpTo, they narrate forward context)
+        const sent = sentences[+a.dataset.sid];
+        window.__playRange(sent.start, sent.end);
+      };
     });
     wireSentenceActions(panel);
   }
@@ -1159,9 +1254,9 @@ function drawCoursePage() {
           ${sentenceActionsHtml(s.sentenceId)}
         </div>
         <div class="sh-btns">
-          <button data-play="${s.sentenceId}" title="原速播放">▶</button>
-          <button data-slow="${s.sentenceId}" title="0.75x 慢速播放">🐢</button>
-          <button data-ab="${s.sentenceId}" title="A-B 循环这句">🔁</button>
+          <button class="jump-btn" data-play="${s.sentenceId}">▶ 原速</button>
+          <button class="jump-btn" data-slow="${s.sentenceId}">🐢 慢速</button>
+          <button class="jump-btn" data-ab="${s.sentenceId}">🔁 A-B循环</button>
         </div>
       </div>`;
       }).join("");
@@ -1185,11 +1280,15 @@ function drawCoursePage() {
   }
 }
 
-/* ---------------- centered confirm dialog ---------------- */
+/* ---------------- centered confirm / input dialogs ---------------- */
+/* All dialogs sit on .cal-overlay: ESC and mask click cancel, Enter submits
+ * (input dialog). They replace the native prompt()/confirm() everywhere. */
+
 function confirmDialog(title, message, onOk) {
   document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
   const overlay = document.createElement("div");
   overlay.className = "cal-overlay";
+  overlay.tabIndex = -1;   // focusable so the ESC keydown lands on the overlay
   overlay.innerHTML = `
     <div class="cal-panel confirm-panel" style="width:min(380px,92%)">
       <div class="cal-head"><b>${esc(title)}</b><button class="cal-close">✕</button></div>
@@ -1203,7 +1302,81 @@ function confirmDialog(title, message, onOk) {
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay || e.target.closest(".cal-close")) overlay.remove();
   });
+  overlay.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); overlay.remove(); }
+  });
   document.body.appendChild(overlay);
+  overlay.focus();
+}
+
+function inputDialog(title, label, opts) {
+  /** Promise-based text input on .cal-overlay. Resolves the trimmed value,
+   *  or null on cancel (ESC / mask / 取消). opts: {password, placeholder, value}. */
+  opts = opts || {};
+  return new Promise((resolve) => {
+    document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
+    const overlay = document.createElement("div");
+    overlay.className = "cal-overlay";
+    overlay.innerHTML = `
+      <div class="cal-panel input-panel" style="width:min(380px,92%)">
+        <div class="cal-head"><b>${esc(title)}</b><button class="cal-close">✕</button></div>
+        <div class="input-label" style="margin-top:12px;color:var(--muted,#666);font-size:13px">${esc(label)}</div>
+        <input class="input-field" type="${opts.password ? "password" : "text"}"
+               placeholder="${esc(opts.placeholder || "")}" value="${esc(opts.value || "")}"
+               autocomplete="off" style="width:100%;margin-top:8px">
+        <div class="form-actions" style="margin-top:16px">
+          <button class="primary input-ok" style="flex:1">确定</button>
+          <button class="cal-close" style="flex-shrink:0">取消</button>
+        </div>
+      </div>`;
+    const input = overlay.querySelector(".input-field");
+    const done = (val) => { overlay.remove(); resolve(val); };
+    overlay.querySelector(".input-ok").onclick = () => done(input.value.trim());
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay || e.target.closest(".cal-close")) done(null);
+    });
+    overlay.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); done(null); }
+      else if (e.key === "Enter") { e.preventDefault(); done(input.value.trim()); }
+    });
+    document.body.appendChild(overlay);
+    input.focus();
+    input.select();
+  });
+}
+
+function choiceDialog(title, label, options, defaultValue) {
+  /** Promise-based single-choice dialog on .cal-overlay. options:
+   *  [{value, label}]. Resolves the chosen value, or null on cancel. */
+  return new Promise((resolve) => {
+    document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
+    const overlay = document.createElement("div");
+    overlay.className = "cal-overlay";
+    overlay.innerHTML = `
+      <div class="cal-panel input-panel" style="width:min(380px,92%)">
+        <div class="cal-head"><b>${esc(title)}</b><button class="cal-close">✕</button></div>
+        <div class="input-label" style="margin-top:12px;color:var(--muted,#666);font-size:13px">${esc(label)}</div>
+        <select class="choice-field" style="width:100%;margin-top:8px">
+          ${options.map((o) => `<option value="${esc(o.value)}" ${o.value === defaultValue ? "selected" : ""}>${esc(o.label)}</option>`).join("")}
+        </select>
+        <div class="form-actions" style="margin-top:16px">
+          <button class="primary choice-ok" style="flex:1">确定</button>
+          <button class="cal-close" style="flex-shrink:0">取消</button>
+        </div>
+      </div>`;
+    const sel = overlay.querySelector(".choice-field");
+    const done = (val) => { overlay.remove(); resolve(val); };
+    overlay.querySelector(".choice-ok").onclick = () => done(sel.value);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay || e.target.closest(".cal-close")) done(null);
+    });
+    overlay.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); done(null); }
+      else if (e.key === "Enter") { e.preventDefault(); done(sel.value); }
+    });
+    document.body.appendChild(overlay);
+    sel.focus();
+  });
 }
 
 /* ---------------- course sharing dialog (owner side) ---------------- */
@@ -1442,10 +1615,11 @@ function renderSettings() {
       btn.onclick = (e) => {
         e.stopPropagation();
         const i = +btn.dataset.del;
-        if (!confirm(`删除 API「${providers[i].name}」？`)) return;
-        providers.splice(i, 1);
-        if (selectedProvider >= providers.length) selectedProvider = providers.length - 1;
-        saveProviders().then(() => { drawProviders(); });
+        confirmDialog("删除 API", `删除 API「${providers[i].name}」？`, () => {
+          providers.splice(i, 1);
+          if (selectedProvider >= providers.length) selectedProvider = providers.length - 1;
+          saveProviders().then(() => { drawProviders(); });
+        });
       };
     });
     wrap.querySelectorAll("[data-move]").forEach((btn) => {
@@ -2101,8 +2275,8 @@ function renderTranscribeSettings() {
     }
     const manualBtn = slot.querySelector(".mp-manual-add");
     if (manualBtn) {
-      manualBtn.onclick = () => {
-        const name = prompt("输入模型名称：");
+      manualBtn.onclick = async () => {
+        const name = await inputDialog("添加模型", "输入模型名称：");
         const clean = (name || "").trim();
         if (clean && !chosen.includes(clean)) {
           chosen.push(clean);
@@ -2265,10 +2439,13 @@ function renderBackup() {
           </td>
         </tr>`).join("") + `</table></div>`;
       listEl.querySelectorAll(".bk-del").forEach((btn) => {
-        btn.onclick = async () => {
-          if (!confirm("删除这个备份？")) return;
-          await api(`/api/backups/${btn.dataset.f}`, { method: "DELETE" });
-          refreshBackups();
+        btn.onclick = () => {
+          confirmDialog("删除备份", "删除这个备份？", async () => {
+            try {
+              await api(`/api/backups/${btn.dataset.f}`, { method: "DELETE" });
+            } catch (err) { toast(err.message); }
+            refreshBackups();
+          });
         };
       });
     } catch (err) {
@@ -2299,26 +2476,27 @@ function renderBackup() {
     } catch (err) { toast(err.message); }
   };
 
-  document.getElementById("bk-restore").onclick = async () => {
+  document.getElementById("bk-restore").onclick = () => {
     const fi = document.getElementById("bk-restore-file");
     if (!fi.files[0]) { toast("请先选择备份 zip"); return; }
-    if (!confirm("恢复会覆盖当前的 API 配置和所有课程数据，确定继续？")) return;
-    const fd = new FormData();
-    fd.append("file", fi.files[0]);
-    try {
-      const res = await api("/api/backups/restore", { method: "POST", body: fd });
-      let msg = `恢复完成：${res.courses} 门课程${res.config ? " + API 配置" : ""}`;
-      if (res.media_restored) msg += `；媒体 ${res.media_restored} 个`;
-      if (res.missing_media?.length) {
-        msg += `；${res.missing_media.length} 个课程缺媒体（见下方）`;
-        renderMissingMedia(res.missing_media);
-      } else {
-        document.getElementById("bk-missing").innerHTML = "";
-      }
-      toast(msg, 5000);
-      loadBackupSettings();
-      refreshBackups();
-    } catch (err) { toast("恢复失败: " + err.message, 5000); }
+    confirmDialog("恢复备份", "恢复会覆盖当前的 API 配置和所有课程数据，确定继续？", async () => {
+      const fd = new FormData();
+      fd.append("file", fi.files[0]);
+      try {
+        const res = await api("/api/backups/restore", { method: "POST", body: fd });
+        let msg = `恢复完成：${res.courses} 门课程${res.config ? " + API 配置" : ""}`;
+        if (res.media_restored) msg += `；媒体 ${res.media_restored} 个`;
+        if (res.missing_media?.length) {
+          msg += `；${res.missing_media.length} 个课程缺媒体（见下方）`;
+          renderMissingMedia(res.missing_media);
+        } else {
+          document.getElementById("bk-missing").innerHTML = "";
+        }
+        toast(msg, 5000);
+        loadBackupSettings();
+        refreshBackups();
+      } catch (err) { toast("恢复失败: " + err.message, 5000); }
+    });
   };
 
   function renderMissingMedia(missing) {
@@ -2402,15 +2580,23 @@ function renderLogs() {
       const levelTag = (lv) => lv === "error" ? `<span class="log-lv err">ERROR</span>`
         : lv === "warn" ? `<span class="log-lv warn">WARN</span>`
         : "";
-      const catTag = (c) => ({ runtime: "运行", pipeline: "生成", action: "操作", material: "素材" }[c] || c);
-      listEl.innerHTML = items.map((e) => `
+      const catTag = (c) => ({ runtime: "运行", pipeline: "生成", action: "操作", material: "素材", runlog: "课程日志" }[c] || c);
+      listEl.innerHTML = items.map((e, i) => `
         <div class="log-row ${e.level === "error" ? "log-err" : e.level === "warn" ? "log-warn" : ""}">
           <span class="log-ts">${esc((e.ts || "").replace("T", " ").slice(0, 19))}</span>
           <span class="log-cat">${catTag(e.category)}</span>
           ${levelTag(e.level)}
-          <span class="log-msg">${esc(e.message)}${e.course_id ? ` <a href="#/course/${esc(e.course_id)}" style="color:var(--accent);font-size:12px">课程</a>` : ""}</span>
-          ${e.detail ? `<div class="log-detail">${esc(e.detail)}</div>` : ""}
+          <span class="log-msg">${esc(e.message)}</span>
+          ${e.course_id ? `<button class="log-cid" data-cid="${esc(e.course_id)}">课程日志</button>` : ""}
+          <button class="log-more" data-i="${i}">详情</button>
+          ${e.detail ? `<div class="log-detail">${esc(e.detail.length > 120 ? e.detail.slice(0, 120) + "…" : e.detail)}</div>` : ""}
         </div>`).join("");
+      listEl.querySelectorAll(".log-more").forEach((btn) => {
+        btn.onclick = () => showLogDetail(items[+btn.dataset.i]);
+      });
+      listEl.querySelectorAll(".log-cid").forEach((btn) => {
+        btn.onclick = () => showCourseLogs(btn.dataset.cid);
+      });
     } catch (err) {
       listEl.innerHTML = `<div class="panel-empty">加载失败: ${esc(err.message)}</div>`;
     }
@@ -2430,6 +2616,79 @@ function renderLogs() {
 
   refresh();
   state.pollTimer = setInterval(refresh, 5000);
+}
+
+/* ---------------- log detail / per-course log modals ---------------- */
+function showLogDetail(e) {
+  document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
+  const overlay = document.createElement("div");
+  overlay.className = "cal-overlay";
+  overlay.tabIndex = -1;
+  overlay.innerHTML = `
+    <div class="cal-panel" style="width:min(680px,94%)">
+      <div class="cal-head"><b>日志详情</b><button class="cal-close">✕</button></div>
+      <div class="log-detail-grid">
+        <div><span class="log-dk">时间</span>${esc((e.ts || "").replace("T", " ").slice(0, 19))}</div>
+        <div><span class="log-dk">类别</span>${esc(e.category || "")}</div>
+        <div><span class="log-dk">级别</span>${esc(e.level || "info")}</div>
+        ${e.course_id ? `<div><span class="log-dk">课程</span>${esc(e.course_id)}</div>` : ""}
+        ${e.seq ? `<div><span class="log-dk">序号</span>${esc(e.seq)}</div>` : ""}
+      </div>
+      <div class="log-detail-msg">${esc(e.message || "")}</div>
+      ${e.detail ? `<pre class="log-detail-pre">${esc(e.detail)}</pre>` : ""}
+      <div class="form-actions" style="margin-top:14px">
+        <button class="primary cal-close" style="flex:1">关闭</button>
+      </div>
+    </div>`;
+  overlay.addEventListener("click", (ev) => {
+    if (ev.target === overlay || ev.target.closest(".cal-close")) overlay.remove();
+  });
+  overlay.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") { ev.preventDefault(); overlay.remove(); }
+  });
+  document.body.appendChild(overlay);
+  overlay.focus();
+}
+
+async function showCourseLogs(cid) {
+  document.querySelectorAll(".cal-overlay").forEach((el) => el.remove());
+  const overlay = document.createElement("div");
+  overlay.className = "cal-overlay";
+  overlay.tabIndex = -1;
+  overlay.innerHTML = `
+    <div class="cal-panel" style="width:min(760px,96%)">
+      <div class="cal-head"><b>课程日志 · ${esc(cid)}</b><button class="cal-close">✕</button></div>
+      <div class="course-log-list" style="max-height:60vh;overflow-y:auto;margin-top:10px">
+        <div class="panel-empty">加载中…</div>
+      </div>
+      <div class="form-actions" style="margin-top:14px">
+        <button class="primary cal-close" style="flex:1">关闭</button>
+      </div>
+    </div>`;
+  overlay.addEventListener("click", (ev) => {
+    if (ev.target === overlay || ev.target.closest(".cal-close")) overlay.remove();
+  });
+  overlay.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") { ev.preventDefault(); overlay.remove(); }
+  });
+  document.body.appendChild(overlay);
+  overlay.focus();
+  const listEl = overlay.querySelector(".course-log-list");
+  try {
+    const data = await api(`/api/logs/course/${encodeURIComponent(cid)}?limit=500`);
+    const items = data.entries || [];
+    if (!items.length) { listEl.innerHTML = `<div class="panel-empty">暂无日志</div>`; return; }
+    const catTag = (c) => ({ runtime: "运行", pipeline: "生成", action: "操作", runlog: "课程日志" }[c] || c);
+    listEl.innerHTML = items.map((e) => `
+      <div class="log-row ${e.level === "error" ? "log-err" : e.level === "warn" ? "log-warn" : ""}">
+        <span class="log-ts">${esc((e.ts || "").replace("T", " ").slice(0, 19))}</span>
+        <span class="log-cat">${catTag(e.category)}</span>
+        <span class="log-msg">${esc(e.message || "")}</span>
+        ${e.detail ? `<div class="log-detail">${esc(e.detail)}</div>` : ""}
+      </div>`).join("");
+  } catch (err) {
+    listEl.innerHTML = `<div class="panel-empty">加载失败: ${esc(err.message)}</div>`;
+  }
 }
 
 /* ---------------- helpers ---------------- */
@@ -2527,10 +2786,10 @@ async function renderAdmin() {
       <tr><th>用户名</th><th>显示名</th><th>角色</th><th>状态</th><th>操作</th></tr>
       ${users.map((u) => `<tr>
         <td>${esc(u.username)}</td><td>${esc(u.display_name || "")}</td>
-        <td>${u.role === "admin" ? "管理员" : "用户"}</td>
+        <td>${u.role === "admin" ? "管理员" : "用户"}${u.builtin_admin ? "（内置）" : ""}</td>
         <td>${u.disabled ? "已禁用" : "正常"}</td>
         <td>
-          ${u.username === "admin" ? "内置账号" : `
+          ${u.builtin_admin ? "内置账号" : `
             <button data-toggle="${u.id}" data-disabled="${u.disabled ? "1" : "0"}">${u.disabled ? "启用" : "禁用"}</button>
             <button data-role="${u.id}" data-role-to="${u.role === "admin" ? "user" : "admin"}">设为${u.role === "admin" ? "用户" : "管理员"}</button>
             <button data-reset="${u.id}">重置密码</button>
@@ -2539,11 +2798,15 @@ async function renderAdmin() {
       </table></div>`;
     const addBtn = document.getElementById("adm-add-user");
     if (addBtn) addBtn.onclick = async () => {
-      const username = prompt("用户名：");
+      const username = await inputDialog("新增用户", "用户名：");
       if (!username) return;
-      const password = prompt("初始密码：");
+      const password = await inputDialog("新增用户", "初始密码：", { password: true });
       if (!password) return;
-      const role = confirm("设为管理员？取消则设为普通用户") ? "admin" : "user";
+      const role = await choiceDialog("新增用户", "角色：", [
+        { value: "user", label: "普通用户" },
+        { value: "admin", label: "管理员" },
+      ], "user");
+      if (!role) return;
       try {
         await api("/api/admin/users", { method: "POST", body: JSON.stringify({ username, password, role }) });
         loadUsers();
@@ -2558,15 +2821,18 @@ async function renderAdmin() {
       loadUsers();
     });
     el.querySelectorAll("[data-reset]").forEach((b) => b.onclick = async () => {
-      const p = prompt("输入新密码：");
+      const p = await inputDialog("重置密码", "输入新密码：", { password: true });
       if (!p) return;
       await api(`/api/admin/users/${b.dataset.reset}`, { method: "PUT", body: JSON.stringify({ password: p }) });
       toast("密码已重置");
     });
-    el.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
-      if (!confirm("确定删除该用户？")) return;
-      await api(`/api/admin/users/${b.dataset.del}`, { method: "DELETE" });
-      loadUsers();
+    el.querySelectorAll("[data-del]").forEach((b) => b.onclick = () => {
+      confirmDialog("删除用户", "确定删除该用户？", async () => {
+        try {
+          await api(`/api/admin/users/${b.dataset.del}`, { method: "DELETE" });
+          loadUsers();
+        } catch (err) { toast(err.message); }
+      });
     });
   }
   async function loadGrants() {

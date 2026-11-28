@@ -184,8 +184,9 @@ def audio_transcribe_with_failover(
             with _httpx.Client(
                 timeout=_httpx.Timeout(connect=15, read=300, write=120, pool=15)
             ) as client:
-                # offset 0: the caller re-offsets every segment afterwards
-                segs = _transcribe_segment(client, base, key, model, part_path, 0.0, None, mode)
+                # channels return SEGMENT-RELATIVE times (offset invariant);
+                # the caller shifts them onto the media clock via shift_to_wall
+                segs = _transcribe_segment(client, base, key, model, part_path, None, mode)
             note_model_result(prov.get("id", ""), model, True)
             return segs, model
         except Exception as exc:  # noqa: BLE001 — record and try the next model
@@ -303,8 +304,130 @@ def _extract_json(text: str) -> Any:
     raise ValueError("no balanced JSON found")
 
 
-def _chunk(segments: list[dict[str, Any]], size: int = 40) -> list[list[dict[str, Any]]]:
-    return [segments[i:i + size] for i in range(0, len(segments), size)]
+def _cjk_count(text: str) -> int:
+    return sum(1 for ch in text if "一" <= ch <= "鿿")
+
+
+def _lang_violation(src_text: str, out_text: str) -> str | None:
+    """Return a reason string when a translation is in the wrong language.
+
+    en -> zh: the output must be CJK-dominant (CJK chars at least a fifth of
+    the latin letters). zh -> en: the output must not contain CJK at all.
+    Mixed-language source sentences skip the check (both scripts are legal).
+    """
+    out = (out_text or "").strip()
+    if not out:
+        return None            # emptiness is handled separately
+    src = detect_lang(src_text)
+    if src == "en" and detect_lang(src_text) == detect_lang(out):
+        # detect_lang(out) == "en" means the translation stayed English
+        return "译文未翻译成中文"
+    if src == "zh" and _cjk_count(out) > 0:
+        return "译文仍包含中文"
+    return None
+
+
+def _translate_batch(
+    batch: list[tuple[int, dict[str, Any]]],
+    cfg: dict[str, Any],
+    client: httpx.Client,
+    should_cancel: Callable[[], bool] | None = None,
+) -> dict[int, str]:
+    """Translate one batch with the sequential-array protocol (A3).
+
+    Protocol: the input lines are numbered 1..N in playback order; the model
+    must answer with EXACTLY a JSON array of N strings, item i = translation
+    of line i. No ids to echo, nothing to vote on — position is the contract.
+
+    Validation per reply:
+      * unparseable / not an array / non-string items -> retry with the
+        error fed back (the whole batch is invalid in those cases);
+      * wrong item count            -> retry with the error fed back;
+      * empty items / wrong-language items -> keep the good items, re-translate
+        the bad ones in a smaller batch (recursion);
+    Each batch gets at most 2 attempts; a batch that still fails is split in
+    half and recursed (40 -> 20 -> 10 -> 5); at 5 items and below persistent
+    failure leaves those sentences untranslated ("") — the lesson layer
+    tolerates missing translations.
+
+    Returns {global_index: translation} for the items that succeeded.
+    """
+    n = len(batch)
+    lines = [f"{k + 1}. {s['text']}" for k, (_, s) in enumerate(batch)]
+    prompt = (
+        f"你是专业字幕翻译。下面是 {n} 句视频文本（已按播放顺序编号 1-{n}）。逐句翻译："
+        "英文句子翻译成简体中文，中文句子翻译成英文；专有名词保留原文。\n"
+        f"输出严格 JSON：一个恰好 {n} 个字符串的 JSON 数组，第 i 项是第 i 句的译文。"
+        "顺序必须与输入完全一致；不要输出编号、注释或任何其他内容。\n\n"
+        + "\n".join(lines)
+    )
+    base_messages: list[dict[str, str]] = [{"role": "user", "content": prompt}]
+    messages = base_messages
+
+    for attempt in range(2):
+        if should_cancel and should_cancel():
+            raise PipelineCancelled()
+        reply = _chat(client, cfg, messages, temperature=0.2)
+        texts: list[str]
+        try:
+            parsed = _extract_json(reply)
+            if not isinstance(parsed, list):
+                raise ValueError("回复不是 JSON 数组")
+            # protocol contract: every item must be a string. A non-string
+            # item (e.g. a dict) makes the WHOLE reply invalid -> retry with
+            # feedback; never coerce via str() or it would leak into output.
+            if any(not isinstance(x, str) for x in parsed):
+                raise ValueError("返回数组中包含非字符串项")
+            texts = list(parsed)
+        except ValueError as exc:
+            messages = base_messages + [
+                {"role": "assistant", "content": reply[:2000]},
+                {"role": "user", "content": (
+                    f"你的输出无法解析（{exc}）。重新回答：严格输出 {n} 个字符串的 JSON 数组，"
+                    "第 i 项是第 i 句的译文，不要输出任何其他内容。"
+                )},
+            ]
+            continue
+        if len(texts) != n:
+            messages = base_messages + [
+                {"role": "assistant", "content": reply[:2000]},
+                {"role": "user", "content": (
+                    f"你的数组有 {len(texts)} 项，但输入是 {n} 句。重新回答："
+                    f"严格输出 {n} 个字符串的 JSON 数组，第 i 项是第 i 句的译文。"
+                )},
+            ]
+            continue
+
+        # split good / bad items: empty translations and wrong-language
+        # translations are re-translated in a smaller batch, good ones kept
+        bad: list[tuple[int, str]] = []     # (position, reason)
+        for k, ((gi, seg), txt) in enumerate(zip(batch, texts)):
+            if not txt.strip():
+                bad.append((k, "空译文"))
+                continue
+            reason = _lang_violation(seg["text"], txt)
+            if reason:
+                bad.append((k, reason))
+        if bad:
+            sub = _translate_batch(
+                [batch[k] for k, _ in bad], cfg, client, should_cancel
+            )
+            result = {
+                batch[k][0]: texts[k].strip()
+                for k in range(n) if k not in {b[0] for b in bad}
+            }
+            result.update(sub)
+            return result
+        return {batch[k][0]: texts[k].strip() for k in range(n)}
+
+    # both attempts failed -> halve the batch and try each half on its own
+    if n <= 5:
+        return {}          # terminal failure: these sentences stay untranslated
+    mid = n // 2
+    out: dict[int, str] = {}
+    out.update(_translate_batch(batch[:mid], cfg, client, should_cancel))
+    out.update(_translate_batch(batch[mid:], cfg, client, should_cancel))
+    return out
 
 
 def translate_segments(
@@ -318,8 +441,10 @@ def translate_segments(
 
     Sentences that already carry a caption-provided translation (from a
     bilingual burned-in subtitle) skip the LLM entirely.
-    Chunks run concurrently (3 workers) — translation batches are independent
-    and the relay handles parallel requests fine.
+    Chunks of 40 run concurrently (workers) — translation batches are
+    independent and the relay handles parallel requests fine. Within a chunk
+    the sequential-array protocol (see ``_translate_batch``) guarantees order,
+    retries with error feedback, and recursive halving on persistent failure.
     """
     translations: dict[int, str] = {}
     # prefill with caption translations; only the rest go to the LLM
@@ -333,113 +458,19 @@ def translate_segments(
     chunks = [todo[i:i + 40] for i in range(0, len(todo), 40)]
     import concurrent.futures as _futures
 
-    def _prompt_for(batch: list[tuple[int, dict[str, Any]]]) -> str:
-        """One prompt shape for both the first pass and the fill-in pass."""
-        lines = [f"[{k}] {s['text']}" for k, s in batch]
-        return (
-            "你是专业字幕翻译。下面是视频逐句文本（中英混合）。逐句翻译成另一种语言："
-            "英文句子翻译成简体中文，中文句子翻译成英文。保留编号，输出 JSON 数组，"
-            '形如 [{"i": 编号, "t": "译文"}]，不要输出其他内容。\n\n' + "\n".join(lines)
-        )
-
-    def _put(target: int, text: str) -> None:
-        """Store one translation for an already-resolved segment index.
-
-        An empty / whitespace-only reply must never wipe an existing value.
-        """
-        text = (text or "").strip()
-        if not text:
-            return
-        translations[target] = text
-
-    def _apply_reply(reply: str, ids: list[int], idset: set[int]) -> None:
-        """Parse one model reply and store it.
-
-        The numbering is decided ONCE for the whole reply, never per item.
-        A batch can be sparse (ids like [0, 2, 4], because sentences that came
-        with a caption translation are skipped), and then a single number is
-        ambiguous: `0` is both "global id 0" and "first line of this batch".
-        Judging item by item shifted such replies by one and let one
-        translation overwrite another; a batch-wide vote is consistent by
-        construction.
-        """
-        parsed = _extract_json(reply)
-        if not isinstance(parsed, list):
-            raise ValueError("expected JSON array")
-
-        # tolerate three item shapes; keep only (raw index, text) pairs
-        pairs: list[tuple[int, str]] = []
-        for item in parsed:
-            raw_k: int | None = None
-            text = ""
-            if isinstance(item, dict) and "i" in item:
-                try:
-                    raw_k = int(item["i"])
-                except (TypeError, ValueError):
-                    continue
-                text = str(item.get("t", ""))
-            elif isinstance(item, str):
-                m = re.match(r"^\[?(\d+)\]?\s*[.、:：]?\s*(.*)$", item.strip())
-                if not m:
-                    continue
-                raw_k = int(m.group(1))
-                text = m.group(2)
-            elif isinstance(item, dict):
-                idx = item.get("id", item.get("index", item.get("n")))
-                if idx is None:
-                    continue
-                try:
-                    raw_k = int(idx)
-                except (TypeError, ValueError):
-                    continue
-                text = str(item.get("t", item.get("translation", item.get("text", ""))))
-            if raw_k is not None:
-                pairs.append((raw_k, text))
-        if not pairs:
-            return
-
-        keys = [k for k, _ in pairs]
-        hits = sum(1 for k in keys if k in idset)            # look like global ids
-        inrange = sum(1 for k in keys if 0 <= k < len(ids))  # look like batch positions
-
-        # Decide the numbering for the WHOLE reply by which reading resolves
-        # more of it — no fixed threshold. An `all()` / `any()` vote has no
-        # tolerance: one stray hallucinated index either voids the batch or
-        # shifts it wholesale, and a percentage bar just moves the same cliff
-        # to an arbitrary place. A key that resolves under NEITHER reading is
-        # dropped, never guessed: a blank line is refilled by the pass below,
-        # a wrong one is not.
-        if hits >= inrange:                    # global ids echoed back
-            for k, text in pairs:
-                if k in idset:
-                    _put(k, text)
-        else:                                  # batch-relative positions
-            for k, text in pairs:
-                if 0 <= k < len(ids):
-                    _put(ids[k], text)
-
     def _translate_chunk(ci: int) -> None:
         if should_cancel and should_cancel():
             raise PipelineCancelled()
         chunk = chunks[ci]
-        # chunk entries are (global_index, segment) pairs
-        ids = [k for k, _ in chunk]
-        idset = set(ids)
-        prompt = _prompt_for(chunk)
         with httpx.Client() as client:
-            for attempt in range(3):
-                try:
-                    reply = _chat(client, cfg, [{"role": "user", "content": prompt}], temperature=0.2)
-                    _apply_reply(reply, ids, idset)
-                    break
-                except PipelineCancelled:
-                    raise
-                except (ValueError, KeyError, RuntimeError, httpx.HTTPError):
-                    if attempt == 2:
-                        for k in ids:
-                            translations.setdefault(k, "")
-                    else:
-                        time.sleep(2 * (attempt + 1))
+            result = _translate_batch(chunk, cfg, client, should_cancel)
+        for gi, txt in result.items():
+            txt = (txt or "").strip()
+            if txt:
+                translations[gi] = txt
+        # terminal failures of the protocol leave "" — tolerated downstream
+        for gi, _seg in chunk:
+            translations.setdefault(gi, "")
 
     done = 0
     errors: list[Exception] = []
@@ -461,31 +492,6 @@ def translate_segments(
     # translation — that is a success, not "all batches failed".
     if chunks and len(errors) >= len(chunks):
         raise RuntimeError(f"翻译全部批次失败: {errors[-1]}")
-
-    # One fill-in pass: a batch that came back unparsed (or whose ids the model
-    # mangled) leaves blanks behind. Retry those sentences together in a single
-    # extra request; whatever still fails just stays "" — the lesson layer
-    # tolerates a missing translation, and this must never loop or raise.
-    if should_cancel and should_cancel():
-        raise PipelineCancelled()
-    missing = [i for i in range(len(segments)) if not (translations.get(i) or "").strip()]
-    if missing:
-        batch = [(i, segments[i]) for i in missing[:40]]
-        ids = [k for k, _ in batch]
-        idset = set(ids)
-        if progress_cb:
-            progress_cb(1.0, f"补译 {len(batch)} 句…")
-        try:
-            with httpx.Client() as client:
-                reply = _chat(client, cfg, [{"role": "user", "content": _prompt_for(batch)}],
-                              temperature=0.2)
-            _apply_reply(reply, ids, idset)
-        except PipelineCancelled:
-            raise
-        except Exception:  # noqa: BLE001 — the fill-in pass is best-effort
-            pass
-        for k in ids:
-            translations.setdefault(k, "")
 
     return [translations.get(i, "") for i in range(len(segments))]
 

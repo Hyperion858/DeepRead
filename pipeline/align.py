@@ -123,6 +123,7 @@ def _warp_asr_to_cues(asr: list[dict[str, Any]], cues: list[dict[str, Any]]) -> 
     for ai, cs, ce in anchors:
         seg = asr[ai]
         dur = max(seg["end"] - seg["start"], 0.1)
+        cs = max(cs, 0.0)
         out[ai] = {
             **seg,
             "start": cs,
@@ -132,8 +133,10 @@ def _warp_asr_to_cues(asr: list[dict[str, Any]], cues: list[dict[str, Any]]) -> 
         }
     # re-flow unmatched segments in the gaps between anchored ones
     n = len(asr)
+    tail_cursor: float | None = None  # sequential placement for tail runs
     for idx in range(n):
         if out[idx] is not None:
+            tail_cursor = None
             continue
         prev_anchor = next((a for a in anchors if a[0] < idx), None)
         next_anchor = next((a for a in anchors if a[0] > idx), None)
@@ -141,8 +144,20 @@ def _warp_asr_to_cues(asr: list[dict[str, Any]], cues: list[dict[str, Any]]) -> 
         hi = next_anchor[1] if next_anchor else None
         seg = asr[idx]
         dur = max(seg["end"] - seg["start"], 0.1)
+        # anchors are matched by text similarity, so cue times may arrive out
+        # of order relative to asr order — a non-positive gap would collapse
+        # or negate positions. Fall back to sequential tail placement instead.
+        if hi is not None and hi <= lo:
+            hi = None
         if hi is None:
-            new_start = lo
+            # no right anchor (leading run, tail run or inverted gap): lay
+            # segments sequentially by their own durations instead of dumping
+            # them all onto one instant (observed: 6 sentences sharing
+            # identical times) or onto a negative base
+            if tail_cursor is None:
+                tail_cursor = max(lo, 0.0)
+            new_start = tail_cursor
+            tail_cursor = new_start + dur
         else:
             # spread unmatched segments evenly in [lo, hi)
             gap = hi - lo
@@ -153,7 +168,7 @@ def _warp_asr_to_cues(asr: list[dict[str, Any]], cues: list[dict[str, Any]]) -> 
                 run += 1
                 k += 1
             before = idx - (prev_anchor[0] + 1 if prev_anchor else 0)
-            new_start = lo + gap * (before / max(run, 1))
+            new_start = max(lo + gap * (before / max(run, 1)), 0.0)
         out[idx] = {
             **seg,
             "start": new_start,
@@ -311,15 +326,21 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
             })
         elif sim > 0.4 and len(sub_n) >= len(asr_n) * 0.6:
             # partial agreement: genuinely ambiguous — hand it to the LLM
-            # arbiter (batched after the loop); till then keep ASR, flag it
+            # arbiter (batched after the loop); till then keep ASR, flag it.
+            # NOTE: the arbiter must update the result DICT OBJECT, not an
+            # index — `results` is re-sorted before the arbiter runs, which
+            # invalidates append-time indices (observed: the arbitrated text
+            # overwrote a random other sentence while the original stayed,
+            # producing duplicate sentences with identical times)
+            slot = {**seg, "source": "asr", "uncertain": True}
             ambiguous.append({
                 "asr": seg["text"],
                 "caption": sub_text,
-                "index": len(results),
+                "slot": slot,
                 "seg": seg,
                 "sub_text": sub_text,
             })
-            results.append({**seg, "source": "asr", "uncertain": True})
+            results.append(slot)
         else:
             # weak match: keep the ASR text (more complete) but BORROW the
             # caption's timing when the warp didn't anchor this segment —
@@ -367,7 +388,18 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
             seg["translation"] = ct
         seg["lang"] = detect_lang(seg["text"])
     results.sort(key=lambda x: x["start"])
-    return results
+
+    # defensive dedupe: identical time+text pairs would render as doubled
+    # subtitle lines; any residue from the best-effort merge paths is junk
+    seen: set[tuple[float, float, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for seg in results:
+        key = (round(seg["start"], 2), round(seg["end"], 2), _norm(seg["text"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(seg)
+    return deduped
 
 
 def _arbiter_prompt(ambiguous: list[dict[str, Any]]) -> str:
@@ -416,11 +448,13 @@ def _arbiter_resolve(ambiguous: list[dict[str, Any]], results: list[dict[str, An
             a = ambiguous[k]
             merged = _similarity(text, a["asr"])
             if merged >= 0.3:   # sanity: the arbiter shouldn't invent new content
-                results[a["index"]] = {
+                slot = a["slot"]
+                slot.clear()
+                slot.update({
                     **a["seg"],
                     "text": text,
                     "source": "arbitrated",
                     "uncertain": False,
-                }
+                })
     except Exception:  # noqa: BLE001
         return
