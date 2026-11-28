@@ -279,6 +279,17 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .prov-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); border-color: var(--accent); }
 .prov-card.open { grid-column: 1 / -1; transform: none; border-color: var(--accent); }
 
+/* model config page: fill the viewport, pin the run log to the bottom */
+@media (min-width: 761px) {
+  .mc-page {
+    height: 100vh; height: 100dvh; display: flex; flex-direction: column;
+    overflow: hidden; padding-bottom: clamp(12px, 2vh, 20px);
+  }
+  .mc-page > h1 { flex-shrink: 0; }
+  .mc-page .mc-layout { flex: 1; min-height: 0; overflow-y: auto; }
+  .mc-page .run-log { flex-shrink: 0; margin-top: 12px; }
+  .mc-page .run-log-body { max-height: 24vh; }
+}
 /* model config page: left provider list / right detail, run log spans full width below */
 .mc-layout {
   display: grid; grid-template-columns: minmax(210px, 300px) minmax(0, 1fr);
@@ -329,6 +340,8 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .pm-up:disabled, .pm-down:disabled { opacity: .25; }
 .prov-mini-order { font-size: 10.5px; color: var(--ink-3); width: 12px; text-align: right; flex-shrink: 0; }
 .prov-mini-order-btns { display: flex; gap: 1px; flex-shrink: 0; }
+.prov-mini .pm-up, .prov-mini .pm-down { padding: 0 2px; font-size: 9px; line-height: 1.4; }
+.prov-mini .pm-up:hover:not(:disabled), .prov-mini .pm-down:hover:not(:disabled) { background: none; }
 .prov-card-hit { cursor: pointer; display: flex; flex-direction: column; gap: 3px; min-width: 0; min-height: 0; }
 .prov-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .prov-dot { width: 8px; height: 8px; border-radius: 50%; background: #c7cdd6; flex-shrink: 0; }

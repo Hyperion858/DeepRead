@@ -1042,7 +1042,7 @@ function renderSettings() {
   let cfgCache = null;
   let modelCache = {};            // provider_id -> {models, asr_models}
   $app.innerHTML = shell("settings", `
-    <div class="page settings-split">
+    <div class="page settings-split mc-page">
       <h1>模型配置</h1>
       <div class="mc-layout">
         <aside class="mc-left" id="mc-provider-list"></aside>
@@ -1114,7 +1114,7 @@ function renderSettings() {
     for (const [pid, models] of Object.entries(cfgCache.global_models || {})) {
       if (Array.isArray(models) && models.length) globalPool[pid] = [...models];
     }
-    selectedProvider = -1;
+    selectedProvider = providers.length ? 0 : -1;
     drawProviders();
   }
 
@@ -1145,6 +1145,10 @@ function renderSettings() {
           <div class="prov-mini-head">
             <span class="prov-dot ${st.cls}"></span>
             <span class="prov-mini-name">${esc(p.name || `API ${i + 1}`)}</span>
+            <span class="prov-mini-order-btns">
+              <button class="pm-up" data-move="${i}" data-dir="-1" title="上移" ${i === 0 ? "disabled" : ""}>▲</button>
+              <button class="pm-down" data-move="${i}" data-dir="1" title="下移" ${i === providers.length - 1 ? "disabled" : ""}>▼</button>
+            </span>
             <button class="p-del" data-del="${i}" title="删除">✕</button>
           </div>
           <div class="prov-mini-sub">${st.text}${n ? ` · ${n} 个模型` : ""}</div>
@@ -1153,7 +1157,7 @@ function renderSettings() {
 
     wrap.querySelectorAll("[data-select]").forEach((el) => {
       el.onclick = (e) => {
-        if (e.target.closest("[data-del]")) return;
+        if (e.target.closest("[data-del],[data-move]")) return;
         collectProviders();
         selectedProvider = +el.dataset.select;
         drawProviders();
@@ -1167,6 +1171,21 @@ function renderSettings() {
         providers.splice(i, 1);
         if (selectedProvider >= providers.length) selectedProvider = providers.length - 1;
         saveProviders().then(() => { drawProviders(); });
+      };
+    });
+    wrap.querySelectorAll("[data-move]").forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        const i = +btn.dataset.move;
+        const j = i + +btn.dataset.dir;
+        if (j < 0 || j >= providers.length) return;
+        collectProviders();
+        [providers[i], providers[j]] = [providers[j], providers[i]];
+        if (selectedProvider === i) selectedProvider = j;
+        else if (selectedProvider === j) selectedProvider = i;
+        drawProviders();
+        // re-fetch so a just-added provider picks up its server-assigned id
+        saveProviders().then(() => drawProviders());
       };
     });
     const addBtn = wrap.querySelector("#prov-add");
