@@ -450,6 +450,9 @@ async function refreshCourses() {
       }[c.stage] || c.stage;
       const working = ["downloading", "transcribing", "subtitles", "ocr", "aligning", "generating"].includes(c.stage);
       const badgeCls = c.stage === "ready" ? "ready" : c.stage === "error" ? "error" : working ? "working" : "";
+      // manageable === false -> a course shared with us read-only: study only,
+      // no retry / delete. Undefined (older backend) means "assume yes".
+      const canManage = c.manageable !== false;
       return `
       <div class="course-card" data-id="${c.id}" data-mid="${esc(c.material_id || "")}">
         <div class="cc-title">${esc(c.title)}</div>
@@ -463,10 +466,13 @@ async function refreshCourses() {
                      <div class="cc-detail">${esc(c.detail || "")}</div>` : ""}
         ${c.stage === "ready" ? `<div class="progressbar"><div style="width:${c.learned_percent || 0}%"></div></div>
                                  <div class="cc-detail">已学 ${c.learned_percent || 0}%</div>` : ""}
-        ${c.stage === "uploaded" ? `<button class="primary" data-gen="${c.id}">开始生成</button>` : ""}
-        ${c.stage === "error" ? `<div class="cc-detail" style="color:var(--red)">${esc(c.detail || "")}</div>
-                                 <button class="primary" data-gen="${c.id}">重试</button>` : ""}
-        ${c.material_id ? `<a class="cc-viewmat" href="#/library?hl=${esc(c.material_id)}" title="查看素材" onclick="event.stopPropagation()">📥 素材</a>` : ""}        <button class="cc-del" data-del="${c.id}" title="删除">✕</button>
+        ${c.stage === "uploaded" && canManage ? `<button class="primary" data-gen="${c.id}">开始生成</button>` : ""}
+        ${c.stage === "error" ? `<div class="cc-detail" style="color:var(--red)">${esc(c.detail || "")}</div>` : ""}
+        ${c.stage === "error" && canManage ? `<button class="primary" data-gen="${c.id}">重试</button>` : ""}
+        ${c.material_id ? `<a class="cc-viewmat" href="#/library?hl=${esc(c.material_id)}" title="查看素材" onclick="event.stopPropagation()">📥 素材</a>` : ""}
+        ${canManage
+          ? `<button class="cc-del" data-del="${c.id}" title="删除">✕</button>`
+          : `<span class="badge" style="position:absolute;top:10px;right:10px;background:var(--line);color:var(--ink-3)">只读</span>`}
       </div>`;
     }).join("");
 
@@ -490,8 +496,10 @@ async function refreshCourses() {
       btn.onclick = async (e) => {
         e.stopPropagation();
         if (!confirm("确定删除这门课程？\n只删除课程的学习内容（转写/精讲/进度），原始素材仍保留在素材库。")) return;
-        await api(`/api/courses/${btn.dataset.del}`, { method: "DELETE" });
-        refreshCourses();
+        try {
+          await api(`/api/courses/${btn.dataset.del}`, { method: "DELETE" });
+          refreshCourses();
+        } catch (err) { toast(err.message); }
       };
     });
   } catch (err) {

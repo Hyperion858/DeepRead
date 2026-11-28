@@ -333,48 +333,108 @@ def translate_segments(
     chunks = [todo[i:i + 40] for i in range(0, len(todo), 40)]
     import concurrent.futures as _futures
 
+    def _prompt_for(batch: list[tuple[int, dict[str, Any]]]) -> str:
+        """One prompt shape for both the first pass and the fill-in pass."""
+        lines = [f"[{k}] {s['text']}" for k, s in batch]
+        return (
+            "你是专业字幕翻译。下面是视频逐句文本（中英混合）。逐句翻译成另一种语言："
+            "英文句子翻译成简体中文，中文句子翻译成英文。保留编号，输出 JSON 数组，"
+            '形如 [{"i": 编号, "t": "译文"}]，不要输出其他内容。\n\n' + "\n".join(lines)
+        )
+
+    def _put(target: int, text: str) -> None:
+        """Store one translation for an already-resolved segment index.
+
+        An empty / whitespace-only reply must never wipe an existing value.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        translations[target] = text
+
+    def _apply_reply(reply: str, ids: list[int], idset: set[int]) -> None:
+        """Parse one model reply and store it.
+
+        The numbering is decided ONCE for the whole reply, never per item.
+        A batch can be sparse (ids like [0, 2, 4], because sentences that came
+        with a caption translation are skipped), and then a single number is
+        ambiguous: `0` is both "global id 0" and "first line of this batch".
+        Judging item by item shifted such replies by one and let one
+        translation overwrite another; a batch-wide vote is consistent by
+        construction.
+        """
+        parsed = _extract_json(reply)
+        if not isinstance(parsed, list):
+            raise ValueError("expected JSON array")
+
+        # tolerate three item shapes; keep only (raw index, text) pairs
+        pairs: list[tuple[int, str]] = []
+        for item in parsed:
+            raw_k: int | None = None
+            text = ""
+            if isinstance(item, dict) and "i" in item:
+                try:
+                    raw_k = int(item["i"])
+                except (TypeError, ValueError):
+                    continue
+                text = str(item.get("t", ""))
+            elif isinstance(item, str):
+                m = re.match(r"^\[?(\d+)\]?\s*[.、:：]?\s*(.*)$", item.strip())
+                if not m:
+                    continue
+                raw_k = int(m.group(1))
+                text = m.group(2)
+            elif isinstance(item, dict):
+                idx = item.get("id", item.get("index", item.get("n")))
+                if idx is None:
+                    continue
+                try:
+                    raw_k = int(idx)
+                except (TypeError, ValueError):
+                    continue
+                text = str(item.get("t", item.get("translation", item.get("text", ""))))
+            if raw_k is not None:
+                pairs.append((raw_k, text))
+        if not pairs:
+            return
+
+        keys = [k for k, _ in pairs]
+        hits = sum(1 for k in keys if k in idset)            # look like global ids
+        inrange = sum(1 for k in keys if 0 <= k < len(ids))  # look like batch positions
+
+        # Decide the numbering for the WHOLE reply by which reading resolves
+        # more of it — no fixed threshold. An `all()` / `any()` vote has no
+        # tolerance: one stray hallucinated index either voids the batch or
+        # shifts it wholesale, and a percentage bar just moves the same cliff
+        # to an arbitrary place. A key that resolves under NEITHER reading is
+        # dropped, never guessed: a blank line is refilled by the pass below,
+        # a wrong one is not.
+        if hits >= inrange:                    # global ids echoed back
+            for k, text in pairs:
+                if k in idset:
+                    _put(k, text)
+        else:                                  # batch-relative positions
+            for k, text in pairs:
+                if 0 <= k < len(ids):
+                    _put(ids[k], text)
+
     def _translate_chunk(ci: int) -> None:
         if should_cancel and should_cancel():
             raise PipelineCancelled()
         chunk = chunks[ci]
         # chunk entries are (global_index, segment) pairs
-        lines = [f"[{k}] {s['text']}" for k, s in chunk]
-        prompt = (
-            "你是专业字幕翻译。下面是视频逐句文本（中英混合）。逐句翻译成另一种语言："
-            "英文句子翻译成简体中文，中文句子翻译成英文。保留编号，输出 JSON 数组，"
-            '形如 [{"i": 编号, "t": "译文"}]，不要输出其他内容。\n\n' + "\n".join(lines)
-        )
         ids = [k for k, _ in chunk]
+        idset = set(ids)
+        prompt = _prompt_for(chunk)
         with httpx.Client() as client:
             for attempt in range(3):
                 try:
                     reply = _chat(client, cfg, [{"role": "user", "content": prompt}], temperature=0.2)
-                    parsed = _extract_json(reply)
-                    if not isinstance(parsed, list):
-                        raise ValueError("expected JSON array")
-                    for item in parsed:
-                        if isinstance(item, dict) and "i" in item:
-                            k = int(item["i"])
-                            if 0 <= k < len(ids):
-                                translations[ids[k]] = str(item.get("t", "")).strip()
-                        elif isinstance(item, str):
-                            m = re.match(r"^\[?(\d+)\]?\s*[.、:：]?\s*(.*)$", item.strip())
-                            if m:
-                                k = int(m.group(1))
-                                if 0 <= k < len(ids):
-                                    translations[ids[k]] = m.group(2).strip()
-                        elif isinstance(item, dict):
-                            idx = item.get("id", item.get("index", item.get("n")))
-                            if idx is not None:
-                                k = int(idx)
-                                if 0 <= k < len(ids):
-                                    translations[ids[k]] = str(
-                                        item.get("t", item.get("translation", item.get("text", "")))
-                                    ).strip()
+                    _apply_reply(reply, ids, idset)
                     break
                 except PipelineCancelled:
                     raise
-                except (ValueError, KeyError, RuntimeError, httpx.HTTPError) as exc:
+                except (ValueError, KeyError, RuntimeError, httpx.HTTPError):
                     if attempt == 2:
                         for k in ids:
                             translations.setdefault(k, "")
@@ -397,8 +457,36 @@ def translate_segments(
             done += 1
             if progress_cb:
                 progress_cb(done / len(chunks), f"翻译 {done}/{len(chunks)} 批…")
-    if len(errors) >= len(chunks):
+    # `chunks` is empty when every sentence already carried a caption
+    # translation — that is a success, not "all batches failed".
+    if chunks and len(errors) >= len(chunks):
         raise RuntimeError(f"翻译全部批次失败: {errors[-1]}")
+
+    # One fill-in pass: a batch that came back unparsed (or whose ids the model
+    # mangled) leaves blanks behind. Retry those sentences together in a single
+    # extra request; whatever still fails just stays "" — the lesson layer
+    # tolerates a missing translation, and this must never loop or raise.
+    if should_cancel and should_cancel():
+        raise PipelineCancelled()
+    missing = [i for i in range(len(segments)) if not (translations.get(i) or "").strip()]
+    if missing:
+        batch = [(i, segments[i]) for i in missing[:40]]
+        ids = [k for k, _ in batch]
+        idset = set(ids)
+        if progress_cb:
+            progress_cb(1.0, f"补译 {len(batch)} 句…")
+        try:
+            with httpx.Client() as client:
+                reply = _chat(client, cfg, [{"role": "user", "content": _prompt_for(batch)}],
+                              temperature=0.2)
+            _apply_reply(reply, ids, idset)
+        except PipelineCancelled:
+            raise
+        except Exception:  # noqa: BLE001 — the fill-in pass is best-effort
+            pass
+        for k in ids:
+            translations.setdefault(k, "")
+
     return [translations.get(i, "") for i in range(len(segments))]
 
 

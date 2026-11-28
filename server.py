@@ -111,6 +111,21 @@ def _admin(request: Request) -> dict[str, Any]:
     return u
 
 
+def _owned_material_ids(user_id: str) -> set[str]:
+    """Material ids uploaded by this user (one DB query per request)."""
+    return set(db.owned_material_ids(user_id))
+
+
+def _can_manage_course(user: dict[str, Any], cid: str) -> bool:
+    """Manage = delete / regenerate / cancel. Admin, or the owner of the
+    material the course was built from. Viewers (grants) may only study."""
+    if auth.is_admin(user):
+        return True
+    meta = read_json(course_dir(cid) / "meta.json", {}) or {}
+    mid = meta.get("material_id") or ""
+    return bool(mid) and db.material_owner(mid) == user["id"]
+
+
 # ---------------------------------------------------------------- API: auth
 
 @app.post("/api/auth/login")
@@ -1472,12 +1487,16 @@ def download_logs(category: str):
 @app.get("/api/courses")
 def list_courses(request: Request):
     user = _user(request)
+    is_admin = auth.is_admin(user)
     allowed = db.granted_course_ids(user["id"])
+    # resolved once for the whole list: "manageable" needs the caller's owned
+    # material ids, and a per-card query would hammer the DB
+    owned = set() if is_admin else _owned_material_ids(user["id"])
     items = []
     for cdir in sorted(COURSES_DIR.iterdir(), reverse=True):
         if not cdir.is_dir():
             continue
-        if not auth.is_admin(user) and cdir.name not in allowed:
+        if not is_admin and cdir.name not in allowed:
             continue
         meta = read_json(cdir / "meta.json", {}) or {}
         status = read_json(cdir / "status.json", {}) or {}
@@ -1495,6 +1514,8 @@ def list_courses(request: Request):
             "sentence_count": len((read_json(cdir / "source.json", {}) or {}).get("segments", []) or []),
             "learned_percent": progress.get("learned_percent", 0),
             "material_id": meta.get("material_id", ""),
+            # delete / regenerate / cancel allowed; a grantee is read-only
+            "manageable": True if is_admin else (meta.get("material_id") or "") in owned,
         })
     return items
 
@@ -1562,6 +1583,8 @@ async def generate(cid: str, request: Request):
     user = _user(request)
     if not auth.can_view_course(user, cid):
         raise HTTPException(403, "无权访问该课程")
+    if not _can_manage_course(user, cid):
+        raise HTTPException(403, "只有课程创建者或管理员可以执行此操作")
     if not auth.can_generate(user):
         raise HTTPException(403, "管理员已关闭普通用户生成权限")
     cdir = course_dir(cid)
@@ -1632,6 +1655,8 @@ def cancel(cid: str, request: Request):
     user = _user(request)
     if not auth.can_view_course(user, cid):
         raise HTTPException(403, "无权访问该课程")
+    if not _can_manage_course(user, cid):
+        raise HTTPException(403, "只有课程创建者或管理员可以执行此操作")
     job = JOBS.get(cid)
     if job:
         job.cancelled = True
@@ -1675,6 +1700,8 @@ def delete_course(cid: str, request: Request):
     user = _user(request)
     if not auth.can_view_course(user, cid):
         raise HTTPException(403, "无权访问该课程")
+    if not _can_manage_course(user, cid):
+        raise HTTPException(403, "只有课程创建者或管理员可以执行此操作")
     cdir = course_dir(cid)
     if not cdir.exists():
         raise HTTPException(404, "课程不存在")
@@ -1838,12 +1865,34 @@ def media_file(cid: str, request: Request):
 
 # ---------------------------------------------------------------- static frontend
 
+def _asset_version(name: str) -> str:
+    """Cache-buster for a /static asset: its mtime as a unix timestamp.
+
+    The frontend ships inside the image, so an asset's mtime moves exactly when
+    the image is rebuilt. That replaces hand-bumping `?v=NN` in index.html —
+    and a forgotten bump is precisely how the fixed mobile CSS once shipped
+    stale to every browser still holding the old `?v=72`.
+    """
+    try:
+        return str(int((APP_DIR / name).stat().st_mtime))
+    except OSError:
+        return "0"
+
+
 @app.get("/")
 def index():
-    return FileResponse(
-        APP_DIR / "index.html",
-        headers={"Cache-Control": "no-cache"},
-    )
+    """Serve index.html with the `?v=__V__` placeholders filled in.
+
+    index.html stays a plain file on disk (no template engine); the page is
+    ~340 bytes, so a read + two string replaces per request is free.
+    """
+    html = (APP_DIR / "index.html").read_text(encoding="utf-8")
+    for name in ("styles.css", "app.js"):
+        html = html.replace(
+            f"/static/{name}?v=__V__",
+            f"/static/{name}?v={_asset_version(name)}",
+        )
+    return Response(html, media_type="text/html", headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=APP_DIR), name="static")
