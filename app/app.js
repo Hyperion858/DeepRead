@@ -1141,15 +1141,16 @@ function renderSettings() {
         const st = provStatus(p);
         const n = (globalPool[p.id] || []).length;
         return `
-        <div class="prov-mini ${selectedProvider === i ? "on" : ""}" data-select="${i}" title="${esc(p.base_url)}">
+        <div class="prov-mini ${selectedProvider === i ? "on" : ""}" data-select="${i}" title="${esc(p.base_url)}" draggable="true">
           <div class="prov-mini-head">
+            <span class="prov-grip" title="拖动排序">⠿</span>
             <span class="prov-dot ${st.cls}"></span>
             <span class="prov-mini-name">${esc(p.name || `API ${i + 1}`)}</span>
             <span class="prov-mini-order-btns">
-              <button class="pm-up" data-move="${i}" data-dir="-1" title="上移" ${i === 0 ? "disabled" : ""}>▲</button>
-              <button class="pm-down" data-move="${i}" data-dir="1" title="下移" ${i === providers.length - 1 ? "disabled" : ""}>▼</button>
+              <button class="pm-up" data-move="${i}" data-dir="-1" draggable="false" title="上移" ${i === 0 ? "disabled" : ""}>▲</button>
+              <button class="pm-down" data-move="${i}" data-dir="1" draggable="false" title="下移" ${i === providers.length - 1 ? "disabled" : ""}>▼</button>
             </span>
-            <button class="p-del" data-del="${i}" title="删除">✕</button>
+            <button class="p-del" data-del="${i}" draggable="false" title="删除">✕</button>
           </div>
           <div class="prov-mini-sub">${st.text}${n ? ` · ${n} 个模型` : ""}</div>
         </div>`;
@@ -1176,16 +1177,53 @@ function renderSettings() {
     wrap.querySelectorAll("[data-move]").forEach((btn) => {
       btn.onclick = (e) => {
         e.stopPropagation();
-        const i = +btn.dataset.move;
-        const j = i + +btn.dataset.dir;
-        if (j < 0 || j >= providers.length) return;
-        collectProviders();
-        [providers[i], providers[j]] = [providers[j], providers[i]];
-        if (selectedProvider === i) selectedProvider = j;
-        else if (selectedProvider === j) selectedProvider = i;
-        drawProviders();
-        // re-fetch so a just-added provider picks up its server-assigned id
-        saveProviders().then(() => drawProviders());
+        moveProvider(+btn.dataset.move, +btn.dataset.move + +btn.dataset.dir);
+      };
+    });
+    // HTML5 drag-and-drop reorder (the ⠿ grip and card body both drag)
+    let dragFrom = -1;
+    const clearDropMarks = () => {
+      wrap.querySelectorAll(".drop-before,.drop-after").forEach((x) =>
+        x.classList.remove("drop-before", "drop-after"));
+    };
+    wrap.querySelectorAll(".prov-mini").forEach((el) => {
+      el.ondragstart = (e) => {
+        if (e.target.closest("button")) { e.preventDefault(); return; }
+        dragFrom = +el.dataset.select;
+        e.dataTransfer.effectAllowed = "move";
+        try { e.dataTransfer.setData("text/plain", String(dragFrom)); } catch {}
+        el.classList.add("dragging");
+      };
+      el.ondragover = (e) => {
+        if (dragFrom < 0) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        const r = el.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        clearDropMarks();
+        el.classList.add(after ? "drop-after" : "drop-before");
+      };
+      el.ondragleave = (e) => {
+        if (e.relatedTarget && el.contains(e.relatedTarget)) return;
+        el.classList.remove("drop-before", "drop-after");
+      };
+      el.ondrop = (e) => {
+        if (dragFrom < 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const target = +el.dataset.select;
+        const r = el.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        let to = target + (after ? 1 : 0);
+        if (dragFrom < to) to -= 1;
+        clearDropMarks();
+        moveProvider(dragFrom, to);
+        dragFrom = -1;
+      };
+      el.ondragend = () => {
+        el.classList.remove("dragging");
+        clearDropMarks();
+        dragFrom = -1;
       };
     });
     const addBtn = wrap.querySelector("#prov-add");
@@ -1197,6 +1235,22 @@ function renderSettings() {
       const nameInput = document.querySelector("#stab-providers .prov-detail .p-name");
       if (nameInput) nameInput.focus();
     };
+  }
+
+  // Move a provider to an arbitrary index, keep the selection on it, persist.
+  function moveProvider(from, to) {
+    const n = providers.length;
+    if (from < 0 || from >= n) return;
+    to = Math.max(0, Math.min(n - 1, to));
+    if (to === from) return;
+    collectProviders();
+    const selObj = providers[selectedProvider] || null;
+    const [moved] = providers.splice(from, 1);
+    providers.splice(to, 0, moved);
+    selectedProvider = selObj ? providers.indexOf(selObj) : -1;
+    drawProviders();
+    // re-fetch so a just-added provider picks up its server-assigned id
+    saveProviders().then(() => drawProviders());
   }
 
   // Right column: the selected provider's edit form + its model list in one card.

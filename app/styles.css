@@ -342,6 +342,12 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
 .prov-mini-order-btns { display: flex; gap: 1px; flex-shrink: 0; }
 .prov-mini .pm-up, .prov-mini .pm-down { padding: 0 2px; font-size: 9px; line-height: 1.4; }
 .prov-mini .pm-up:hover:not(:disabled), .prov-mini .pm-down:hover:not(:disabled) { background: none; }
+/* drag-to-reorder: grip + drop-position line */
+.prov-grip { color: var(--ink-3); font-size: 11px; letter-spacing: -1px; cursor: grab; flex-shrink: 0; }
+.prov-mini:active .prov-grip { cursor: grabbing; }
+.prov-mini.dragging { opacity: .45; }
+.prov-mini.drop-before { box-shadow: 0 -2px 0 0 var(--accent); }
+.prov-mini.drop-after { box-shadow: 0 2px 0 0 var(--accent); }
 .prov-card-hit { cursor: pointer; display: flex; flex-direction: column; gap: 3px; min-width: 0; min-height: 0; }
 .prov-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .prov-dot { width: 8px; height: 8px; border-radius: 50%; background: #c7cdd6; flex-shrink: 0; }
