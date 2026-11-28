@@ -762,6 +762,7 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
   .sidebar {
     width: 100%; flex-direction: row; align-items: center;
     padding: 8px 12px; gap: 8px;
+    height: auto; min-height: 0; position: static; overflow: visible;
   }
   .logo { padding: 0 6px; font-size: 15px; white-space: nowrap; }
   .sidebar nav { flex-direction: row; overflow-x: auto; scrollbar-width: none; flex: 1; }

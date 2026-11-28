@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,8 +130,6 @@ def restore_backup(data_dir: Path, archive: Path) -> dict[str, Any]:
     """Restore config + course JSONs from archive. Media files are NOT restored
     (they aren't in the archive); courses come back with status 'ready' but the
     player needs the media re-uploaded into data/media with the same filename."""
-    import shutil
-
     result = {"courses": 0, "config": False, "missing_media": []}
     with zipfile.ZipFile(archive) as zf:
         names = zf.namelist()

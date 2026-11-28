@@ -122,6 +122,9 @@ def _resolve_provider(cfg: dict[str, Any], provider_key: str) -> dict[str, Any]:
 
 # ---- model lists ----
 
+# 单次调用最多尝试的候选模型数：防止用户在「转写设置」里选太多导致串行重试过久
+_MODEL_LIMIT = {"chat": 8, "asr": 6, "vision": 6}
+
 
 def ordered_models(cfg: dict[str, Any], model_key: str,
                    role: str, list_key: str = "") -> list[str]:

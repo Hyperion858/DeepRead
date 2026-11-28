@@ -9,6 +9,7 @@ one provider.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shutil
@@ -1318,7 +1319,7 @@ def material_delete(mid: str, request: Request):
 
 
 @app.post("/api/materials/{mid}/generate")
-def material_generate(mid: str, request: Request = None):
+async def material_generate(mid: str, request: Request):
     """Create a course from a material and start the pipeline.
 
     Body (optional JSON): {"channels": ["embedded","ocr","asr"]} — at least one.
@@ -1330,12 +1331,10 @@ def material_generate(mid: str, request: Request = None):
     if not auth.can_generate(user):
         raise HTTPException(403, "管理员已关闭普通用户生成权限")
     body = {}
-    if request is not None:
-        try:
-            import asyncio
-            body = asyncio.get_event_loop().run_until_complete(request.json())
-        except Exception:
-            body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
     channels_in = body.get("channels")
     valid = {"embedded", "ocr", "asr"}
     if isinstance(channels_in, list) and channels_in:
@@ -1559,7 +1558,7 @@ async def upload(request: Request, file: UploadFile = File(...)):
 
 
 @app.post("/api/courses/{cid}/generate")
-def generate(cid: str, request: Request = None):
+async def generate(cid: str, request: Request):
     user = _user(request)
     if not auth.can_view_course(user, cid):
         raise HTTPException(403, "无权访问该课程")
@@ -1579,12 +1578,10 @@ def generate(cid: str, request: Request = None):
     if not get_provider_cfg(cfg, "chat").get("base_url"):
         raise HTTPException(400, "Chat provider 未配置")
     body = {}
-    if request is not None:
-        try:
-            import asyncio
-            body = asyncio.get_event_loop().run_until_complete(request.json())
-        except Exception:
-            body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
     # channel choice: request override > meta.channels > material's last choice
     valid = {"embedded", "ocr", "asr"}
     meta = read_json(cdir / "meta.json", {}) or {}
