@@ -9,6 +9,7 @@ Also merges fragmented ASR segments into sentence-level units.
 from __future__ import annotations
 
 import json
+import math
 import re
 from difflib import SequenceMatcher
 from typing import Any
@@ -28,6 +29,107 @@ def _similarity(a: str, b: str) -> float:
     if not na or not nb:
         return 0.0
     return SequenceMatcher(None, na, nb).ratio()
+
+
+# fusion output authority, highest first (arbitrated = LLM-merged final text)
+_SOURCE_WEIGHT = {"arbitrated": 4, "embedded": 3, "caption": 3, "OCR": 2, "asr": 1}
+
+
+def _source_weight(seg: dict[str, Any]) -> int:
+    return _SOURCE_WEIGHT.get(str(seg.get("source", "")), 1)
+
+
+def canonicalize_timeline(
+    segments: list[dict[str, Any]], overlap_tol: float = 0.25
+) -> list[dict[str, Any]]:
+    """Force the fused timeline into its canonical form (last line of defense
+    before the A4 gate; observed live failures: a borrowed caption end
+    swallowing the next ASR sentence, and a 0:00 title/orphan caption
+    duplicating the first spoken sentence).
+
+    Steps:
+      * drop non-finite / degenerate entries, clamp negative starts;
+      * stable sort by (start, end);
+      * overlaps > overlap_tol are resolved pairwise against the previous
+        kept entry:
+          - similar texts (> 0.6) = the SAME sentence reported by two
+            channels -> keep the more authoritative one (source weight, then
+            text length) and merge the covered span;
+          - distinct sentences -> an entry fully contained in the previous
+            one is a decorative caption (logo/title) inside a real sentence
+            and is dropped (trimming the container would gut coverage);
+            a partial overlap trims the boundary of the shorter-text entry
+            (source weight as tie-break); an entry trimmed below 0.2 s of
+            duration is dropped entirely.
+
+    The result is guaranteed to pass the overlap part of ``validate_timeline``.
+    """
+    clean: list[dict[str, Any]] = []
+    for seg in segments:
+        try:
+            start = float(seg.get("start", 0) or 0)
+            end = float(seg.get("end", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(start) and math.isfinite(end)):
+            continue
+        start = max(start, 0.0)
+        if end <= start:
+            continue
+        clean.append({**seg, "start": start, "end": end})
+    clean.sort(key=lambda s: (s["start"], s["end"]))
+
+    out: list[dict[str, Any]] = []
+    for seg in clean:
+        cur: dict[str, Any] | None = seg
+        while cur is not None:
+            if not out:
+                out.append(cur)
+                break
+            prev = out[-1]
+            if cur["start"] >= prev["end"] - overlap_tol:
+                out.append(cur)
+                break
+            if _similarity(prev["text"], cur["text"]) > 0.6:
+                # same sentence from two channels: keep the better one and
+                # merge the covered span (keeps coverage, kills the dupe)
+                prev_key = (_source_weight(prev), len(_norm(prev["text"])))
+                cur_key = (_source_weight(cur), len(_norm(cur["text"])))
+                better = cur if cur_key > prev_key else prev
+                cur = {
+                    **better,
+                    "start": min(prev["start"], cur["start"]),
+                    "end": max(prev["end"], cur["end"]),
+                }
+                out.pop()           # re-compare the merged entry vs the new tail
+                continue
+            # distinct sentences overlapping. A fully-contained entry is a
+            # decorative caption inside a real sentence (observed: a 1 s
+            # "LOGO" frame inside a 30 s spoken sentence) -> drop it; the
+            # container's span is the coverage that the gate measures.
+            if cur["end"] <= prev["end"]:
+                cur = None
+                break
+            # partial overlap: trim the boundary of the shorter-text entry
+            # (weight as tie-break) — keep the better/longer text
+            prev_key = (len(_norm(prev["text"])), _source_weight(prev))
+            cur_key = (len(_norm(cur["text"])), _source_weight(cur))
+            if cur_key < prev_key:
+                cur = {**cur, "start": prev["end"]}
+                if cur["end"] - cur["start"] < 0.2:
+                    cur = None       # fully swallowed -> drop
+                else:
+                    out.append(cur)
+                    break
+            else:
+                trimmed = {**prev, "end": min(prev["end"], cur["start"])}
+                if trimmed["end"] - trimmed["start"] < 0.2:
+                    out.pop()        # prev fully swallowed -> compare vs out[-2]
+                    continue
+                out[-1] = trimmed
+                out.append(cur)
+                break
+    return out
 
 
 def merge_asr_fragments(segments: list[dict[str, Any]], max_dur: float = 8.0, max_chars: int = 200) -> list[dict[str, Any]]:
@@ -138,7 +240,18 @@ def _warp_asr_to_cues(asr: list[dict[str, Any]], cues: list[dict[str, Any]]) -> 
         if out[idx] is not None:
             tail_cursor = None
             continue
-        prev_anchor = next((a for a in anchors if a[0] < idx), None)
+        # NEAREST previous anchor (anchors are sorted by asr index, so keep
+        # the last one below idx) — picking the first one below idx instead
+        # pinned `lo` to the FIRST anchor's cue end and let the spread
+        # multiplier grow without bound (observed farm/lawyer: unmatched
+        # segments scattered to 200 s+ on a 196 s video, overlapping the
+        # real timeline until the A4 gate rejected the course)
+        prev_anchor = None
+        for a in anchors:
+            if a[0] < idx:
+                prev_anchor = a
+            else:
+                break
         next_anchor = next((a for a in anchors if a[0] > idx), None)
         lo = prev_anchor[2] if prev_anchor else (asr[idx]["start"] if not next_anchor else 0.0)
         hi = next_anchor[1] if next_anchor else None
@@ -157,22 +270,36 @@ def _warp_asr_to_cues(asr: list[dict[str, Any]], cues: list[dict[str, Any]]) -> 
             if tail_cursor is None:
                 tail_cursor = max(lo, 0.0)
             new_start = tail_cursor
-            tail_cursor = new_start + dur
+            end = new_start + dur
+            tail_cursor = end
         else:
-            # spread unmatched segments evenly in [lo, hi)
+            # spread the run of unmatched segments evenly in [lo, hi)
+            run_start = (prev_anchor[0] + 1) if prev_anchor else 0
+            run = next_anchor[0] - run_start
+            before = idx - run_start
             gap = hi - lo
-            # count consecutive unmatched segments from idx
-            run = 0
-            k = idx
-            while k < n and out[k] is None:
-                run += 1
-                k += 1
-            before = idx - (prev_anchor[0] + 1 if prev_anchor else 0)
-            new_start = max(lo + gap * (before / max(run, 1)), 0.0)
+            run_total = sum(
+                max(asr[k]["end"] - asr[k]["start"], 0.1)
+                for k in range(run_start, next_anchor[0])
+            )
+            if run_total > gap > 0:
+                # the run's ASR-estimated durations cannot fit the anchored
+                # gap — tile the gap evenly instead (original durations would
+                # overlap the next anchor; observed farm: the resulting fused
+                # overlaps got canonicalized away and coverage fell < 80%)
+                slot = gap / max(run, 1)
+                new_start = lo + slot * before
+                end = lo + slot * (before + 1)
+            else:
+                new_start = max(lo + gap * (before / max(run, 1)), 0.0)
+                # never spill past the next anchor (the even spread puts the
+                # run's last segment at hi + dur when its own dur exceeds
+                # the per-slot share)
+                end = min(new_start + dur, hi)
         out[idx] = {
             **seg,
             "start": new_start,
-            "end": new_start + dur,
+            "end": end,
         }
     result = [x for x in out if x]
     result.sort(key=lambda x: x["start"])
@@ -251,7 +378,7 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
                     "uncertain": False,
                 })
         results.sort(key=lambda x: x["start"])
-        return results
+        return canonicalize_timeline(results)
 
     # when cues have trustworthy timing, warp the ASR timeline onto them
     asr = _warp_asr_to_cues(asr, embedded)
@@ -265,7 +392,7 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
     # baseline: keep the caption text unless ASR clearly carries more content.
     base_is_caption = align_base in ("ocr", "embedded")
 
-    for seg in asr:
+    for k, seg in enumerate(asr):
         s_start, s_end = seg["start"], seg["end"]
         span = max(s_end - s_start, 0.1)
         # embedded lines overlapping this ASR segment by >30% of their own duration
@@ -348,29 +475,55 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
             if overlapping and not seg.get("aligned_to_cue"):
                 first = overlapping[0][1]
                 last = overlapping[-1][1]
-                results.append({
-                    **seg,
-                    "start": min(seg["start"], first["start"]),
-                    "end": max(seg["end"], last["end"]),
-                    "source": "asr",
-                    "uncertain": True,
-                })
+                new_start = min(seg["start"], first["start"])
+                new_end = max(seg["end"], last["end"])
+                # clamp the borrowed window to the ASR neighbours: the caption
+                # span must never swallow the previous or the next ASR
+                # sentence (observed farm: borrowed end 30.76 > next
+                # sentence's start 23.72 -> A4 gate rejected the course)
+                if k > 0:
+                    new_start = max(new_start, asr[k - 1]["end"])
+                if k + 1 < len(asr):
+                    new_end = min(new_end, asr[k + 1]["start"])
+                if new_end - new_start > 0.1:
+                    results.append({
+                        **seg,
+                        "start": new_start,
+                        "end": new_end,
+                        "source": "asr",
+                        "uncertain": True,
+                    })
+                else:
+                    results.append({**seg, "source": "asr", "uncertain": True})
             else:
                 results.append({**seg, "source": "asr", "uncertain": True})
 
-    # embedded lines that matched no ASR segment (e.g. ASR dropped them): append
+    # embedded lines that matched no ASR segment (e.g. ASR dropped them): append.
+    # EXCEPT captions that merely duplicate an already-emitted sentence:
+    # a 0:00 title card overlapping the first spoken sentence used to slip
+    # in as a second entry starting at 0.00 (observed lawyer: gate rejected
+    # "第 1 句 start 0.00 < prev_end 4.49")
     orphans = [embedded[i] for i in range(len(embedded)) if i not in used_embedded]
     for sub in orphans:
-        if _norm(sub["text"]):
-            results.append({
-                "start": sub["start"],
-                "end": sub["end"],
-                "text": sub["text"],
-                "lang": sub.get("lang") or detect_lang(sub["text"]),
-                "caption_translation": sub.get("caption_translation", ""),
-                "source": "embedded",
-                "uncertain": False,
-            })
+        if not _norm(sub["text"]):
+            continue
+        sub_dur = max(sub["end"] - sub["start"], 0.1)
+        duplicated = any(
+            (min(sub["end"], r["end"]) - max(sub["start"], r["start"])) > 0.5 * sub_dur
+            and _similarity(sub["text"], r["text"]) > 0.5
+            for r in results
+        )
+        if duplicated:
+            continue
+        results.append({
+            "start": sub["start"],
+            "end": sub["end"],
+            "text": sub["text"],
+            "lang": sub.get("lang") or detect_lang(sub["text"]),
+            "caption_translation": sub.get("caption_translation", ""),
+            "source": "embedded",
+            "uncertain": False,
+        })
 
     results.sort(key=lambda x: x["start"])
 
@@ -399,7 +552,10 @@ def align(asr_segments: list[dict[str, Any]], embedded: list[dict[str, Any]],
             continue
         seen.add(key)
         deduped.append(seg)
-    return deduped
+    # canonical form: sorted + overlaps resolved — the A4 gate must never
+    # see raw fusion residue again (canonicalize_timeline is the net for
+    # anything the per-branch source fixes above missed)
+    return canonicalize_timeline(deduped)
 
 
 def _arbiter_prompt(ambiguous: list[dict[str, Any]]) -> str:

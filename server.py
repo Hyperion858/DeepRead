@@ -829,6 +829,25 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
             # loudly instead of shipping garbage to the UI.
             gate_ok, gate_reason = validate_timeline(segments, media_dur)
             if not gate_ok:
+                # permanent failure evidence: the violating fused timeline plus
+                # every channel's raw input, so a live failure can be diagnosed
+                # without re-running ASR. Lives in the course dir -> removed
+                # together with the course.
+                try:
+                    write_json(cdir / "gate_debug.json", {
+                        "reason": gate_reason,
+                        "media_duration": media_dur,
+                        "align_base": align_base,
+                        "channels": sorted(channels),
+                        "fused": segments,
+                        "channel_inputs": {
+                            "asr": asr_segments,
+                            "embedded": embedded_lines,
+                            "ocr": ocr_lines,
+                        },
+                    })
+                except Exception:  # noqa: BLE001 — the dump must not mask the gate error
+                    pass
                 raise RuntimeError(f"时间戳终检未通过，课程不落盘: {gate_reason}")
             write_json(cdir / "source.json", {"segments": segments})
 
