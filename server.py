@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -143,16 +145,85 @@ auth.set_course_owner(_owns_course)
 
 # ---------------------------------------------------------------- API: auth
 
+# In-process login rate limiting: per "username + client IP" failure counter
+# over a sliding window. Single-process uvicorn (no multi-worker), so a plain
+# dict guarded by a lock is sufficient — no external dependency needed.
+LOGIN_FAIL_LIMIT = 5          # consecutive failures allowed per window
+LOGIN_FAIL_WINDOW = 15 * 60   # sliding window in seconds
+_login_failures: dict[str, list[float]] = {}
+_login_failures_lock = threading.Lock()
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP (respects the reverse-proxy header first)."""
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _login_key(request: Request, username: str) -> str:
+    return f"{username}|{_client_ip(request)}"
+
+
+def _login_failure_count(key: str) -> int:
+    """Prune expired entries and return the current failure count."""
+    now = time.monotonic()
+    with _login_failures_lock:
+        recent = [t for t in _login_failures.get(key, [])
+                  if now - t < LOGIN_FAIL_WINDOW]
+        if recent:
+            _login_failures[key] = recent
+        else:
+            _login_failures.pop(key, None)
+        return len(recent)
+
+
+def _record_login_failure(key: str) -> int:
+    now = time.monotonic()
+    with _login_failures_lock:
+        recent = [t for t in _login_failures.get(key, [])
+                  if now - t < LOGIN_FAIL_WINDOW]
+        recent.append(now)
+        _login_failures[key] = recent
+        return len(recent)
+
+
+def _clear_login_failures(key: str) -> None:
+    with _login_failures_lock:
+        _login_failures.pop(key, None)
+
+
+def _enforce_login_rate(key: str) -> None:
+    """Reject the attempt with 429 once the failure budget is exhausted."""
+    if _login_failure_count(key) < LOGIN_FAIL_LIMIT:
+        return
+    now = time.monotonic()
+    with _login_failures_lock:
+        stamps = _login_failures.get(key, [])
+        retry_after = max(1, int(LOGIN_FAIL_WINDOW - (now - stamps[0]))) if stamps else 1
+    raise HTTPException(
+        429,
+        "登录失败次数过多，请稍后再试",
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 @app.post("/api/auth/login")
 async def login(request: Request):
     body = await request.json()
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
+    key = _login_key(request, username)
+    _enforce_login_rate(key)
     user = db.get_user_by_name(username)
     if not user or not auth.verify_password(password, user["password_hash"]):
+        _record_login_failure(key)
         raise HTTPException(401, "用户名或密码错误")
     if user.get("disabled"):
+        _record_login_failure(key)
         raise HTTPException(403, "账号已被禁用")
+    _clear_login_failures(key)
     resp = JSONResponse({"ok": True, "user": {
         "id": user["id"], "username": user["username"],
         "role": user["role"], "display_name": user.get("display_name", ""),
@@ -333,13 +404,14 @@ def load_config() -> dict[str, Any]:
             stored = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
             stored = {}
-        if stored.get("providers"):
-            cfg.update({k: v for k, v in stored.items() if k in DEFAULT_CONFIG})
-            # the old priority lists carried the effective model when none was set
-            for role in ("chat", "asr", "vision"):
-                if not cfg.get(f"{role}_model") and stored.get(f"{role}_models"):
-                    cfg[f"{role}_model"] = stored[f"{role}_models"][0]
-        else:
+        if not isinstance(stored, dict):
+            stored = {}
+        # Merge stored keys FIRST, regardless of whether providers is non-empty:
+        # when the user clears every provider (providers: []) the file still
+        # holds all other settings, and skipping the merge here used to reset
+        # them to defaults on the next load.
+        cfg.update({k: v for k, v in stored.items() if k in DEFAULT_CONFIG})
+        if not stored.get("providers"):
             # migrate legacy flat configs (single API or two-group) into providers
             legacy_groups = []
             if stored.get("base_url") or stored.get("api_key"):
@@ -371,11 +443,21 @@ def load_config() -> dict[str, Any]:
                 cfg["chat_model"] = stored.get("chat_model") or ""
                 # persist the migration so provider ids stay stable across restarts
                 save_config(cfg)
+        # the old priority lists carried the effective model when none was set
+        for role in ("chat", "asr", "vision"):
+            if not cfg.get(f"{role}_model") and cfg.get(f"{role}_models"):
+                cfg[f"{role}_model"] = cfg[f"{role}_models"][0]
     return cfg
 
 
 def save_config(cfg: dict[str, Any]) -> None:
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # atomic write with a unique temp name: concurrent config saves must not
+    # clobber each other's partial file (same pattern as write_json below)
+    tmp = CONFIG_PATH.with_suffix(
+        CONFIG_PATH.suffix + f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_replace(tmp, CONFIG_PATH)
 
 
 def get_provider_cfg(cfg: dict[str, Any], group: str) -> dict[str, Any]:
@@ -437,6 +519,21 @@ class JobState:
 JOBS: dict[str, JobState] = {}
 JOBS_LOCK = threading.RLock()  # guards check-then-act on the job registry
 
+# Fine-grained per-course locks for the status.json read-modify-write cycle
+# in set_stage (concurrent progress callbacks from OCR/ASR worker threads
+# used to race on the shared status file). Same pattern as JOBS_LOCK.
+_COURSE_LOCKS: dict[str, threading.Lock] = {}
+_COURSE_LOCKS_GUARD = threading.Lock()
+
+
+def _course_lock(cid: str) -> threading.Lock:
+    with _COURSE_LOCKS_GUARD:
+        lock = _COURSE_LOCKS.get(cid)
+        if lock is None:
+            lock = threading.Lock()
+            _COURSE_LOCKS[cid] = lock
+        return lock
+
 
 def course_dir(cid: str) -> Path:
     return COURSES_DIR / cid
@@ -468,15 +565,44 @@ def read_json(path: Path, default: Any = None) -> Any:
         return default
 
 
+def _atomic_replace(tmp: Path, path: Path) -> None:
+    """os.replace with a short retry: on Windows, two concurrent replaces to
+    the same destination can transiently fail with WinError 5 while the target
+    is being swapped. Linux (the deploy target) never hits this."""
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.02 * (attempt + 1))
+
+
 def write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    # unique temp name per write: a fixed ".tmp" let two threads writing the
+    # same target clobber each other's file between write and replace
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    _atomic_replace(tmp, path)
 
 
 def new_course_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:6]
+
+
+def _cleanup_course_intermediates(cid: str) -> None:
+    """Delete regenerable pipeline intermediates once a course succeeded.
+
+    Both directories are rebuilt from media.mp4 by ffmpeg on every (re)generate:
+    - audio/      full.wav + segmented wav/mp3 parts (extract_audio in transcribe)
+    - ocr_frames/ sampled frames f*.jpg (ocr.py); the recognized text already
+      persists in source.json, so no model re-runs are needed to rebuild
+    Never touches media.mp4, source.json, lesson.json, meta.json etc.
+    """
+    for name in ("audio", "ocr_frames"):
+        shutil.rmtree(course_dir(cid) / name, ignore_errors=True)
 
 
 def cfg_default_align_base() -> str:
@@ -485,19 +611,23 @@ def cfg_default_align_base() -> str:
 
 
 def set_stage(cid: str, stage: str, detail: str = "", progress: float | None = None) -> None:
-    status = read_json(course_dir(cid) / "status.json", {}) or {}
-    # disk-level kill switch: a cancelled status halts any further stage writes
-    # (covers the restart-wipes-JOBS case where in-memory cancel flags vanish)
-    if status.get("stage") in ("cancelled",) and stage not in ("cancelled",):
-        raise PipelineCancelled()
-    status.update({
-        "stage": stage,
-        "detail": detail,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    })
-    if progress is not None:
-        status["progress"] = round(max(0.0, min(1.0, progress)), 3)
-    write_json(course_dir(cid) / "status.json", status)
+    # serialize the read-modify-write on status.json: worker threads emit
+    # progress callbacks concurrently and a torn update used to lose fields
+    with _course_lock(cid):
+        status = read_json(course_dir(cid) / "status.json", {}) or {}
+        # disk-level kill switch: a cancelled status halts any further stage
+        # writes (covers the restart-wipes-JOBS case where in-memory cancel
+        # flags vanish)
+        if status.get("stage") in ("cancelled",) and stage not in ("cancelled",):
+            raise PipelineCancelled()
+        status.update({
+            "stage": stage,
+            "detail": detail,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        if progress is not None:
+            status["progress"] = round(max(0.0, min(1.0, progress)), 3)
+        write_json(course_dir(cid) / "status.json", status)
 
 
 def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = None,
@@ -613,6 +743,9 @@ def run_pipeline(cid: str, timeout_sec: int = 7200, channels: set[str] | None = 
             meta["duration"] = sum((s.get("end", 0) - s.get("start", 0)) for s in segments) or meta.get("duration")
             write_json(cdir / "meta.json", meta)
             set_stage(cid, "ready", "课程生成完成", 1.0)
+            # success is a terminal state: reclaim the regenerable intermediates
+            # (audio/ + ocr_frames/, 300-400MB per course)
+            _cleanup_course_intermediates(cid)
             log_event("pipeline", f"课程生成完成", course_id=cid,
                       detail=f"通道: {sorted(channels)}, 句子数: {len(segments)}")
         except PipelineCancelled:
@@ -1907,14 +2040,32 @@ def _progress_path(cid: str, uid: str) -> Path:
     return course_dir(cid) / f"progress_{uid}.json"
 
 
+# The client always POSTs the full progress snapshot (read/cards/percent), so
+# writes keep last-wins semantics — the lock only serializes them so a slow
+# write can never interleave with a read-modify-write cycle (e.g. the
+# bootstrap-admin legacy migration in _load_progress).
+_PROGRESS_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_PROGRESS_LOCKS_GUARD = threading.Lock()
+
+
+def _progress_lock(cid: str, uid: str) -> threading.Lock:
+    with _PROGRESS_LOCKS_GUARD:
+        lock = _PROGRESS_LOCKS.get((cid, uid))
+        if lock is None:
+            lock = threading.Lock()
+            _PROGRESS_LOCKS[(cid, uid)] = lock
+        return lock
+
+
 def _load_progress(cid: str, uid: str) -> dict[str, Any]:
-    prog = read_json(_progress_path(cid, uid), {}) or {}
-    if not prog and _BOOTSTRAP_ADMIN and uid == _BOOTSTRAP_ADMIN["id"]:
-        legacy = course_dir(cid) / "progress.json"
-        if legacy.exists():
-            prog = read_json(legacy, {}) or {}
-            if prog:
-                write_json(_progress_path(cid, uid), prog)
+    with _progress_lock(cid, uid):
+        prog = read_json(_progress_path(cid, uid), {}) or {}
+        if not prog and _BOOTSTRAP_ADMIN and uid == _BOOTSTRAP_ADMIN["id"]:
+            legacy = course_dir(cid) / "progress.json"
+            if legacy.exists():
+                prog = read_json(legacy, {}) or {}
+                if prog:
+                    write_json(_progress_path(cid, uid), prog)
     return prog
 
 
@@ -1934,7 +2085,8 @@ async def post_progress(cid: str, request: Request):
     if not course_dir(cid).exists():
         raise HTTPException(404, "课程不存在")
     body = await request.json()
-    write_json(_progress_path(cid, user["id"]), body)
+    with _progress_lock(cid, user["id"]):
+        write_json(_progress_path(cid, user["id"]), body)
     return {"ok": True}
 
 
