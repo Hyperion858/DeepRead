@@ -18,6 +18,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server.py .
+COPY db.py .
+COPY auth.py .
 COPY pipeline/ pipeline/
 COPY app/ app/
 

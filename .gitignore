@@ -11,3 +11,6 @@ __pycache__/
 .vscode/
 .idea/
 .dev/
+
+# WorkBuddy project data (memory logs etc.) — local only
+.workbuddy/

@@ -9,7 +9,10 @@ const state = {
   tab: "read",
   abLoop: null,
   pollTimer: null,
+  user: null,  // logged-in user {id, username, role, display_name}
 };
+
+const isAdmin = () => state.user?.role === "admin";
 
 /* ---------------- utils ---------------- */
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({
@@ -51,6 +54,11 @@ async function api(path, opts = {}) {
     headers: opts.body instanceof FormData ? {} : { "Content-Type": "application/json" },
     ...opts,
   });
+  if (r.status === 401 && path !== "/api/auth/login" && path !== "/api/auth/me") {
+    state.user = null;
+    renderLogin("登录已过期，请重新登录");
+    throw new Error("请先登录");
+  }
   if (!r.ok) {
     let detail = "";
     try { detail = (await r.json()).detail || ""; } catch {}
@@ -61,46 +69,120 @@ async function api(path, opts = {}) {
 
 /* ---------------- layout shell ---------------- */
 const NAV = [
-  { hash: "#/",           key: "home",      icon: "🏠", label: "首页" },
-  { hash: "#/library",    key: "library",   icon: "📥", label: "素材库" },
-  { hash: "#/courses",    key: "courses",   icon: "📚", label: "课程库" },
-  { hash: "#/settings",   key: "settings",  icon: "🧠", label: "模型配置" },
-  { hash: "#/transcribe", key: "transcribe", icon: "🎙", label: "转写设置" },
-  { hash: "#/backup",     key: "backup",    icon: "💾", label: "备份恢复" },
-  { hash: "#/logs",       key: "logs",      icon: "📋", label: "日志" },
+  { hash: "#/",           key: "home",      icon: "🏠", label: "首页",       adminOnly: false },
+  { hash: "#/library",    key: "library",   icon: "📥", label: "素材库",     adminOnly: false },
+  { hash: "#/courses",    key: "courses",   icon: "📚", label: "课程库",     adminOnly: false },
+  { hash: "#/settings",   key: "settings",  icon: "🧠", label: "模型配置",   adminOnly: true },
+  { hash: "#/transcribe", key: "transcribe", icon: "🎙", label: "转写设置",  adminOnly: true },
+  { hash: "#/backup",     key: "backup",    icon: "💾", label: "备份恢复",   adminOnly: true },
+  { hash: "#/logs",       key: "logs",      icon: "📋", label: "日志",       adminOnly: true },
+  { hash: "#/admin",      key: "admin",     icon: "👥", label: "用户管理",   adminOnly: true },
 ];
 
 function shell(activeKey, contentHtml) {
+  const navItems = NAV.filter((n) => !n.adminOnly || isAdmin());
+  const u = state.user || {};
   return `
   <div class="frame">
     <aside class="sidebar">
       <div class="logo"><b><span>Deep</span>Read</b><div class="logo-sub">英语精读工坊</div></div>
       <nav>
-        ${NAV.map((n) => `
+        ${navItems.map((n) => `
         <a href="${n.hash}" class="nav-item ${n.key === activeKey ? "active" : ""}">
           <span class="nav-icon">${n.icon}</span><span>${n.label}</span>
         </a>`).join("")}
       </nav>
-      <div class="sidebar-foot">v0.1.0</div>
+      <div class="user-box">
+        <div class="user-name">${esc(u.display_name || u.username || "")}</div>
+        <div class="user-role">${u.role === "admin" ? "管理员" : "用户"}</div>
+        <button id="btn-logout" class="btn-logout">退出登录</button>
+      </div>
     </aside>
     <main class="main">${contentHtml}</main>
   </div>`;
+}
+
+// event delegation: logout button is recreated by every shell() render
+document.addEventListener("click", async (e) => {
+  if (!e.target.closest("#btn-logout")) return;
+  try { await fetch("/api/auth/logout", { method: "POST" }); } catch {}
+  state.user = null;
+  location.hash = "#/";
+  renderLogin();
+});
+
+// model-picker dropdowns close on any outside click — registered ONCE at
+// module level so it applies to every open (the old per-render listener used
+// `{ once: true }` and stopped working after the first click)
+document.addEventListener("click", (e) => {
+  if (e.target.closest(".mp-combo")) return;
+  document.querySelectorAll(".mp-combo-list").forEach((list) => {
+    if (!list.hidden) list.hidden = true;
+  });
+});
+
+/* ---------------- login ---------------- */
+function renderLogin(message = "") {
+  clearInterval(state.pollTimer);
+  $app.innerHTML = `
+    <div class="login-wrap">
+      <form class="login-card" id="login-form">
+        <div class="login-logo"><b>Deep<span>Read</span></b></div>
+        <div class="login-sub">英语精读工坊 · 请登录</div>
+        ${message ? `<div class="login-msg">${esc(message)}</div>` : ""}
+        <input type="text" id="login-user" placeholder="用户名" autocomplete="username" required>
+        <input type="password" id="login-pass" placeholder="密码" autocomplete="current-password" required>
+        <button type="submit" class="primary">登录</button>
+      </form>
+    </div>`;
+  document.getElementById("login-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const username = document.getElementById("login-user").value.trim();
+    const password = document.getElementById("login-pass").value;
+    try {
+      const r = await fetch("/api/auth/login", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        renderLogin(d.detail || "登录失败");
+        return;
+      }
+      state.user = (await r.json()).user;
+      location.hash = "#/";
+      route();
+    } catch (err) {
+      renderLogin("网络错误：" + err.message);
+    }
+  };
+}
+
+async function boot() {
+  try {
+    const r = await fetch("/api/auth/me");
+    if (r.ok) state.user = await r.json();
+  } catch {}
+  if (!state.user) return renderLogin();
+  route();
 }
 
 /* ---------------- router ---------------- */
 window.addEventListener("hashchange", route);
 
 function route() {
+  if (!state.user) return renderLogin();
   clearInterval(state.pollTimer);
   const hash = location.hash || "#/";
   const m = hash.match(/^#\/course\/([\w-]+)/);
   if (m) return renderCourse(m[1]);
   if (hash.startsWith("#/library")) return renderLibrary();
   if (hash.startsWith("#/courses")) return renderCourses();
-  if (hash.startsWith("#/settings")) return renderSettings();
-  if (hash.startsWith("#/transcribe")) return renderTranscribeSettings();
-  if (hash.startsWith("#/backup")) return renderBackup();
-  if (hash.startsWith("#/logs")) return renderLogs();
+  if (hash.startsWith("#/backup")) return isAdmin() ? renderBackup() : renderHome();
+  if (hash.startsWith("#/logs")) return isAdmin() ? renderLogs() : renderHome();
+  if (hash.startsWith("#/settings")) return isAdmin() ? renderSettings() : renderHome();
+  if (hash.startsWith("#/transcribe")) return isAdmin() ? renderTranscribeSettings() : renderHome();
+  if (hash.startsWith("#/admin")) return isAdmin() ? renderAdmin() : renderHome();
   return renderHome();
 }
 
@@ -1272,15 +1354,25 @@ function renderSettings() {
     const i = selectedProvider;
     const st = provStatus(p);
     const pid = p.id || "";
+    const kind = p.kind || "openai";
+    const isTc = kind === "tencent";
     titleEl.textContent = p.name || `API ${i + 1}`;
-    subEl.textContent = "配置连接信息与该提供商可用的模型";
+    subEl.textContent = isTc
+      ? "腾讯云语音识别（录音文件识别，需 SecretId/SecretKey）"
+      : "配置连接信息与该提供商可用的模型";
     const pool = globalPool[pid] || [];
+    // capability lookup: freshly fetched list first, then the tags the server
+    // sends with the config (so labels survive a page reload)
+    const capFor = (m) => poolCaps[m] || (cfgCache?.model_caps || {})[m] || null;
     const modelRows = (poolBrowse.length || pool.length) ? pool.map((m) => {
       const bad = healthFor(pid, m);
+      const cap = capFor(m);
+      const chip = cap && cap.kind !== "chat"
+        ? `<span class="cap-chip cap-${esc(cap.kind)}">${esc(cap.label)}</span>` : "";
       return `
         <div class="mp-item ${bad ? "bad" : ""}" data-model="${esc(m)}">
           <input type="checkbox" checked data-uncheck="${esc(m)}" title="取消勾选即从全局池移除">
-          <span class="mp-name" title="${esc(m)}">${esc(m)}</span>
+          <span class="mp-name" title="${esc(m)}">${esc(m)}</span>${chip}
           ${bad ? `<span class="mp-bad" title="${esc(bad.message || "上次调用失败")}">⚠ 报错</span>` : ""}
           <button class="mp-test" data-mtest="${esc(m)}" title="发一次真实请求测试这个模型">测试</button>
           <button class="mp-del" data-uncheck="${esc(m)}" title="移除">✕</button>
@@ -1294,7 +1386,6 @@ function renderSettings() {
       <div class="probe-row">
         <div class="probe-actions">
           <button id="cfg-refresh-pool" title="获取这个 API 的模型列表">↻ 获取模型</button>
-          <button id="cfg-save-pool" class="primary" style="padding:5px 16px">保存勾选</button>
           <button class="mp-manual-add" title="手动输入模型名（官方目录滞后的新模型也能加）">＋ 手动添加</button>
         </div>
       </div>
@@ -1318,24 +1409,64 @@ function renderSettings() {
     wrap.innerHTML = `
       <div class="prov-detail">
         <div class="prov-detail-status"><span class="prov-dot ${st.cls}"></span><span class="prov-status ${st.cls}">${st.text}</span></div>
+        <div class="form-row"><label>接口类型</label>
+          <select class="p-kind">
+            <option value="openai"${isTc ? "" : " selected"}>OpenAI 兼容（通用）</option>
+            <option value="tencent"${isTc ? " selected" : ""}>腾讯云语音识别</option>
+          </select></div>
         <div class="form-row"><label>名称</label>
           <input class="p-name" value="${esc(p.name)}" placeholder="名称（如 阿里云百炼）"></div>
+        ${isTc ? `
+        <div class="form-row"><label>SecretId</label>
+          <input class="p-secret-id" value="${esc(p.secret_id || "")}" placeholder="AKID..."></div>
+        <div class="form-row"><label>SecretKey</label>
+          <input class="p-secret-key" type="password" value="${esc(p.secret_key || "")}" placeholder="腾讯云 API 密钥"></div>
+        <div class="form-row"><label>AppID</label>
+          <input class="p-app-id" value="${esc(p.app_id || "")}" placeholder="1300000000（可选）"></div>
+        <div class="form-row"><label>地域</label>
+          <select class="p-region">
+            ${["ap-guangzhou", "ap-shanghai", "ap-beijing", "ap-chengdu", "ap-nanjing"].map((r) =>
+              `<option value="${r}"${(p.region || "ap-guangzhou") === r ? " selected" : ""}>${r}</option>`).join("")}
+          </select></div>
+        <div class="form-row"><label>识别引擎</label>
+          <select class="p-engine">
+            ${[
+              ["16k_zh_en_2.0", "中英大模型 2.0（推荐，31 种方言）"],
+              ["16k_zh_en", "中英大模型 1.0"],
+              ["16k_en_large", "英语大模型"],
+              ["16k_zh", "中文普通话通用"],
+              ["16k_multi_lang", "多语种（无标点分段）"],
+            ].map(([v, label]) =>
+              `<option value="${v}"${(p.engine || "16k_zh_en_2.0") === v ? " selected" : ""}>${label}</option>`).join("")}
+          </select></div>
+        <div class="mp-hint">ⓘ 腾讯云按音频时长计费，每月有免费额度。音频通过数据直传（≤3.6MB/段），会自动转 mp3。</div>
+        ` : `
         <div class="form-row"><label>Base URL</label>
           <input class="p-url" value="${esc(p.base_url)}" placeholder="https://.../v1"></div>
         <div class="form-row"><label>API Key</label>
           <input class="p-key" type="password" value="${esc(p.api_key)}" placeholder="sk-..."></div>
+        `}
         <div class="form-actions">
           <button class="primary prov-done" data-done="${i}" style="padding:8px 22px">确定</button>
           <button class="prov-test" data-test="${i}">测试连接</button>
         </div>
-        ${poolHtml}
+        ${isTc ? "" : poolHtml}
       </div>`;
+
+    // switching interface type must re-render: tencent and openai use different fields
+    const kindSel = wrap.querySelector(".p-kind");
+    if (kindSel) kindSel.onchange = () => {
+      collectProviders();
+      drawProviderDetail();
+    };
 
     wrap.querySelectorAll("[data-done]").forEach((btn) => {
       btn.onclick = async () => {
         collectProviders();
         const p = providers[selectedProvider];
-        if (p && !p.base_url) { toast("请填写 Base URL"); return; }
+        if (p && p.kind === "tencent") {
+          if (!p.secret_id || !p.secret_key) { toast("请填写 SecretId 与 SecretKey"); return; }
+        } else if (p && !p.base_url) { toast("请填写 Base URL"); return; }
         const ok = await saveProviders();
         if (!ok) return;
         drawProviders();
@@ -1347,25 +1478,34 @@ function renderSettings() {
       btn.onclick = async () => {
         collectProviders();
         const p = providers[selectedProvider];
-        if (!p || !p.base_url) { toast("请填写 Base URL"); return; }
+        if (!p) return;
+        if (p.kind === "tencent") {
+          if (!p.secret_id || !p.secret_key) { toast("请填写 SecretId 与 SecretKey"); return; }
+        } else if (!p.base_url) { toast("请填写 Base URL"); return; }
         const statusEl = wrap.querySelector(".prov-status");
         const dotEl = wrap.querySelector(".prov-dot");
         btn.disabled = true;
         if (statusEl) { statusEl.textContent = "测试中…"; statusEl.className = "prov-status"; }
-        logLine("info", `测试连接「${p.name || "API"}」 ${p.base_url}`);
+        logLine("info", `测试连接「${p.name || "API"}」 ${p.kind === "tencent" ? "腾讯云语音识别" : p.base_url}`);
         try {
+          const payload = p.kind === "tencent"
+            ? { provider_id: p.id, kind: "tencent", secret_id: p.secret_id,
+                secret_key: p.secret_key, region: p.region }
+            : { provider_id: p.id, base_url: p.base_url, api_key: p.api_key };
           const res = await api("/api/config/test_provider", {
             method: "POST",
-            body: JSON.stringify({ provider_id: p.id, base_url: p.base_url, api_key: p.api_key }),
+            body: JSON.stringify(payload),
           });
           const ok = !!res.ok;
           setProvStatus(p, { ok, count: res.count || 0 });
           if (statusEl) {
-            statusEl.textContent = ok ? `✓ 已连通 · ${res.count} 个模型` : "✗ 连接失败";
+            statusEl.textContent = ok
+              ? (p.kind === "tencent" ? "✓ 凭证有效" : `✓ 已连通 · ${res.count} 个模型`)
+              : "✗ 连接失败";
             statusEl.className = "prov-status " + (ok ? "ok" : "fail");
           }
           if (dotEl) dotEl.className = "prov-dot " + (ok ? "ok" : "fail");
-          logLine(ok ? "ok" : "fail", ok ? `✓ 连接成功 · ${res.count} 个模型` : `✗ ${res.detail || "连接失败"}`);
+          logLine(ok ? "ok" : "fail", ok ? "✓ 连接成功" : `✗ ${res.detail || "连接失败"}`);
         } catch (err) {
           setProvStatus(p, { ok: false, count: 0 });
           if (statusEl) { statusEl.textContent = "✗ 连接失败"; statusEl.className = "prov-status fail"; }
@@ -1379,9 +1519,10 @@ function renderSettings() {
     // pool actions (model list lives inside the provider detail card)
     wrap.querySelectorAll("[data-uncheck]").forEach((el) => {
       const m = el.dataset.uncheck;
-      const handler = () => {
+      const handler = async () => {
         globalPool[pid] = (globalPool[pid] || []).filter((x) => x !== m);
         if (!(globalPool[pid] || []).length) delete globalPool[pid];
+        await saveModelsPage();      // auto-save on uncheck
         drawProviderDetail();
       };
       if (el.tagName === "INPUT") el.onchange = handler;
@@ -1395,7 +1536,9 @@ function renderSettings() {
         try {
           const res = await api("/api/config/test_model", {
             method: "POST",
-            body: JSON.stringify({ provider_id: pid, model, kind: "chat" }),
+            // "auto": let the server infer chat / asr / vision from the model
+            // name — sending "chat" made every ASR model fail with 400
+            body: JSON.stringify({ provider_id: pid, model, kind: "auto" }),
           });
           logLine(res.ok ? "ok" : "fail",
             `${res.ok ? "✓" : "✗"} ${model}：${res.ok ? `可用（${res.elapsed_ms}ms）` : res.detail}`);
@@ -1417,6 +1560,7 @@ function renderSettings() {
           delete modelCache[pid];
           const res = await fetchModels(pid);
           poolBrowse = res.models || [];
+          poolCaps = res.caps || {};
           poolFetched = true;
           poolFilter = "";
           logLine("ok", `✓ 获取到 ${poolBrowse.length} 个模型`);
@@ -1430,14 +1574,7 @@ function renderSettings() {
         drawProviderDetail();
       };
     }
-    const savePoolBtn = wrap.querySelector("#cfg-save-pool");
-    if (savePoolBtn) {
-      savePoolBtn.onclick = async () => {
-        await saveModelsPage();
-        drawProviderDetail();
-        toast("已保存");
-      };
-    }
+    // no explicit "save" button anymore: every mutation persists immediately
     // searchable combobox: type to filter the fetched list, pick one, add it
     const comboInput = wrap.querySelector(".mp-combo-input");
     const comboListEl = wrap.querySelector(".mp-combo-list");
@@ -1446,13 +1583,22 @@ function renderSettings() {
     const renderComboList = () => {
       if (!comboListEl) return;
       const q = (comboInput ? comboInput.value : "").toLowerCase();
+      // show already-added models too (dimmed, "已添加") — hiding them made
+      // people think the model had disappeared from the provider
       const matches = poolBrowse
-        .filter((m) => !pool.includes(m))
         .filter((m) => !q || m.toLowerCase().includes(q))
-        .slice(0, 60);
+        .slice(0, 300);
       comboListEl.innerHTML = matches.length
-        ? matches.map((m) => `<div class="mp-combo-item" data-pick="${esc(m)}">${esc(m)}</div>`).join("")
-        : `<div class="mp-combo-none">无匹配模型</div>`;
+        ? matches.map((m) => {
+            const already = pool.includes(m);
+            const cap = capFor(m);
+            const chip = cap && cap.kind !== "chat"
+              ? `<span class="cap-chip cap-${esc(cap.kind)}">${esc(cap.label)}</span>` : "";
+            return already
+              ? `<div class="mp-combo-item picked">${esc(m)}${chip}<span class="mp-combo-tag">已添加</span></div>`
+              : `<div class="mp-combo-item" data-pick="${esc(m)}">${esc(m)}${chip}</div>`;
+          }).join("")
+        : `<div class="mp-combo-none">无匹配模型${poolBrowse.length ? "" : "（先点「↻ 获取模型」拉取列表）"}</div>`;
       comboListEl.hidden = false;
       comboListEl.querySelectorAll("[data-pick]").forEach((el) => {
         el.onclick = () => {
@@ -1486,20 +1632,19 @@ function renderSettings() {
       };
     }
     if (addBtn) {
-      addBtn.onclick = () => {
+      addBtn.onclick = async () => {
         const name = picked || (comboInput ? comboInput.value.trim() : "");
         if (!name) return;
         globalPool[pid] = [...new Set([...(globalPool[pid] || []), name])];
         poolFilter = "";
+        await saveModelsPage();      // auto-save: no separate 保存 button
         drawProviderDetail();
+        toast(`已添加 ${name}`);
       };
     }
-    // click outside closes the dropdown
-    document.addEventListener("click", (e) => {
-      if (comboListEl && !comboListEl.hidden && !e.target.closest(".mp-combo")) {
-        comboListEl.hidden = true;
-      }
-    }, { once: true });
+    // outside-click closing is registered once at module level (see below) so
+    // it works for every dropdown open — the old per-render `{ once: true }`
+    // fired only on the first click and left later dropdowns stuck open.
     const manualBtn = wrap.querySelector(".mp-manual-add");
     const manualBox = wrap.querySelector(".mp-manual-box");
     const manualInput = wrap.querySelector(".mp-manual-input");
@@ -1510,12 +1655,13 @@ function renderSettings() {
       };
       const confirmBtn = wrap.querySelector(".mp-manual-confirm");
       const closeBtn = wrap.querySelector(".mp-manual-close");
-      const doAdd = () => {
+      const doAdd = async () => {
         const name = (manualInput ? manualInput.value : "").trim();
         if (!name) { toast("请输入模型名称"); return; }
         globalPool[pid] = [...new Set([...(globalPool[pid] || []), name])];
-        toast(`已添加 ${name}（点「保存勾选」生效）`);
+        await saveModelsPage();      // auto-save
         drawProviderDetail();
+        toast(`已添加 ${name}`);
       };
       if (confirmBtn) confirmBtn.onclick = doAdd;
       if (manualInput) manualInput.onkeydown = (e) => { if (e.key === "Enter") doAdd(); };
@@ -1543,14 +1689,32 @@ function renderSettings() {
     if (selectedProvider < 0 || !providers[selectedProvider]) return;
     const body = document.querySelector("#stab-providers .prov-detail");
     if (!body) return;
-    providers[selectedProvider].name = body.querySelector(".p-name").value.trim() || `API ${selectedProvider + 1}`;
-    providers[selectedProvider].base_url = body.querySelector(".p-url").value.trim();
-    providers[selectedProvider].api_key = body.querySelector(".p-key").value.trim();
+    const cur = providers[selectedProvider];
+    cur.name = body.querySelector(".p-name").value.trim() || `API ${selectedProvider + 1}`;
+    const kindEl = body.querySelector(".p-kind");
+    cur.kind = kindEl ? kindEl.value : "openai";
+    if (cur.kind === "tencent") {
+      const q = (sel) => { const el = body.querySelector(sel); return el ? el.value.trim() : ""; };
+      cur.secret_id = q(".p-secret-id");
+      cur.secret_key = q(".p-secret-key");
+      cur.app_id = q(".p-app-id");
+      cur.region = q(".p-region");
+      cur.engine = q(".p-engine");
+      cur.base_url = "";
+      cur.api_key = "";
+    } else {
+      cur.base_url = body.querySelector(".p-url").value.trim();
+      cur.api_key = body.querySelector(".p-key").value.trim();
+      delete cur.secret_id;
+      delete cur.secret_key;
+      delete cur.app_id;
+    }
   }
 
   /* ---- global model pool: which provider's which models are usable ---- */
   let globalPool = {};              // {provider_id: [models]} working copy
   let poolBrowse = [];              // models fetched for the selected provider
+  let poolCaps = {};                // model id -> {kind, label, testable}
   let poolFilter = "";
   let poolFetched = false;          // has 获取模型 run this session
 
@@ -1608,35 +1772,19 @@ function renderTranscribeSettings() {
 
         <div class="cfg-card">
           <div class="cfg-card-head"><span class="cfg-card-title">🎙 语音转写</span></div>
-          <div class="form-row"><select id="tr-engine"></select></div>
-          <div class="mp-hint" style="margin:6px 0 12px">两种方式互斥：
-            <b>分段转写</b> — 音频切 60 秒段逐段转写，时间按行数平摊估算，可多选模型按顺序 failover；
-            <b>云端转写</b> — 整个文件提交阿里云异步转写，返回原生毫秒级时间戳（更准），支持 ≤2GB / ≤12 小时，单模型无 failover。后续 OCR / 翻译 / 精讲流程完全相同。</div>
-          <div id="asr-chat-block" style="display:none">
-            <div class="form-row"><select id="tr-prov-asr"></select></div>
-            <div class="mp-slot" id="tr-mp-asr"></div>
-            <div class="tune-row" style="margin-top:10px">
-              <div class="tune-label">转写并发数：<small>分段转写并发（2-6）</small></div>
-              <div class="tune-ctl"><input type="number" id="cfg-asr-workers" min="1" max="8"></div>
-            </div>
-          </div>
-          <div id="asr-ft-block" style="display:none">
-            <div class="form-row"><select id="tr-prov-ft"></select></div>
-            <div class="mp-hint" style="margin:6px 0">鉴权与端点沿用所选提供商的 API Key；N1 需一次性把 /ft 路径暴露到公网（Tailscale funnel），腾讯云等有公网 IP 的环境默认可用。</div>
-            <div class="tune-row">
-              <div class="tune-label">公网地址：<small>能从公网访问本服务 /ft/ 路径的基址（换部署环境只改这里）</small></div>
-              <div class="tune-ctl" style="flex:1"><input type="text" id="ft-public-base" placeholder="https://dr.tail632d9e.ts.net/ft"></div>
-            </div>
-            <div class="tune-row" style="margin-top:8px">
-              <div class="tune-label">转写模型：<small>阿里云异步文件转写模型 Code</small></div>
-              <div class="tune-ctl" style="flex:1"><input type="text" id="ft-model" placeholder="qwen-audio-3.1-asr-flash-filetrans"></div>
-            </div>
+          <div class="mp-hint" style="margin:0 0 12px">音频切 60 秒段逐段转写，可多选模型按顺序 failover。后续 OCR / 翻译 / 精讲流程完全相同。</div>
+          <div class="form-row"><label>语音转写用哪个 API 提供商</label><select id="tr-prov-asr"></select></div>
+          <div class="mp-slot" id="tr-mp-asr"></div>
+          <div class="mp-hint" style="margin-top:8px">💡 推荐 <b>qwen-audio-3.0-asr-flash</b>：走原生识别接口，返回<b>逐词精确时间戳</b>，字幕对得准。<b>qwen3.x-omni-flash</b> 也能转写，但没有时间戳（字幕只能估算）。</div>
+          <div class="tune-row" style="margin-top:10px">
+            <div class="tune-label">转写并发数：<small>分段转写并发（2-6）</small></div>
+            <div class="tune-ctl"><input type="number" id="cfg-asr-workers" min="1" max="8"></div>
           </div>
         </div>
 
         <div class="cfg-card">
           <div class="cfg-card-head"><span class="cfg-card-title">🖼 画面字幕 OCR</span></div>
-          <div class="form-row"><select id="tr-prov-vision"></select></div>
+          <div class="form-row"><label>画面字幕识别用哪个 API 提供商</label><select id="tr-prov-vision"></select></div>
           <div class="mp-slot" id="tr-mp-vision"></div>
           <div class="tune-row" style="margin-top:10px">
             <div class="tune-label">字幕区域高度：<small>画面底部保留比例，字幕不在底部时调大（0.05-0.5）</small></div>
@@ -1650,7 +1798,7 @@ function renderTranscribeSettings() {
 
         <div class="cfg-card">
           <div class="cfg-card-head"><span class="cfg-card-title">📝 翻译与精讲</span></div>
-          <div class="form-row"><select id="tr-prov-chat"></select></div>
+          <div class="form-row"><label>翻译与精讲讲解用哪个 API 提供商</label><select id="tr-prov-chat"></select></div>
           <div class="mp-slot" id="tr-mp-chat"></div>
           <div class="tune-row" style="margin-top:10px">
             <div class="tune-label">翻译并发数：<small>翻译批次并发（1-6）</small></div>
@@ -1672,24 +1820,15 @@ function renderTranscribeSettings() {
     return (cfgCache?.model_health || {})[`${pid || ""}||${model || ""}`] || null;
   }
 
-  function currentEngine() {
-    return document.getElementById("tr-engine")?.value || "chat";
-  }
-
   function drawRolePicker(role) {
     const meta = ROLE_META.find((r) => r.key === role);
     const slot = document.getElementById(`tr-mp-${role}`);
     if (!slot) return;
-    const pid = role === "asr" && currentEngine() === "filetrans"
-      ? document.getElementById("tr-prov-ft")?.value || ""
-      : document.getElementById(`tr-prov-${role}`)?.value || "";
-    const ftMode = role === "asr" && currentEngine() === "filetrans";
+    const pid = document.getElementById(`tr-prov-${role}`)?.value || "";
     const chosen = rolePicked[role];
     const pool = globalPoolFor(pid);
-    const f = (roleFilter[role] || "").toLowerCase();
-    const avail = pool
-      .filter((m) => !chosen.includes(m))
-      .filter((m) => !f || m.toLowerCase().includes(f));
+    const availAll = pool;                    // everything, incl. already chosen
+    const avail = pool.filter((m) => !chosen.includes(m));   // still addable
     const rows = chosen.length ? chosen.map((m, i) => {
       const bad = healthFor(pid, m);
       return `
@@ -1705,15 +1844,13 @@ function renderTranscribeSettings() {
       <div class="mp-list">${rows}</div>
       ${pool.length ? `
       <div class="mp-add-row">
-        <input type="text" class="mp-search" placeholder="搜索模型（${pool.filter((m) => !chosen.includes(m)).length} 个可选）" value="${esc(roleFilter[role] || "")}">
-        <select class="mp-add-sel">
-          <option value="" selected>${f ? `匹配 ${avail.length} 个` : "从全局池选择…"}</option>
-          ${avail.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}
-        </select>
-        <button class="mp-add" disabled>＋ 添加</button>
+        <div class="mp-combo">
+          <input type="text" class="mp-combo-input" placeholder="搜索并添加模型（${avail.length} 个可选）" autocomplete="off">
+          <div class="mp-combo-list" hidden></div>
+        </div>
         <button class="mp-manual-add" title="手动输入模型名">＋ 手动添加</button>
       </div>` : ""}
-      <div class="mp-hint">可多选，按顺序尝试：第一个是主模型，报错时自动换下一个。</div>`;
+      <div class="mp-hint">点候选项直接加入；可多选，按顺序尝试：第一个是主模型，报错时自动换下一个。</div>`;
 
     slot.querySelectorAll("[data-up]").forEach((btn) => {
       btn.onclick = () => {
@@ -1730,31 +1867,44 @@ function renderTranscribeSettings() {
         drawRolePicker(role);
       };
     });
-    const search = slot.querySelector(".mp-search");
-    if (search) {
-      const pos = search.selectionStart;
-      search.oninput = () => {
-        roleFilter[role] = search.value;
-        drawRolePicker(role);
-        const again = slot.querySelector(".mp-search");
-        if (again) { again.focus(); again.setSelectionRange(pos, pos); }
+    // same searchable-dropdown behaviour as the model page: type to filter,
+    // click a candidate to add it — no separate search box + <select> + button
+    const comboInput = slot.querySelector(".mp-combo-input");
+    const comboList = slot.querySelector(".mp-combo-list");
+    if (comboInput && comboList) {
+      const renderCombo = () => {
+        const q = comboInput.value.toLowerCase().trim();
+        // include already-chosen models (dimmed) so it's clear they are in the
+        // list, not missing from the provider
+        const matches = availAll
+          .filter((m) => !q || m.toLowerCase().includes(q))
+          .slice(0, 300);
+        comboList.innerHTML = matches.length
+          ? matches.map((m) => {
+              const already = chosen.includes(m);
+              return already
+                ? `<div class="mp-combo-item picked">${esc(m)}<span class="mp-combo-tag">已添加</span></div>`
+                : `<div class="mp-combo-item" data-pick="${esc(m)}">${esc(m)}</div>`;
+            }).join("")
+          : `<div class="mp-combo-none">无匹配模型</div>`;
+        comboList.hidden = false;
+        comboList.querySelectorAll("[data-pick]").forEach((el) => {
+          el.onclick = (ev) => {
+            ev.stopPropagation();
+            const m = el.dataset.pick;
+            if (m && !chosen.includes(m)) chosen.push(m);
+            roleFilter[role] = "";
+            drawRolePicker(role);
+          };
+        });
       };
-      search.onkeydown = (e) => {
-        if (e.key === "Enter" && avail.length === 1) {
-          chosen.push(avail[0]);
-          roleFilter[role] = "";
-          drawRolePicker(role);
-        }
-      };
-    }
-    const addSel = slot.querySelector(".mp-add-sel");
-    const addBtn = slot.querySelector(".mp-add");
-    if (addSel && addBtn) {
-      addSel.onchange = () => { addBtn.disabled = !addSel.value; };
-      addBtn.onclick = () => {
-        if (addSel.value && !chosen.includes(addSel.value)) chosen.push(addSel.value);
-        roleFilter[role] = "";
-        drawRolePicker(role);
+      comboInput.onfocus = renderCombo;
+      comboInput.oninput = renderCombo;
+      comboInput.onkeydown = (e) => {
+        if (e.key === "Escape") { comboList.hidden = true; return; }
+        if (e.key !== "Enter") return;
+        const first = comboList.hidden ? null : comboList.querySelector("[data-pick]");
+        if (first) first.click();
       };
     }
     const manualBtn = slot.querySelector(".mp-manual-add");
@@ -1762,7 +1912,10 @@ function renderTranscribeSettings() {
       manualBtn.onclick = () => {
         const name = prompt("输入模型名称：");
         const clean = (name || "").trim();
-        if (clean && !chosen.includes(clean)) chosen.push(clean);
+        if (clean && !chosen.includes(clean)) {
+          chosen.push(clean);
+          drawRolePicker(role);
+        }
       };
     }
   }
@@ -1772,47 +1925,20 @@ function renderTranscribeSettings() {
   function drawRoleProviders() {
     const opts = () => providers.map((p) =>
       `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`).join("");
-    // engine dropdown: 分段转写 / 云端转写（阿里云）
-    const engSel = document.getElementById("tr-engine");
-    if (engSel) {
-      const engine = cfgCache?.asr_engine || "chat";
-      engSel.innerHTML = `
-        <option value="chat" ${engine === "chat" ? "selected" : ""}>分段转写（omni 等 chat 音频模型）</option>
-        <option value="filetrans" ${engine === "filetrans" ? "selected" : ""}>云端转写（阿里云整文件异步转写）</option>`;
-      engSel.onchange = () => {
-        syncAsrBlocks();
-        drawRolePicker("asr");
-      };
-    }
-    // ASR blocks share one provider select value (chat block shown in 分段 mode,
-    // ft block shown in 云端 mode — keep both selects in sync)
-    const asrPrev = cfgCache?.asr_provider || "";
-    const asrOpts = opts() || `<option value="">（请先在模型配置页添加 API）</option>`;
-    const chatSel = document.getElementById("tr-prov-asr");
-    const ftSel = document.getElementById("tr-prov-ft");
-    for (const sel of [chatSel, ftSel]) {
-      if (!sel) continue;
-      sel.innerHTML = asrOpts;
-      if (asrPrev && providers.some((p) => p.id === asrPrev)) sel.value = asrPrev;
-      sel.onchange = () => {
-        if (chatSel) chatSel.value = sel.value;
-        if (ftSel) ftSel.value = sel.value;
-      };
-    }
-    ROLE_META.filter((r) => r.key !== "asr").forEach((r) => {
+    ROLE_META.forEach((r) => {
       const sel = document.getElementById(`tr-prov-${r.key}`);
       if (!sel) return;
       const prev = sel.value || cfgCache?.[r.provKey] || "";
       sel.innerHTML = opts() || `<option value="">（请先在模型配置页添加 API）</option>`;
       if (prev && providers.some((p) => p.id === prev)) sel.value = prev;
-      sel.onchange = () => drawRolePicker(r.key);
+      // switching provider must reload that provider's chosen models: the old
+      // selection belongs to the previous provider's pool and no longer applies
+      sel.onchange = () => {
+        const pool = globalPoolFor(sel.value);
+        rolePicked[r.key] = rolePicked[r.key].filter((m) => pool.includes(m));
+        drawRolePicker(r.key);
+      };
     });
-  }
-
-  function syncAsrBlocks() {
-    const ft = currentEngine() === "filetrans";
-    document.getElementById("asr-chat-block").style.display = ft ? "none" : "block";
-    document.getElementById("asr-ft-block").style.display = ft ? "block" : "none";
   }
 
   async function init() {
@@ -1824,34 +1950,23 @@ function renderTranscribeSettings() {
         : [cfgCache?.[`${r.key}_model`]].filter(Boolean);
       rolePicked[r.key] = [...models];
     });
-    document.getElementById("ft-public-base").value = cfgCache.filetrans_public_base || "";
-    document.getElementById("ft-model").value = cfgCache.filetrans_model || "qwen-audio-3.1-asr-flash-filetrans";
     document.getElementById("cfg-ocr-crop").value = cfgCache.ocr_bottom_crop || 0.22;
     document.getElementById("cfg-ocr-workers").value = cfgCache.ocr_workers || 6;
     document.getElementById("cfg-asr-workers").value = cfgCache.asr_workers || 4;
     document.getElementById("cfg-tr-workers").value = cfgCache.translate_workers || 3;
     drawRoleProviders();
-    syncAsrBlocks();
     drawAllRolePickers();
   }
 
   document.getElementById("tr-save").onclick = async () => {
-    const engine = currentEngine();
-    const asrProv = document.getElementById(engine === "filetrans" ? "tr-prov-ft" : "tr-prov-asr").value;
-    if (engine === "filetrans" && !document.getElementById("ft-public-base").value.trim()) {
-      toast("云端转写需要填写公网地址"); return;
-    }
     if (!rolePicked.chat.length) { toast("请为「翻译与精讲」选择至少一个模型"); return; }
-    if (engine !== "filetrans" && !rolePicked.asr.length) { toast("请为「语音转写」选择至少一个模型"); return; }
+    if (!rolePicked.asr.length) { toast("请为「语音转写」选择至少一个模型"); return; }
     const body = {
-      asr_engine: engine,
-      filetrans_public_base: document.getElementById("ft-public-base").value.trim(),
-      filetrans_model: document.getElementById("ft-model").value.trim() || "qwen-audio-3.1-asr-flash-filetrans",
       chat_models: rolePicked.chat,
-      asr_models: engine === "filetrans" ? [] : rolePicked.asr,
+      asr_models: rolePicked.asr,
       vision_models: rolePicked.vision,
       chat_provider: document.getElementById("tr-prov-chat").value,
-      asr_provider: asrProv,
+      asr_provider: document.getElementById("tr-prov-asr").value,
       vision_provider: document.getElementById("tr-prov-vision").value,
       ocr_workers: parseInt(document.getElementById("cfg-ocr-workers").value, 10) || 6,
       ocr_bottom_crop: parseFloat(document.getElementById("cfg-ocr-crop").value) || 0.22,
@@ -1859,7 +1974,7 @@ function renderTranscribeSettings() {
       translate_workers: parseInt(document.getElementById("cfg-tr-workers").value, 10) || 3,
     };
     ROLE_META.forEach((r) => {
-      body[`${r.key}_model`] = (r.key === "asr" && engine === "filetrans") ? body.filetrans_model : (rolePicked[r.key][0] || "");
+      body[`${r.key}_model`] = rolePicked[r.key][0] || "";
     });
     try {
       await api("/api/config", { method: "PUT", body: JSON.stringify(body) });
@@ -2183,4 +2298,119 @@ function markVocab(text, lang, vocabIndex) {
   return html;
 }
 
-route();
+/* ================= Admin: users, grants, settings ================= */
+async function renderAdmin() {
+  document.title = "用户管理 · DeepRead";
+  $app.innerHTML = shell("admin", `
+    <div class="page">
+      <h1>用户管理</h1>
+      <div class="cfg-card" style="margin-bottom:16px">
+        <div class="cfg-card-head"><span class="cfg-card-title">⚙ 生成权限</span></div>
+        <div class="adm-setting-row">
+          <span class="adm-setting-label">允许普通用户生成课程</span>
+          <label class="switch"><input type="checkbox" id="adm-allow-gen"><span></span></label>
+          <button class="primary" id="adm-save-setting">保存设置</button>
+          <small>关闭后仅管理员可生成，避免消耗共享 API 额度</small>
+        </div>
+      </div>
+      <div class="cfg-card" style="margin-bottom:16px">
+        <div class="cfg-card-head"><span class="cfg-card-title">👥 用户列表</span></div>
+        <div id="adm-users"><div class="panel-empty">加载中…</div></div>
+      </div>
+      <div class="cfg-card">
+        <div class="cfg-card-head"><span class="cfg-card-title">📚 课程分配</span></div>
+        <div id="adm-grants"><div class="panel-empty">加载中…</div></div>
+      </div>
+    </div>`);
+
+  async function loadSettings() {
+    const s = await api("/api/admin/settings");
+    document.getElementById("adm-allow-gen").checked = s.allow_user_generate;
+  }
+  async function loadUsers() {
+    const users = await api("/api/admin/users");
+    const el = document.getElementById("adm-users");
+    el.innerHTML = `<div class="adm-users-toolbar"><button class="primary" id="adm-add-user">＋ 新增用户</button></div>
+      <div class="table-scroll"><table class="bk-table">
+      <tr><th>用户名</th><th>显示名</th><th>角色</th><th>状态</th><th>操作</th></tr>
+      ${users.map((u) => `<tr>
+        <td>${esc(u.username)}</td><td>${esc(u.display_name || "")}</td>
+        <td>${u.role === "admin" ? "管理员" : "用户"}</td>
+        <td>${u.disabled ? "已禁用" : "正常"}</td>
+        <td>
+          ${u.username === "admin" ? "内置账号" : `
+            <button data-toggle="${u.id}" data-disabled="${u.disabled ? "1" : "0"}">${u.disabled ? "启用" : "禁用"}</button>
+            <button data-role="${u.id}" data-role-to="${u.role === "admin" ? "user" : "admin"}">设为${u.role === "admin" ? "用户" : "管理员"}</button>
+            <button data-reset="${u.id}">重置密码</button>
+            <button class="danger" data-del="${u.id}">删除</button>`}
+        </td></tr>`).join("")}
+      </table></div>`;
+    const addBtn = document.getElementById("adm-add-user");
+    if (addBtn) addBtn.onclick = async () => {
+      const username = prompt("用户名：");
+      if (!username) return;
+      const password = prompt("初始密码：");
+      if (!password) return;
+      const role = confirm("设为管理员？取消则设为普通用户") ? "admin" : "user";
+      try {
+        await api("/api/admin/users", { method: "POST", body: JSON.stringify({ username, password, role }) });
+        loadUsers();
+      } catch (err) { toast(err.message); }
+    };
+    el.querySelectorAll("[data-toggle]").forEach((b) => b.onclick = async () => {
+      await api(`/api/admin/users/${b.dataset.toggle}`, { method: "PUT", body: JSON.stringify({ disabled: b.dataset.disabled !== "1" }) });
+      loadUsers();
+    });
+    el.querySelectorAll("[data-role]").forEach((b) => b.onclick = async () => {
+      await api(`/api/admin/users/${b.dataset.role}`, { method: "PUT", body: JSON.stringify({ role: b.dataset.roleTo }) });
+      loadUsers();
+    });
+    el.querySelectorAll("[data-reset]").forEach((b) => b.onclick = async () => {
+      const p = prompt("输入新密码：");
+      if (!p) return;
+      await api(`/api/admin/users/${b.dataset.reset}`, { method: "PUT", body: JSON.stringify({ password: p }) });
+      toast("密码已重置");
+    });
+    el.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
+      if (!confirm("确定删除该用户？")) return;
+      await api(`/api/admin/users/${b.dataset.del}`, { method: "DELETE" });
+      loadUsers();
+    });
+  }
+  async function loadGrants() {
+    const [courses, users] = await Promise.all([api("/api/courses"), api("/api/admin/users")]);
+    const el = document.getElementById("adm-grants");
+    if (!courses.length) { el.innerHTML = `<div class="panel-empty">暂无课程</div>`; return; }
+    el.innerHTML = courses.map((c) => `
+      <div class="grant-row" data-cid="${esc(c.id)}">
+        <div class="grant-title">${esc(c.title)}</div>
+        <div class="grant-users">加载中…</div>
+      </div>`).join("");
+    for (const row of el.querySelectorAll(".grant-row")) {
+      const cid = row.dataset.cid;
+      const g = await api(`/api/admin/courses/${cid}/grants`);
+      const box = row.querySelector(".grant-users");
+      const render = (ids) => {
+        box.innerHTML = users.filter((u) => u.role !== "admin").map((u) => `
+          <label class="grant-chip"><input type="checkbox" data-uid="${u.id}" ${ids.includes(u.id) ? "checked" : ""}> ${esc(u.display_name || u.username)}</label>`).join("") || `<span class="panel-empty">暂无普通用户</span>`;
+        box.querySelectorAll("input").forEach((cb) => cb.onchange = async () => {
+          if (cb.checked) await api(`/api/admin/courses/${cid}/grants`, { method: "POST", body: JSON.stringify({ user_id: cb.dataset.uid }) });
+          else await api(`/api/admin/courses/${cid}/grants/${cb.dataset.uid}`, { method: "DELETE" });
+          toast("已更新授权");
+        });
+      };
+      render(g.grantees);
+    }
+  }
+  document.getElementById("adm-save-setting").onclick = async () => {
+    await api("/api/admin/settings", { method: "PUT", body: JSON.stringify({
+      allow_user_generate: document.getElementById("adm-allow-gen").checked,
+    }) });
+    toast("设置已保存");
+  };
+  try {
+    await Promise.all([loadSettings(), loadUsers(), loadGrants()]);
+  } catch (err) { toast(err.message); }
+}
+
+boot();

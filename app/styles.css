@@ -747,6 +747,13 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
   .logo-sub, .nav-item span:not(.nav-icon), .sidebar-foot { display: none; }
   .nav-item { justify-content: center; padding: 11px 0; }
   .nav-icon { font-size: 18px; }
+  /* collapsed rail: user box must not wrap text vertically */
+  .user-box { align-items: center; }
+  .user-name, .user-role { display: none; }
+  /* `.sidebar .btn-logout` outranks the base `.btn-logout` further down the
+     file (same specificity would lose to it regardless of the media query) */
+  .sidebar .btn-logout { width: 40px; height: 32px; margin: 0 auto; padding: 0; font-size: 0; text-align: center; border-radius: 8px; overflow: hidden; white-space: nowrap; }
+  .sidebar .btn-logout::after { content: "⇥"; font-size: 16px; }
 }
 
 /* narrow: sidebar becomes top bar */
@@ -761,6 +768,10 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
   .sidebar nav::-webkit-scrollbar { display: none; }
   .nav-item { padding: 8px 11px; gap: 6px; }
   .sidebar-foot { display: none; }
+  .user-box { margin: 0 0 0 auto; padding: 0; border-top: 0; flex-direction: row; align-items: center; gap: 6px; }
+  .user-name { display: block; font-size: 12px; white-space: nowrap; }
+  .sidebar .btn-logout { width: auto; height: auto; margin: 0; padding: 4px 8px; font-size: 11px; white-space: nowrap; }
+  .sidebar .btn-logout::after { content: none; }
   .main { height: auto; flex: 1; }
 
   /* course page stacks vertically */
@@ -844,4 +855,87 @@ textarea { font: inherit; padding: 8px 11px; border: 1px solid var(--line); bord
   .mp-combo-list { background: #222835; }
   .mp-combo-item:hover { background: #1e2a41; color: #93b4f8; }
   .mp-manual-box { background: #1e2a41; }
+}
+
+/* ---------------- auth / admin ---------------- */
+.login-wrap { min-height: 100vh; min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: 24px; background: var(--bg); }
+.login-card { width: min(380px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 32px; display: flex; flex-direction: column; gap: 14px; }
+.login-logo { font-size: 26px; text-align: center; letter-spacing: -.5px; }
+.login-logo span { color: var(--accent); }
+.login-sub { text-align: center; color: var(--ink-2); font-size: 13px; margin-bottom: 8px; }
+.login-msg { background: #fef2f2; color: var(--red); border-radius: var(--radius-sm); padding: 8px 12px; font-size: 13px; }
+.login-card input { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); color: var(--ink); font: inherit; }
+.login-card button { padding: 11px; font-size: 15px; }
+
+.user-box { margin-top: auto; padding-top: 14px; border-top: 1px solid rgba(255,255,255,.1); display: flex; flex-direction: column; gap: 2px; }
+.user-name { font-size: 13px; font-weight: 600; color: #e2e8f0; }
+.user-role { font-size: 11px; color: #94a3b8; }
+.btn-logout { margin-top: 8px; padding: 6px 10px; font-size: 12px; background: rgba(255,255,255,.08); color: #cbd5e1; border: 1px solid rgba(255,255,255,.12); border-radius: var(--radius-sm); cursor: pointer; text-align: left; }
+.btn-logout:hover { background: rgba(255,255,255,.16); }
+
+.switch { position: relative; display: inline-block; width: 42px; height: 24px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span { position: absolute; inset: 0; background: var(--line); border-radius: 24px; cursor: pointer; transition: background .2s; }
+.switch span::before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform .2s; }
+.switch input:checked + span { background: var(--accent); }
+.switch input:checked + span::before { transform: translateX(18px); }
+
+.grant-row { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.grant-row:last-child { border-bottom: 0; }
+.grant-title { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.grant-users { display: flex; flex-wrap: wrap; gap: 8px; }
+.grant-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 20px; font-size: 12px; cursor: pointer; }
+
+/* admin page: compact setting row + users toolbar */
+.adm-setting-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 2px 0; }
+.adm-setting-label { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.adm-setting-row .switch { flex-shrink: 0; }
+.adm-setting-row > button { padding: 6px 16px; }
+.adm-setting-row > small { font-size: 11.5px; color: var(--ink-3); }
+.adm-users-toolbar { display: flex; justify-content: flex-start; margin-bottom: 10px; }
+.adm-users-toolbar button { padding: 6px 14px; }
+
+/* provider detail: give the action row breathing room below the API key field */
+.prov-detail .form-actions { margin-top: 16px; }
+.prov-detail .form-row { margin-bottom: 12px; }
+
+/* provider detail: separate the action row from the content around it
+   (the old negative margin pulled buttons flush against the fields) */
+.prov-detail .probe-row { margin-top: 4px; margin-bottom: 12px; }
+.prov-detail .mp-manual-box { margin: 10px 0 12px; }
+.prov-detail .mp-add-row { margin-top: 10px; }
+.prov-detail .mp-list { margin-top: 12px; }
+
+/* dropdown rows for models already in the list: visible but not clickable */
+.mp-combo-item.picked {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  opacity: .55; cursor: default;
+}
+.mp-combo-item.picked:hover { background: transparent; color: inherit; }
+.mp-combo-tag {
+  flex-shrink: 0; font-size: 10.5px; padding: 1px 6px; border-radius: 4px;
+  background: var(--accent-soft); color: var(--accent-ink);
+}
+
+/* capability chips next to model names (语音识别 / 文生图 / 向量 …) */
+.cap-chip {
+  flex-shrink: 0; font-size: 10px; line-height: 1.5; padding: 1px 6px;
+  border-radius: 4px; border: 1px solid var(--line); color: var(--ink-3);
+  background: transparent;
+}
+.cap-chip.cap-asr { color: #0e7490; border-color: #a5f3fc; background: #ecfeff; }
+.cap-chip.cap-tts { color: #9a3412; border-color: #fed7aa; background: #fff7ed; }
+.cap-chip.cap-vision { color: #6d28d9; border-color: #ddd6fe; background: #f5f3ff; }
+.cap-chip.cap-image { color: #a21caf; border-color: #f5d0fe; background: #fdf4ff; }
+.cap-chip.cap-video { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+.cap-chip.cap-embed, .cap-chip.cap-rerank { color: #475569; border-color: var(--line); background: #f8fafc; }
+.cap-chip.cap-multimodal { color: #1d4ed8; border-color: #bfdbfe; background: #eff6ff; }
+@media (prefers-color-scheme: dark) {
+  .cap-chip { background: transparent; border-color: #334155; color: #94a3b8; }
+  .cap-chip.cap-asr { color: #67e8f9; border-color: #155e75; background: #082f49; }
+  .cap-chip.cap-tts { color: #fdba74; border-color: #7c2d12; background: #431407; }
+  .cap-chip.cap-vision { color: #c4b5fd; border-color: #4c1d95; background: #2e1065; }
+  .cap-chip.cap-image { color: #f0abfc; border-color: #86198f; background: #4a044e; }
+  .cap-chip.cap-video { color: #fca5a5; border-color: #7f1d1d; background: #450a0a; }
+  .cap-chip.cap-multimodal { color: #93c5fd; border-color: #1e40af; background: #172554; }
 }

@@ -20,9 +20,11 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+import auth
+import db
 from pipeline.lesson import generate_lesson
 from pipeline.transcribe import transcribe, PipelineCancelled
 from pipeline.align import align
@@ -44,13 +46,217 @@ APP_DIR = BASE_DIR / "app"
 CONFIG_PATH = DATA_DIR / "config.json"
 
 ALLOWED_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+
+
+def _copy_upload_limited(src, dest: Path) -> None:
+    written = 0
+    with dest.open("wb") as fh:
+        while True:
+            chunk = src.read(1 << 20)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > MAX_UPLOAD_BYTES:
+                raise HTTPException(413, "文件超过 2GB 上限")
+            fh.write(chunk)
 
 for d in (DATA_DIR, MEDIA_DIR, MATERIALS_DIR, COURSES_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 health_mod.configure(DATA_DIR / "model_health.json")
 
+# auth database (users / sessions / ownership / grants) + first-run admin
+db.init_db()
+_BOOTSTRAP_ADMIN = auth.bootstrap_admin()
+
 app = FastAPI(title="DeepRead")
+
+
+# ---------------------------------------------------------------- auth middleware
+
+_PUBLIC_PATHS = {"/", "/api/auth/login"}
+_PUBLIC_PREFIXES = ("/static/",)
+# Whole route groups reserved for the admin role. Centralised here so no
+# endpoint can accidentally omit the check.
+_ADMIN_PREFIXES = ("/api/config", "/api/backups", "/api/logs", "/api/admin")
+
+
+@app.middleware("http")
+async def auth_guard(request: Request, call_next):
+    path = request.url.path
+    if path in _PUBLIC_PATHS or path.startswith(_PUBLIC_PREFIXES):
+        return await call_next(request)
+    token = request.cookies.get(auth.COOKIE_NAME, "")
+    user = db.session_user(auth._token_hash(token)) if token else None
+    if not user:
+        return JSONResponse({"detail": "请先登录"}, status_code=401)
+    if user.get("disabled"):
+        return JSONResponse({"detail": "账号已被禁用"}, status_code=403)
+    if path.startswith(_ADMIN_PREFIXES) and user.get("role") != "admin":
+        return JSONResponse({"detail": "仅管理员可执行此操作"}, status_code=403)
+    request.state.user = user
+    return await call_next(request)
+
+
+def _user(request: Request) -> dict[str, Any]:
+    return getattr(request.state, "user", None) or auth.current_user(request)
+
+
+def _admin(request: Request) -> dict[str, Any]:
+    u = _user(request)
+    if u.get("role") != "admin":
+        raise HTTPException(403, "仅管理员可执行此操作")
+    return u
+
+
+# ---------------------------------------------------------------- API: auth
+
+@app.post("/api/auth/login")
+async def login(request: Request):
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    user = db.get_user_by_name(username)
+    if not user or not auth.verify_password(password, user["password_hash"]):
+        raise HTTPException(401, "用户名或密码错误")
+    if user.get("disabled"):
+        raise HTTPException(403, "账号已被禁用")
+    resp = JSONResponse({"ok": True, "user": {
+        "id": user["id"], "username": user["username"],
+        "role": user["role"], "display_name": user.get("display_name", ""),
+    }})
+    auth.issue_login(resp, user["id"])
+    return resp
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request):
+    token = request.cookies.get(auth.COOKIE_NAME, "")
+    if token:
+        db.delete_session(auth._token_hash(token))
+    resp = JSONResponse({"ok": True})
+    auth.clear_login(resp)
+    return resp
+
+
+@app.get("/api/auth/me")
+def me(request: Request):
+    u = _user(request)
+    return {"id": u["id"], "username": u["username"], "role": u["role"],
+            "display_name": u.get("display_name", "")}
+
+
+# ---------------------------------------------------------------- API: admin
+
+@app.get("/api/admin/users")
+def admin_list_users(request: Request):
+    _admin(request)
+    return db.list_users()
+
+
+@app.post("/api/admin/users")
+async def admin_create_user(request: Request):
+    _admin(request)
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+    role = body.get("role") if body.get("role") in ("admin", "user") else "user"
+    if not username or not password:
+        raise HTTPException(400, "用户名和密码不能为空")
+    if db.get_user_by_name(username):
+        raise HTTPException(409, "用户名已存在")
+    user = db.create_user(username, auth.hash_password(password), role,
+                          (body.get("display_name") or "").strip())
+    log_event("action", f"创建用户「{username}」({role})")
+    return {k: user[k] for k in ("id", "username", "role", "display_name", "disabled")}
+
+
+@app.put("/api/admin/users/{uid}")
+async def admin_update_user(uid: str, request: Request):
+    _admin(request)
+    target = db.get_user(uid)
+    if not target:
+        raise HTTPException(404, "用户不存在")
+    body = await request.json()
+    if "disabled" in body:
+        db.set_user_disabled(uid, bool(body["disabled"]))
+        if body["disabled"]:
+            db.delete_sessions_for_user(uid)  # kick out immediately
+    if "role" in body:
+        role = body["role"]
+        if role not in ("admin", "user"):
+            raise HTTPException(400, "角色无效")
+        if target["username"] == auth.admin_username() and role != "admin":
+            raise HTTPException(400, "不能降级内置管理员")
+        db.set_user_role(uid, role)
+    if "display_name" in body:
+        with db.transaction() as conn:
+            conn.execute("UPDATE users SET display_name = ? WHERE id = ?",
+                         (str(body["display_name"]), uid))
+    if body.get("password"):
+        db.set_user_password(uid, auth.hash_password(body["password"]))
+        db.delete_sessions_for_user(uid)
+    log_event("action", f"更新用户「{target['username']}」")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/users/{uid}")
+def admin_delete_user(uid: str, request: Request):
+    _admin(request)
+    target = db.get_user(uid)
+    if not target:
+        raise HTTPException(404, "用户不存在")
+    if target["username"] == auth.admin_username():
+        raise HTTPException(400, "不能删除内置管理员")
+    db.delete_user(uid)
+    log_event("action", f"删除用户「{target['username']}」")
+    return {"ok": True}
+
+
+@app.get("/api/admin/courses/{cid}/grants")
+def admin_get_grants(cid: str, request: Request):
+    _admin(request)
+    return {"grantees": db.course_grantees(cid)}
+
+
+@app.post("/api/admin/courses/{cid}/grants")
+async def admin_grant_course(cid: str, request: Request):
+    _admin(request)
+    if not course_dir(cid).exists():
+        raise HTTPException(404, "课程不存在")
+    body = await request.json()
+    uid = body.get("user_id", "")
+    if not db.get_user(uid):
+        raise HTTPException(404, "用户不存在")
+    db.grant_course(cid, uid)
+    log_event("action", f"分配课程「{cid}」给用户", course_id=cid)
+    return {"ok": True}
+
+
+@app.delete("/api/admin/courses/{cid}/grants/{uid}")
+def admin_revoke_course(cid: str, uid: str, request: Request):
+    _admin(request)
+    db.revoke_course(cid, uid)
+    log_event("action", f"撤销课程「{cid}」的用户授权", course_id=cid)
+    return {"ok": True}
+
+
+@app.get("/api/admin/settings")
+def admin_get_settings(request: Request):
+    _admin(request)
+    return {"allow_user_generate": db.get_setting("allow_user_generate", "1") == "1"}
+
+
+@app.put("/api/admin/settings")
+async def admin_put_settings(request: Request):
+    _admin(request)
+    body = await request.json()
+    if "allow_user_generate" in body:
+        db.set_setting("allow_user_generate", "1" if body["allow_user_generate"] else "0")
+    log_event("action", f"更新设置：允许普通用户生成 = {db.get_setting('allow_user_generate', '1')}")
+    return {"ok": True}
+
 
 # ---------------------------------------------------------------- config
 
@@ -70,11 +276,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # global model pool: {provider_id: [models]} — which models of which
     # provider are available at all; the per-role lists pick from this pool
     "global_models": {},
-    # ASR engine: "chat" = segmented chat transcription (existing flow),
-    # "filetrans" = Aliyun async file transcription (native timestamps)
+    # ASR engine: segmented chat transcription
     "asr_engine": "chat",
-    "filetrans_public_base": "",  # public base URL exposing GET /ft/<file>
-    "filetrans_model": "qwen-audio-3.1-asr-flash-filetrans",
     # pipeline tuning
     "ocr_workers": 6,             # concurrent OCR frame recognitions
     "ocr_interval": 1.0,          # silent-stretch sweep interval in seconds
@@ -165,10 +368,25 @@ def mask_key(key: str) -> str:
 
 def _masked_config(cfg: dict[str, Any]) -> dict[str, Any]:
     out = dict(cfg)
-    out["providers"] = [
-        {**p, "api_key": mask_key(p.get("api_key", ""))} for p in cfg.get("providers", [])
-    ]
-    out["has_key"] = any(p.get("api_key") for p in cfg.get("providers", []))
+    masked_providers = []
+    for p in cfg.get("providers", []):
+        item = {**p, "api_key": mask_key(p.get("api_key", ""))}
+        if item.get("secret_key"):      # Tencent credential — never leave the box
+            item["secret_key"] = mask_key(item["secret_key"])
+        masked_providers.append(item)
+    out["providers"] = masked_providers
+    out["has_key"] = any(
+        p.get("api_key") or p.get("secret_key") for p in cfg.get("providers", [])
+    )
+    # capability tags for every model the user has already selected, so the UI
+    # can label them on load without re-fetching the provider's model list
+    from pipeline.model_kind import classify_many
+    known: set[str] = set()
+    for k in ("chat_models", "asr_models", "vision_models"):
+        known.update(m for m in (cfg.get(k) or []) if m)
+    for ms in (cfg.get("global_models") or {}).values():
+        known.update(m for m in (ms or []) if m)
+    out["model_caps"] = classify_many(sorted(known))
     # models that recently failed real calls, so the UI can flag them
     out["model_health"] = health_mod.snapshot()
     return out
@@ -186,10 +404,28 @@ class JobState:
 
 
 JOBS: dict[str, JobState] = {}
+JOBS_LOCK = threading.RLock()  # guards check-then-act on the job registry
 
 
 def course_dir(cid: str) -> Path:
     return COURSES_DIR / cid
+
+
+def _calibration_path(cid: str, uid: str) -> Path:
+    """Per-user calibration file: corrections stay private to each learner."""
+    return course_dir(cid) / f"calibration_{uid}.json"
+
+
+def _load_calibration(cid: str, uid: str) -> dict[str, Any]:
+    cal = read_json(_calibration_path(cid, uid), {}) or {}
+    # one-time migration: legacy shared calibration belongs to the bootstrap admin
+    if not cal and _BOOTSTRAP_ADMIN and uid == _BOOTSTRAP_ADMIN["id"]:
+        legacy = course_dir(cid) / "calibration.json"
+        if legacy.exists():
+            cal = read_json(legacy, {}) or {}
+            if cal:
+                write_json(_calibration_path(cid, uid), cal)
+    return cal
 
 
 def read_json(path: Path, default: Any = None) -> Any:
@@ -386,12 +622,27 @@ async def put_config(request: Request):
             # masked or empty key -> keep the stored one
             if "*" in key or not key:
                 key = stored.get(pid, {}).get("api_key", "")
-            incoming.append({
+            entry = {
                 "id": pid,
                 "name": p.get("name", "未命名"),
                 "base_url": p.get("base_url", ""),
                 "api_key": key,
-            })
+            }
+            # Tencent-style providers carry signed-credential fields instead of
+            # a bearer token; preserve them (and keep stored secrets when the
+            # UI sends back a masked/blank value).
+            if (p.get("kind") or "openai") == "tencent":
+                prev = stored.get(pid, {})
+                entry["kind"] = "tencent"
+                for f in ("secret_id", "app_id", "region", "engine"):
+                    entry[f] = p.get(f) or prev.get(f, "")
+                sk = p.get("secret_key", "")
+                if "*" in sk or not sk:
+                    sk = prev.get("secret_key", "")
+                entry["secret_key"] = sk
+            else:
+                entry["kind"] = "openai"
+            incoming.append(entry)
         cfg["providers"] = incoming
         live_ids = {p["id"] for p in incoming}
         if cfg.get("asr_provider") not in live_ids:
@@ -400,7 +651,7 @@ async def put_config(request: Request):
             cfg["chat_provider"] = incoming[-1]["id"] if incoming else ""
     for k in ("asr_provider", "chat_provider", "vision_provider", "asr_model", "chat_model", "vision_model",
               "chat_models", "asr_models", "vision_models", "global_models", "align_base",
-              "asr_engine", "filetrans_public_base", "filetrans_model",
+              "asr_engine",
               "ocr_workers", "ocr_interval", "ocr_bottom_crop", "asr_workers", "translate_workers",
               "backup_enabled", "backup_time", "backup_keep", "backup_include_media"):
         if k in body:
@@ -440,7 +691,9 @@ async def list_models(provider_id: str = ""):
         ids = [m.get("id") for m in data if m.get("id")]
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"连接失败: {exc}")
-    return {"models": ids}
+    # tag each model with what it can do so the UI can show a capability chip
+    from pipeline.model_kind import classify_many
+    return {"models": ids, "caps": classify_many(ids)}
 
 
 
@@ -524,6 +777,23 @@ async def test_provider(request: Request):
     base = (body.get("base_url") or "").strip().rstrip("/")
     key = (body.get("api_key") or "").strip()
     pid = body.get("provider_id") or ""
+
+    # Tencent: verify the signed credentials instead of listing models
+    if (body.get("kind") or "") == "tencent":
+        from pipeline import tencent_asr
+        stored = next((p for p in load_config().get("providers", []) if p.get("id") == pid), None) or {}
+        sid = (body.get("secret_id") or "").strip()
+        sk = (body.get("secret_key") or "").strip()
+        if "*" in sid or not sid:
+            sid = stored.get("secret_id", "")
+        if "*" in sk or not sk:
+            sk = stored.get("secret_key", "")
+        if not sid or not sk:
+            return {"ok": False, "detail": "请填写 SecretId 与 SecretKey"}
+        region = body.get("region") or stored.get("region") or "ap-guangzhou"
+        ok, detail = await asyncio.to_thread(tencent_asr.test_connection, sid, sk, region)
+        return {"ok": ok, "count": 0, "detail": detail}
+
     if not base:
         return {"ok": False, "detail": "请填写 Base URL"}
     # masked / empty key -> fall back to the stored key for this provider
@@ -566,8 +836,18 @@ async def test_model(request: Request):
     pid = body.get("provider_id") or ""
     model = (body.get("model") or "").strip()
     kind = body.get("kind") or "chat"
+    # "auto" (or anything unknown) infers the type from the model name so the
+    # test button works for ASR models too — probing an ASR model through
+    # /chat/completions always returns "Model does not exist"
     if kind not in ("chat", "asr", "vision"):
-        kind = "chat"
+        from pipeline.model_kind import classify
+        info = classify(model)
+        if not info["testable"]:
+            return {"ok": False, "elapsed_ms": 0,
+                    "detail": f"该模型属于「{info['label']}」，无法用连通性测试验证"}
+        # multimodal models answer chat/completions, so probe them as chat
+        kind = "asr" if info["kind"] == "asr" else (
+            "vision" if info["kind"] == "vision" else "chat")
     cfg = load_config()
     prov = next((p for p in cfg.get("providers", []) if p.get("id") == pid), None)
     if prov is None:
@@ -586,16 +866,35 @@ async def test_model(request: Request):
             w.writeframes(b"\x00\x00" * int(rate * seconds))
         return base64.b64encode(buf.getvalue()).decode()
 
-    low = model.lower()
-    is_chat_audio = any(k in low for k in ("omni", "qwen-audio", "audio-chat", "gemini", "gpt-4o-audio"))
+    from pipeline.transcribe import _native_url, mode_for_model
+    asr_mode = mode_for_model(model)
 
     t0 = _time.time()
     ok, detail = False, ""
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             if kind == "asr":
-                wav_b64 = _silent_wav_b64()
-                if is_chat_audio:
+                if asr_mode == "native":
+                    # native ASR rejects synthetic audio (silence/tone -> HTTP 400
+                    # with an empty body), so probe with a tiny real-speech clip
+                    from pipeline.probe_audio import PROBE_AUDIO_B64, PROBE_FORMAT, PROBE_SAMPLE_RATE
+                    r = await client.post(
+                        _native_url(base),
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={
+                            "model": model,
+                            "input": {"messages": [{"role": "user", "content": [
+                                {"audio": f"data:audio/{PROBE_FORMAT};base64,{PROBE_AUDIO_B64}"},
+                            ]}]},
+                            "parameters": {"format": PROBE_FORMAT, "sample_rate": PROBE_SAMPLE_RATE},
+                        },
+                    )
+                    ok = r.status_code == 200 and isinstance((r.json() or {}).get("output"), dict)
+                    if ok:
+                        has_ts = "words" in ((r.json().get("output") or {}).get("sentence") or {})
+                        detail = "✓ 原生接口可用" + ("，返回逐词时间戳" if has_ts else "（无时间戳）")
+                elif asr_mode == "chat":
+                    wav_b64 = _silent_wav_b64()
                     r = await client.post(f"{base}/chat/completions", headers=headers, json={
                         "model": model, "max_tokens": 16,
                         "messages": [{"role": "user", "content": [
@@ -605,15 +904,40 @@ async def test_model(request: Request):
                     })
                     ok = r.status_code == 200 and "choices" in (r.json() if r.status_code == 200 else {})
                 else:
-                    raw = base64.b64decode(wav_b64)
+                    # whisper-style /audio/transcriptions. Send the real-speech
+                    # clip: some providers reject pure silence, and a text-only
+                    # response still proves the endpoint works.
+                    from pipeline.probe_audio import (
+                        PROBE_AUDIO_B64, PROBE_FORMAT, PROBE_SAMPLE_RATE,
+                    )
+                    import base64 as _b64
+                    raw = _b64.b64decode(PROBE_AUDIO_B64)
                     r = await client.post(
                         f"{base}/audio/transcriptions", headers=headers,
-                        files={"file": ("probe.wav", raw, "audio/wav")},
-                        data={"model": model},
+                        files={"file": (f"probe.{PROBE_FORMAT}", raw, f"audio/{PROBE_FORMAT}")},
+                        data={"model": model, "response_format": "json"},
                     )
                     ok = r.status_code == 200
+                    if ok:
+                        try:
+                            txt = (r.json() or {}).get("text", "")
+                        except Exception:  # noqa: BLE001
+                            txt = r.text
+                        detail = f"✓ 可用（返回 {len(str(txt))} 字符）"
                 if not ok:
-                    detail = f"HTTP {r.status_code}: {r.text[:200]}"
+                    body_txt = r.text.strip()
+                    detail = f"HTTP {r.status_code}: {body_txt[:200]}"
+                    if r.status_code == 400 and body_txt in ("", "{}"):
+                        detail = ("HTTP 400（空错误体）：该模型在当前工作空间不可调用。"
+                                  f"当前模型 {model} 按 {asr_mode} 模式调用失败，"
+                                  "请确认模型名与该业务空间地域匹配。")
+                    elif r.status_code == 403:
+                        detail = (f"HTTP 403：API Key 无此模型权限，或该模型的免费额度已用尽"
+                                  f"（{body_txt[:150]}）")
+                    elif r.status_code == 404:
+                        detail = f"HTTP 404：模型不存在或未开通（{r.text[:150]}）"
+                    elif r.status_code == 403:
+                        detail = f"HTTP 403：API Key 无此模型权限（{r.text[:150]}）"
             elif kind == "vision":
                 # 1x1 red pixel PNG
                 png = base64.b64decode(
@@ -645,28 +969,6 @@ async def test_model(request: Request):
     except Exception:  # noqa: BLE001
         pass
     return {"ok": ok, "elapsed_ms": elapsed, "detail": detail}
-
-
-# ---------------------------------------------------------------- filetrans public file serving
-
-FILETRANS_TMP = DATA_DIR / "filetrans-tmp"
-_FILETRANS_NAME_RE = re.compile(r"^[0-9a-f]{12}\.(mp4|wav)$")
-
-
-@app.get("/ft/{name}")
-def filetrans_public_file(name: str):
-    """Public, unauthenticated file endpoint for the filetrans channel.
-
-    Aliyun's transcription worker needs to fetch the audio from a public URL;
-    files here are uuid-named (unguessable) and deleted after transcription.
-    """
-    if not _FILETRANS_NAME_RE.match(name):
-        raise HTTPException(404, "Not Found")
-    f = FILETRANS_TMP / name
-    if not f.exists():
-        raise HTTPException(404, "Not Found")
-    media_type = "video/mp4" if name.endswith(".mp4") else "audio/wav"
-    return FileResponse(f, media_type=media_type)
 
 
 # ---------------------------------------------------------------- API: backup
@@ -837,20 +1139,24 @@ def material_payload(mat: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.get("/api/materials")
-def list_materials():
+def list_materials(request: Request):
+    user = _user(request)
+    mine = db.owned_material_ids(user["id"])
     items = []
     for mdir in sorted(MATERIALS_DIR.iterdir(), reverse=True):
         if not mdir.is_dir():
             continue
-        mat = read_json(mdir / "material.json") or {}
-        if not mat:
-            continue
-        items.append(material_payload(mat))
+        # non-admin sees only materials they uploaded
+        if auth.is_admin(user) or mdir.name in mine:
+            mat = read_json(mdir / "material.json") or {}
+            if mat:
+                items.append(material_payload(mat))
     return items
 
 
 @app.post("/api/materials/upload")
-async def material_upload(file: UploadFile = File(...)):
+async def material_upload(request: Request, file: UploadFile = File(...)):
+    user = _user(request)
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXT:
         raise HTTPException(400, f"不支持的文件类型: {ext}")
@@ -858,8 +1164,11 @@ async def material_upload(file: UploadFile = File(...)):
     mdir = material_dir(mid)
     mdir.mkdir(parents=True)
     dest = mdir / f"media{ext}"
-    with dest.open("wb") as fh:
-        shutil.copyfileobj(file.file, fh)
+    try:
+        _copy_upload_limited(file.file, dest)
+    except Exception:
+        shutil.rmtree(mdir, ignore_errors=True)
+        raise
     kind = "audio" if ext in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"} else "video"
     title = Path(file.filename or mid).stem
     write_json(mdir / "material.json", {
@@ -871,6 +1180,7 @@ async def material_upload(file: UploadFile = File(...)):
         "source_url": "",
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
+    db.set_material_owner(mid, user["id"])
     log_event("material", f"上传素材「{title}」", detail=f"{file.filename} ({kind})")
     return {"id": mid, "title": title, "kind": kind}
 
@@ -878,6 +1188,7 @@ async def material_upload(file: UploadFile = File(...)):
 @app.post("/api/materials/import")
 async def material_import(request: Request):
     """Import a material from a share URL (douyin etc.): download only."""
+    user = _user(request)
     body = await request.json()
     url = (body.get("url") or "").strip()
     if not url:
@@ -895,6 +1206,7 @@ async def material_import(request: Request):
         "status": "downloading",
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
+    db.set_material_owner(mid, user["id"])
     threading.Thread(target=_download_material, args=(mid, url), daemon=True).start()
     log_event("material", f"链接导入素材", detail=url)
     return {"id": mid, "title": url}
@@ -939,6 +1251,9 @@ def _download_material(mid: str, url: str) -> None:
 
 @app.post("/api/materials/{mid}/rename")
 async def material_rename(mid: str, request: Request):
+    user = _user(request)
+    if not auth.can_view_material(user, mid):
+        raise HTTPException(403, "无权访问该素材")
     mdir = material_dir(mid)
     if not mdir.exists():
         raise HTTPException(404, "素材不存在")
@@ -958,7 +1273,10 @@ async def material_rename(mid: str, request: Request):
 
 
 @app.delete("/api/materials/{mid}")
-def material_delete(mid: str):
+def material_delete(mid: str, request: Request):
+    user = _user(request)
+    if not auth.can_view_material(user, mid):
+        raise HTTPException(403, "无权访问该素材")
     mdir = material_dir(mid)
     mat = read_json(mdir / "material.json", {}) or {}
     course_id = mat.get("course_id", "")
@@ -968,6 +1286,7 @@ def material_delete(mid: str):
     # also clean legacy media if it lives there
     for f in MEDIA_DIR.glob(f"{mid}.*"):
         f.unlink(missing_ok=True)
+    db.delete_material_owner(mid)
     log_event("material", f"删除素材「{mat.get('title', mid)}」")
     return {"ok": True}
 
@@ -979,6 +1298,11 @@ def material_generate(mid: str, request: Request = None):
     Body (optional JSON): {"channels": ["embedded","ocr","asr"]} — at least one.
     Defaults to all three; the choice is remembered on the material.
     """
+    user = _user(request)
+    if not auth.can_view_material(user, mid):
+        raise HTTPException(403, "无权访问该素材")
+    if not auth.can_generate(user):
+        raise HTTPException(403, "管理员已关闭普通用户生成权限")
     body = {}
     if request is not None:
         try:
@@ -1032,15 +1356,13 @@ def material_generate(mid: str, request: Request = None):
             # unless the user deleted that course first (kept as guard)
         else:
             mat["course_id"] = ""  # stale link to a deleted course — clean it
-    if any(getattr(j, "stage_lock", "") == mid for j in JOBS.values()):
-        raise HTTPException(409, "该素材已有课程正在生成中")
+    with JOBS_LOCK:
+        if any(getattr(j, "stage_lock", "") == mid for j in JOBS.values()):
+            raise HTTPException(409, "该素材已有课程正在生成中")
     cfg = load_config()
     if not cfg.get("providers"):
         raise HTTPException(400, "请先在模型配置页配置 API")
-    if "asr" in channels and (cfg.get("asr_engine") or "chat") == "filetrans":
-        if not cfg.get("filetrans_public_base"):
-            raise HTTPException(400, "转写方式为 filetrans，但公网地址未配置（转写设置）")
-    elif "asr" in channels and not get_provider_cfg(cfg, "asr").get("base_url"):
+    if "asr" in channels and not get_provider_cfg(cfg, "asr").get("base_url"):
         raise HTTPException(400, "转写 provider 未配置")
     if not get_provider_cfg(cfg, "chat").get("base_url"):
         raise HTTPException(400, "Chat provider 未配置")
@@ -1063,12 +1385,18 @@ def material_generate(mid: str, request: Request = None):
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     write_json(cdir / "status.json", {"stage": "uploaded", "detail": "已创建，等待生成", "progress": 0})
+    # grant: owner (or admin if generating on someone else's material) + admin
+    db.grant_course(cid, user["id"])
+    if not auth.is_admin(user):
+        admin_user = db.get_user_by_name(auth.admin_username())
+        if admin_user:
+            db.grant_course(cid, admin_user["id"])
     mat["course_id"] = cid
     mat["last_channels"] = sorted(channels)   # remember for next time
     mat["last_align_base"] = align_base
     write_json(mdir / "material.json", mat)
     JOBS[cid] = JobState(stage_lock=mid)
-    tmo = 4 * 3600 if (cfg.get("asr_engine") or "chat") == "filetrans" else 7200
+    tmo = 7200
     threading.Thread(target=run_pipeline, args=(cid,),
                      kwargs={"channels": channels, "align_base": align_base, "timeout_sec": tmo},
                      daemon=True).start()
@@ -1079,6 +1407,9 @@ def material_generate(mid: str, request: Request = None):
 @app.get("/media/{mid}/material")
 def media_material_file(mid: str, request: Request):
     """Stream a material's media file (Range supported)."""
+    user = _user(request)
+    if not auth.can_view_material(user, mid):
+        raise HTTPException(403, "无权访问该素材")
     mdir = material_dir(mid)
     mat = read_json(mdir / "material.json", {}) or {}
     media = find_media_file(mat)
@@ -1114,14 +1445,18 @@ def download_logs(category: str):
 # ---------------------------------------------------------------- API: courses
 
 @app.get("/api/courses")
-def list_courses():
+def list_courses(request: Request):
+    user = _user(request)
+    allowed = db.granted_course_ids(user["id"])
     items = []
     for cdir in sorted(COURSES_DIR.iterdir(), reverse=True):
         if not cdir.is_dir():
             continue
+        if not auth.is_admin(user) and cdir.name not in allowed:
+            continue
         meta = read_json(cdir / "meta.json", {}) or {}
         status = read_json(cdir / "status.json", {}) or {}
-        progress = read_json(cdir / "progress.json", {}) or {}
+        progress = _load_progress(cdir.name, user["id"])
         items.append({
             "id": cdir.name,
             "title": meta.get("title") or cdir.name,
@@ -1140,11 +1475,14 @@ def list_courses():
 
 
 @app.post("/api/courses/upload")
-async def upload(file: UploadFile = File(...)):
+async def upload(request: Request, file: UploadFile = File(...)):
     """Legacy direct-to-course upload (kept for compatibility).
 
     Stores the file as a material, then creates a course from it.
     """
+    user = _user(request)
+    if not auth.can_generate(user):
+        raise HTTPException(403, "管理员已关闭普通用户生成权限")
     ext = Path(file.filename or "").suffix.lower()
     if ext not in ALLOWED_EXT:
         raise HTTPException(400, f"不支持的文件类型: {ext}")
@@ -1152,8 +1490,11 @@ async def upload(file: UploadFile = File(...)):
     mdir = material_dir(mid)
     mdir.mkdir(parents=True)
     dest = mdir / f"media{ext}"
-    with dest.open("wb") as fh:
-        shutil.copyfileobj(file.file, fh)
+    try:
+        _copy_upload_limited(file.file, dest)
+    except Exception:
+        shutil.rmtree(mdir, ignore_errors=True)
+        raise
     kind = "audio" if ext in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"} else "video"
     title = Path(file.filename or mid).stem
     mat = {
@@ -1166,6 +1507,7 @@ async def upload(file: UploadFile = File(...)):
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     write_json(mdir / "material.json", mat)
+    db.set_material_owner(mid, user["id"])
     # create the course immediately (same as material_generate, without the API guards)
     cid = new_course_id()
     cdir = course_dir(cid)
@@ -1180,6 +1522,11 @@ async def upload(file: UploadFile = File(...)):
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
     write_json(cdir / "status.json", {"stage": "uploaded", "detail": "已上传，等待生成", "progress": 0})
+    db.grant_course(cid, user["id"])
+    if not auth.is_admin(user):
+        admin_user = db.get_user_by_name(auth.admin_username())
+        if admin_user:
+            db.grant_course(cid, admin_user["id"])
     mat["course_id"] = cid
     write_json(mdir / "material.json", mat)
     return {"id": cid, "title": title, "kind": kind}
@@ -1187,6 +1534,11 @@ async def upload(file: UploadFile = File(...)):
 
 @app.post("/api/courses/{cid}/generate")
 def generate(cid: str, request: Request = None):
+    user = _user(request)
+    if not auth.can_view_course(user, cid):
+        raise HTTPException(403, "无权访问该课程")
+    if not auth.can_generate(user):
+        raise HTTPException(403, "管理员已关闭普通用户生成权限")
     cdir = course_dir(cid)
     if not cdir.exists():
         raise HTTPException(404, "课程不存在")
@@ -1196,12 +1548,7 @@ def generate(cid: str, request: Request = None):
     cfg = load_config()
     if not cfg.get("providers"):
         raise HTTPException(400, "请先在设置页配置 API")
-    # filetrans mode doesn't need an ASR provider — it validates its own
-    # public base here and its keys at transcription time
-    filetrans_mode = (cfg.get("asr_engine") or "chat") == "filetrans"
-    if filetrans_mode and not cfg.get("filetrans_public_base"):
-        raise HTTPException(400, "转写方式为 filetrans，但公网地址未配置（转写设置）")
-    if not filetrans_mode and not get_provider_cfg(cfg, "asr").get("base_url"):
+    if not get_provider_cfg(cfg, "asr").get("base_url"):
         raise HTTPException(400, "转写 provider 未配置")
     if not get_provider_cfg(cfg, "chat").get("base_url"):
         raise HTTPException(400, "Chat provider 未配置")
@@ -1249,7 +1596,7 @@ def generate(cid: str, request: Request = None):
         status["detail"] = "准备生成…"
         write_json(cdir / "status.json", status)
         JOBS[cid] = JobState()
-        tmo = 4 * 3600 if (cfg.get("asr_engine") or "chat") == "filetrans" else 7200
+        tmo = 7200
         threading.Thread(target=run_pipeline, args=(cid,),
                          kwargs={"channels": channels, "align_base": align_base, "timeout_sec": tmo},
                          daemon=True).start()
@@ -1258,7 +1605,10 @@ def generate(cid: str, request: Request = None):
 
 
 @app.post("/api/courses/{cid}/cancel")
-def cancel(cid: str):
+def cancel(cid: str, request: Request):
+    user = _user(request)
+    if not auth.can_view_course(user, cid):
+        raise HTTPException(403, "无权访问该课程")
     job = JOBS.get(cid)
     if job:
         job.cancelled = True
@@ -1274,13 +1624,16 @@ def cancel(cid: str):
 
 
 @app.get("/api/courses/{cid}")
-def get_course(cid: str):
+def get_course(cid: str, request: Request):
+    user = _user(request)
+    if not auth.can_view_course(user, cid):
+        raise HTTPException(403, "无权访问该课程")
     cdir = course_dir(cid)
     if not cdir.exists():
         raise HTTPException(404, "课程不存在")
     meta = read_json(cdir / "meta.json", {}) or {}
     status = read_json(cdir / "status.json", {}) or {}
-    cal = read_json(cdir / "calibration.json", {}) or {}
+    cal = _load_calibration(cid, user["id"])
     return {
         "meta": meta,
         "status": status,
@@ -1295,7 +1648,10 @@ def get_course(cid: str):
 
 
 @app.delete("/api/courses/{cid}")
-def delete_course(cid: str):
+def delete_course(cid: str, request: Request):
+    user = _user(request)
+    if not auth.can_view_course(user, cid):
+        raise HTTPException(403, "无权访问该课程")
     cdir = course_dir(cid)
     if not cdir.exists():
         raise HTTPException(404, "课程不存在")
@@ -1315,6 +1671,7 @@ def delete_course(cid: str):
     if not mid:
         for f in MEDIA_DIR.glob(f"{cid}.*"):
             f.unlink(missing_ok=True)
+    db.delete_course_grants(cid)
     log_event("action", f"删除课程「{meta.get('title', cid)}」", course_id=cid)
     return {"ok": True}
 
@@ -1322,10 +1679,13 @@ def delete_course(cid: str):
 # ---------------------------------------------------------------- API: calibration
 
 @app.get("/api/courses/{cid}/calibration")
-def get_calibration(cid: str):
+def get_calibration(cid: str, request: Request):
+    user = _user(request)
+    if not auth.can_view_course(user, cid):
+        raise HTTPException(403, "无权访问该课程")
     if not course_dir(cid).exists():
         raise HTTPException(404, "课程不存在")
-    cal = read_json(course_dir(cid) / "calibration.json", {}) or {}
+    cal = _load_calibration(cid, user["id"])
     return {
         "global_offset": cal.get("global_offset", 0.0),
         "overrides": cal.get("overrides", {}),      # sentenceId(str) -> {start, end}
@@ -1335,6 +1695,9 @@ def get_calibration(cid: str):
 
 @app.post("/api/courses/{cid}/calibration")
 async def post_calibration(cid: str, request: Request):
+    user = _user(request)
+    if not auth.can_view_course(user, cid):
+        raise HTTPException(403, "无权访问该课程")
     if not course_dir(cid).exists():
         raise HTTPException(404, "课程不存在")
     body = await request.json()
@@ -1344,23 +1707,45 @@ async def post_calibration(cid: str, request: Request):
         "text_edits": body.get("text_edits", {}),   # manual sentence text corrections
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    write_json(course_dir(cid) / "calibration.json", cal)
+    write_json(_calibration_path(cid, user["id"]), cal)
     return {"ok": True}
 
 
 # ---------------------------------------------------------------- API: progress
 
+def _progress_path(cid: str, uid: str) -> Path:
+    """Per-user progress file: learning state never leaks across accounts."""
+    return course_dir(cid) / f"progress_{uid}.json"
+
+
+def _load_progress(cid: str, uid: str) -> dict[str, Any]:
+    prog = read_json(_progress_path(cid, uid), {}) or {}
+    if not prog and _BOOTSTRAP_ADMIN and uid == _BOOTSTRAP_ADMIN["id"]:
+        legacy = course_dir(cid) / "progress.json"
+        if legacy.exists():
+            prog = read_json(legacy, {}) or {}
+            if prog:
+                write_json(_progress_path(cid, uid), prog)
+    return prog
+
+
 @app.get("/api/courses/{cid}/progress")
-def get_progress(cid: str):
-    return read_json(course_dir(cid) / "progress.json", {}) or {}
+def get_progress(cid: str, request: Request):
+    user = _user(request)
+    if not auth.can_view_course(user, cid):
+        raise HTTPException(403, "无权访问该课程")
+    return _load_progress(cid, user["id"])
 
 
 @app.post("/api/courses/{cid}/progress")
 async def post_progress(cid: str, request: Request):
+    user = _user(request)
+    if not auth.can_view_course(user, cid):
+        raise HTTPException(403, "无权访问该课程")
     if not course_dir(cid).exists():
         raise HTTPException(404, "课程不存在")
     body = await request.json()
-    write_json(course_dir(cid) / "progress.json", body)
+    write_json(_progress_path(cid, user["id"]), body)
     return {"ok": True}
 
 
@@ -1409,6 +1794,9 @@ def _stream_media(media_path: Path, request: Request):
 
 @app.get("/media/{cid}/file")
 def media_file(cid: str, request: Request):
+    user = _user(request)
+    if not auth.can_view_course(user, cid):
+        raise HTTPException(403, "无权访问该课程")
     cdir = course_dir(cid)
     if not cdir.exists():
         raise HTTPException(404, "课程不存在")

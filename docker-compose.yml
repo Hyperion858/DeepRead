@@ -4,9 +4,11 @@ services:
     build: .
     container_name: deepread
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - TZ=Asia/Shanghai
+      - DEEPREAD_ADMIN_USER=Jeffrey
+      - DEEPREAD_ADMIN_PASSWORD=123456
     volumes:
       - ./data:/app/data
     restart: unless-stopped

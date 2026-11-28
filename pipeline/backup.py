@@ -4,6 +4,7 @@ restored deployment can prompt for re-upload and match by name."""
 from __future__ import annotations
 
 import json
+import re
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,12 @@ def create_backup(data_dir: Path, backups_dir: Path, note: str = "",
         config = data_dir / "config.json"
         if config.exists():
             zf.write(config, "config.json")
+        # auth database (users / grants / settings) as a JSON snapshot
+        try:
+            from db import export_for_backup
+            zf.writestr("deepread_users.json", json.dumps(export_for_backup(), ensure_ascii=False, indent=2))
+        except Exception:
+            pass
         # courses
         for cdir in sorted((data_dir / "courses").iterdir()):
             if not cdir.is_dir():
@@ -129,12 +136,27 @@ def restore_backup(data_dir: Path, archive: Path) -> dict[str, Any]:
         names = zf.namelist()
         if "backup_info.json" not in names:
             raise ValueError("不是有效的 DeepRead 备份文件")
+        # security: reject path traversal / absolute paths before any write
+        _NAME_RE = re.compile(r"^(config\.json|backup_info\.json|media_manifest\.json|deepread_users\.json|"
+                              r"(courses|materials|media)/[A-Za-z0-9_-]+/[\w.-]+|"
+                              r"media/[\w.-]+)$")
+        for n in names:
+            if n.endswith("/") or ".." in n or n.startswith("/") or "\\" in n or not _NAME_RE.match(n):
+                raise ValueError(f"备份包含非法路径: {n[:80]}")
         # config
         if "config.json" in names:
             tmp = data_dir / "config.json.tmp"
             tmp.write_bytes(zf.read("config.json"))
             tmp.replace(data_dir / "config.json")
             result["config"] = True
+        # users / grants / settings
+        if "deepread_users.json" in names:
+            try:
+                from db import import_from_backup
+                import_from_backup(json.loads(zf.read("deepread_users.json")))
+                result["users"] = True
+            except Exception:
+                pass
         # courses
         course_dirs = set()
         for n in names:

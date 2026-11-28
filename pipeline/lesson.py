@@ -157,13 +157,16 @@ def audio_transcribe_with_failover(
     prompt: str | None = None,
     response_format: str = "verbose_json",
 ) -> tuple[list[dict[str, Any]], str]:
-    """Transcribe one audio segment, walking ASR model candidates on dead-model errors.
+    """Transcribe one audio segment, walking ASR model candidates.
 
-    Tries chat-mode (input_audio) and transcriptions endpoint per model
-    depending on the model name. Returns (segments, model_used).
+    Delegates dispatch (native / chat / api) to pipeline.transcribe so the
+    mode logic lives in exactly one place. A model is skipped only when the
+    error looks like a dead model; anything else aborts immediately so a real
+    problem is not silently masked by failover.
     """
-    import base64 as _base64
     import httpx as _httpx
+
+    from pipeline.transcribe import _transcribe_segment, mode_for_model
 
     prov = _resolve_provider(cfg, "asr_provider")
     base = prov.get("base_url", "").rstrip("/")
@@ -171,142 +174,24 @@ def audio_transcribe_with_failover(
     if not base:
         raise RuntimeError("转写 provider 未配置")
 
-    from pipeline.transcribe import detect_lang, probe_duration
-    import re as _re
-
-    data = part_path.read_bytes()
-    fmt = "mp3" if part_path.suffix.lower() == ".mp3" else "wav"
-    b64 = _base64.b64encode(data).decode()
-    offset = 0.0  # caller passes offset via part metadata; kept 0 and caller re-offsets
-
     errors: list[str] = []
     for model in ordered_models(cfg, "asr_model", "asr", "asr_models"):
-        low = model.lower()
+        mode = mode_for_model(model)
         try:
-            if any(k in low for k in ("omni", "qwen-audio", "gemini", "gpt-4o-audio")):
-                # chat-mode transcription
-                r = _httpx.post(
-                    f"{base}/chat/completions",
-                    headers={"Authorization": f"Bearer {key}"},
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": [
-                            {"type": "text", "text": prompt or (
-                                "逐字转写这段音频。要求：按说话顺序输出，每句话单独一行；"
-                                "保留原始语言（中文说中文，英文说英文）；不要添加任何解释、总结或标注。"
-                            )},
-                            {"type": "input_audio", "input_audio": {"data": f"data:audio/{fmt};base64,{b64}", "format": fmt}},
-                        ]}],
-                        "max_tokens": 8000,
-                        "temperature": 0,
-                    },
-                    timeout=httpx.Timeout(connect=15, read=300, write=120, pool=15),
-                )
-                if r.status_code != 200:
-                    errors.append(f"{model}: {r.status_code} {r.text[:120]}")
-                    note_model_result(prov.get("id", ""), model, False, f"HTTP {r.status_code}: {r.text[:120]}")
-                    if not _is_model_dead(r.text):
-                        raise RuntimeError(errors[-1])
-                    continue
-                payload = r.json()
-                if not isinstance(payload, dict) or "choices" not in payload:
-                    # 200 but no chat payload — DashScope realtime / relay quirk.
-                    # Surface the body so the error log says WHY, not just 'choices'.
-                    body_snip = (r.text or "")[:160]
-                    errors.append(f"{model}: 响应缺少 choices: {body_snip}")
-                    note_model_result(prov.get("id", ""), model, False, f"响应缺少 choices: {body_snip}")
-                    continue
-                content = payload["choices"][0]["message"]["content"].strip()
-                note_model_result(prov.get("id", ""), model, True)
-                if not content:
-                    return [], model
-                lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
-                lines = [_re.sub(r"^[-*\d.、)\s]+", "", ln) or ln for ln in lines]
-                part_dur = probe_duration(part_path)
-                # omni models sometimes truncate: a 60s part answered with 1-2
-                # lines. One immediate retry — the flakiness is per-call — then
-                # accept whatever we got (capped spread) rather than fail the
-                # whole course over a flaky model.
-                if len(lines) <= 2 and part_dur > 25.0:
-                    r2 = _httpx.post(
-                        f"{base}/chat/completions",
-                        headers={"Authorization": f"Bearer {key}"},
-                        json={
-                            "model": model,
-                            "messages": [{"role": "user", "content": [
-                                {"type": "text", "text": prompt or (
-                                    "逐字转写这段音频。要求：按说话顺序输出，每句话单独一行；"
-                                    "保留原始语言（中文说中文，英文说英文）；不要添加任何解释、总结或标注。"
-                                )},
-                                {"type": "input_audio", "input_audio": {"data": f"data:audio/{fmt};base64,{b64}", "format": fmt}},
-                            ]}],
-                            "max_tokens": 8000,
-                            "temperature": 0,
-                        },
-                        timeout=httpx.Timeout(connect=15, read=300, write=120, pool=15),
-                    )
-                    if r2.status_code == 200:
-                        try:
-                            c2 = r2.json()["choices"][0]["message"]["content"].strip()
-                            l2 = [ln.strip() for ln in c2.splitlines() if ln.strip()]
-                            l2 = [_re.sub(r"^[-*\d.、)\s]+", "", ln) or ln for ln in l2]
-                            if len(l2) > len(lines):
-                                lines, content = l2, c2
-                        except Exception:  # noqa: BLE001 — keep first attempt
-                            pass
-                # spread lines evenly, capped: naive spreading stretched a
-                # truncated single line across the whole 60s part and blew the
-                # timeline into "52-minute" ghosts. 15s ≈ max speech run.
-                dur_per = min(part_dur / max(len(lines), 1), 15.0)
-                segs = []
-                t = 0.0
-                for ln in lines:
-                    segs.append({"start": t, "end": t + dur_per, "text": ln,
-                                 "lang": detect_lang(ln), "source": "asr"})
-                    t += dur_per
-                return segs, model
-            else:
-                # whisper-style endpoint
-                with part_path.open("rb") as fh:
-                    r = _httpx.post(
-                        f"{base}/audio/transcriptions",
-                        headers={"Authorization": f"Bearer {key}"},
-                        files={"file": (part_path.name, fh, "audio/wav")},
-                        data={"model": model, "response_format": response_format},
-                        timeout=httpx.Timeout(connect=15, read=300, write=120, pool=15),
-                    )
-                if r.status_code != 200:
-                    errors.append(f"{model}: {r.status_code} {r.text[:120]}")
-                    note_model_result(prov.get("id", ""), model, False, f"HTTP {r.status_code}: {r.text[:120]}")
-                    if not _is_model_dead(r.text):
-                        raise RuntimeError(errors[-1])
-                    continue
-                try:
-                    payload = r.json()
-                except ValueError:
-                    payload = None
-                note_model_result(prov.get("id", ""), model, True)
-                segs = []
-                if isinstance(payload, dict) and isinstance(payload.get("segments"), list):
-                    for seg in payload["segments"]:
-                        text = (seg.get("text") or "").strip()
-                        if text:
-                            segs.append({"start": float(seg.get("start", 0)), "end": float(seg.get("end", 0)),
-                                         "text": text, "lang": detect_lang(text), "source": "asr"})
-                else:
-                    text = (r.text or "").strip()
-                    if text:
-                        part_dur = probe_duration(part_path)
-                        segs = [{"start": 0.0, "end": part_dur, "text": text,
-                                 "lang": detect_lang(text), "source": "asr"}]
-                return segs, model
-        except RuntimeError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{model}: {exc}")
-            note_model_result(prov.get("id", ""), model, False, str(exc)[:120])
+            with _httpx.Client(
+                timeout=_httpx.Timeout(connect=15, read=300, write=120, pool=15)
+            ) as client:
+                # offset 0: the caller re-offsets every segment afterwards
+                segs = _transcribe_segment(client, base, key, model, part_path, 0.0, None, mode)
+            note_model_result(prov.get("id", ""), model, True)
+            return segs, model
+        except Exception as exc:  # noqa: BLE001 — record and try the next model
+            msg = str(exc)
+            errors.append(f"{model}: {msg}")
+            note_model_result(prov.get("id", ""), model, False, msg[:120])
+            if not _is_model_dead(msg):
+                raise RuntimeError(errors[-1])
     raise RuntimeError("所有转写模型均失败: " + " | ".join(errors[-3:]))
-
 
 def ocr_with_failover(
     cfg: dict[str, Any],
